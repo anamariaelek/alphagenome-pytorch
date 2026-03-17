@@ -12,6 +12,10 @@ from alphagenome_pytorch.extensions.finetuning.training import (
     ProfilingStats, train_epoch_ddp, validate_ddp,
     train_epoch_multihead, validate_multihead,
 )
+from alphagenome_pytorch.extensions.finetuning.heads import (
+    create_splice_classification_finetuning_head,
+    create_splice_usage_finetuning_head,
+)
 from alphagenome_pytorch.extensions.finetuning.transfer import TransferConfig
 
 # Distributed utilities
@@ -40,6 +44,22 @@ if TYPE_CHECKING:
         collate_multimodal,
         compute_track_means,
     )
+    from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
+        SpliceSiteAnnotation,
+        SpliceSiteUsageIndex,
+        SpliceSiteDataset,
+        collate_splice,
+    )
+    from alphagenome_pytorch.extensions.finetuning.splice_losses import (
+        splice_classification_loss,
+        splice_usage_loss,
+        compute_splice_class_weights,
+    )
+    from alphagenome_pytorch.extensions.finetuning.splice_training import (
+        SpliceTrainMetrics,
+        train_epoch_splice,
+        validate_splice,
+    )
 
 
 def __getattr__(name):
@@ -48,6 +68,28 @@ def __getattr__(name):
                 "compute_track_means", "MultimodalDataset", "collate_multimodal"):
         from alphagenome_pytorch.extensions.finetuning import datasets
         return getattr(datasets, name)
+    if name in (
+        "SpliceSiteAnnotation",
+        "SpliceSiteUsageIndex",
+        "SpliceSiteDataset",
+        "collate_splice",
+    ):
+        from alphagenome_pytorch.extensions.finetuning import splice_datasets
+        return getattr(splice_datasets, name)
+    if name in (
+        "splice_classification_loss",
+        "splice_usage_loss",
+        "compute_splice_class_weights",
+    ):
+        from alphagenome_pytorch.extensions.finetuning import splice_losses
+        return getattr(splice_losses, name)
+    if name in (
+        "SpliceTrainMetrics",
+        "train_epoch_splice",
+        "validate_splice",
+    ):
+        from alphagenome_pytorch.extensions.finetuning import splice_training
+        return getattr(splice_training, name)
     if name in (
         "apply_atac_transforms",
         "apply_rnaseq_transforms",
@@ -122,4 +164,18 @@ __all__ = [
     "mean_normalize",
     "power_transform",
     "smooth_clip",
+    # Splice-site fine-tuning (lazy-loaded datasets / losses / training)
+    "SpliceSiteAnnotation",
+    "SpliceSiteUsageIndex",
+    "SpliceSiteDataset",
+    "collate_splice",
+    "splice_classification_loss",
+    "splice_usage_loss",
+    "compute_splice_class_weights",
+    "SpliceTrainMetrics",
+    "train_epoch_splice",
+    "validate_splice",
+    # Splice head factories
+    "create_splice_classification_finetuning_head",
+    "create_splice_usage_finetuning_head",
 ]

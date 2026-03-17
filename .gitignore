@@ -46,6 +46,7 @@ htmlcov/
 *.pth
 *.ckpt
 weights/
+checkpoints/
 *.parquet
 
 # Logs

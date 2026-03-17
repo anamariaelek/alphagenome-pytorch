@@ -46,6 +46,7 @@ import numpy as np
 
 # AlphaGenome sequence length (1Mb)
 ALPHAGENOME_SEQ_LENGTH = 2**20  # 1,048,576 bp
+# ALPHAGENOME_SEQ_LENGTH = 2**19  # 524,288 bp
 
 # From https://hgdownload.cse.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes
 HG38_CHROMOSOME_LENGTHS = {
@@ -73,6 +74,34 @@ HG38_CHROMOSOME_LENGTHS = {
     "chrY": 57227415,
     "chr22": 50818468,
     "chr21": 46709983,
+}
+
+# From https://hgdownload.gi.ucsc.edu/goldenPath/hg19/bigZips/hg19.chrom.sizes
+HG19_CHROMOSOME_LENGTHS = {
+    "chr1": 249250621,
+    "chr2": 243199373,
+    "chr3": 198022430,
+    "chr4": 191154276,
+    "chr5": 180915260,
+    "chr6": 171115067,
+    "chr7": 159138663,
+    "chrX": 155270560,
+    "chr8": 146364022,
+    "chr9": 141213431,
+    "chr10": 135534747,
+    "chr11": 135006516,
+    "chr12": 133851895,
+    "chr13": 115169878,
+    "chr14": 107349540,
+    "chr15": 102531392,
+    "chr16": 90354753,
+    "chr17": 81195210,
+    "chr18": 78077248,
+    "chr20": 63025520,
+    "chrY": 59373566,
+    "chr19": 59128983,
+    "chr22": 51304566,
+    "chr21": 48129895,
 }
 
 # From https://hgdownload.cse.ucsc.edu/goldenPath/mm10/bigZips/mm10.chrom.sizes
@@ -307,7 +336,8 @@ def convert_borzoi_to_alphagenome(
         Statistics dict with counts per fold and split.
     """
     if organism.lower() == "human":
-        chrom_lengths = HG38_CHROMOSOME_LENGTHS
+        #chrom_lengths = HG38_CHROMOSOME_LENGTHS
+        chrom_lengths = HG19_CHROMOSOME_LENGTHS
     elif organism.lower() == "mouse":
         chrom_lengths = MM10_CHROMOSOME_LENGTHS
     else:

@@ -13,6 +13,8 @@ This extension provides tools for fine-tuning the AlphaGenome model on custom ge
 | `rna_seq` | RNA-seq gene expression | 1bp, 128bp | Yes |
 | `chip_tf` | ChIP-seq transcription factors | 128bp | No |
 | `chip_histone` | ChIP-seq histone modifications | 128bp | No |
+| `splice_classification` | Splice-site classification (5-class) | 1bp | No |
+| `splice_usage` | Per-condition splice-site usage (sigmoid) | 1bp | No |
 
 ## Quick Start
 
@@ -294,3 +296,122 @@ The fine-tuning uses a multinomial loss with two components:
 2. **Count loss**: Poisson regression on total counts (how much signal?)
 
 Controlled by `--positional-weight` and `--count-weight` arguments.
+
+---
+
+## Splicing Fine-tuning
+
+Splice-site heads use parquet-based annotation instead of BigWig files.
+Two tasks are supported:
+
+| Task | Head | Loss | Data |
+|------|------|------|------|
+| Classification | `SpliceSitesClassificationHead` (5-class) | Weighted cross-entropy | Annotation parquet |
+| Usage | `SpliceSitesUsageHead` (sigmoid, n_conditions) | Masked BCE | Spliser usage parquet |
+
+### Step 1 — Build splice-site annotation
+
+```bash
+# GTF only
+python scripts/convert_splice_sites_to_parquet.py \
+    --gtf gencode.v47.annotation.gtf \
+    --output human_splice_sites.parquet
+
+# GTF + Spliser usage data (union)
+python scripts/convert_splice_sites_to_parquet.py \
+    --gtf gencode.v47.annotation.gtf \
+    --usage-dir /path/to/spliser/Homo_sapiens/ \
+    --min-coverage 10 \
+    --output human_splice_sites.parquet
+```
+
+### Step 2 — Set up dataset and heads
+
+```python
+from alphagenome_pytorch import AlphaGenome
+from alphagenome_pytorch.extensions.finetuning.datasets import CachedGenome
+from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
+    SpliceSiteAnnotation, SpliceSiteUsageIndex, SpliceSiteDataset, collate_splice,
+)
+from alphagenome_pytorch.extensions.finetuning.heads import (
+    create_splice_usage_finetuning_head,
+)
+from alphagenome_pytorch.extensions.finetuning.splice_losses import (
+    compute_splice_class_weights,
+)
+from torch.utils.data import DataLoader
+
+# Load model (classification head reused from pretrained weights)
+model = AlphaGenome.from_pretrained('model.pth')
+
+# New usage head with dataset-specific number of conditions
+usage_head = create_splice_usage_finetuning_head(n_conditions=62)
+
+# Data
+genome = CachedGenome('hg38.fa')
+annot  = SpliceSiteAnnotation('human_splice_sites.parquet')
+usage  = SpliceSiteUsageIndex('/path/to/spliser/Homo_sapiens/', min_coverage=10)
+
+train_ds = SpliceSiteDataset(
+    genome=genome,
+    bed_file='train_regions.bed',
+    annotation=annot,
+    usage_index=usage,
+    organism_index=0,
+)
+train_loader = DataLoader(train_ds, batch_size=2, collate_fn=collate_splice)
+
+# Class weights to handle ~10000:1 background imbalance
+class_weights = compute_splice_class_weights(
+    'human_splice_sites.parquet', 'train_regions.bed'
+)
+```
+
+### Step 3 — Train
+
+```python
+from alphagenome_pytorch.extensions.finetuning.transfer import prepare_for_transfer, TransferConfig
+from alphagenome_pytorch.extensions.finetuning.training import create_lr_scheduler
+from alphagenome_pytorch.extensions.finetuning.splice_training import (
+    train_epoch_splice, validate_splice,
+)
+
+# (Optional) LoRA on the trunk
+model = prepare_for_transfer(model, TransferConfig(mode='lora', lora_rank=8))
+
+# Optimise classification head + usage head (+ any LoRA params)
+trainable = (
+    [p for p in model.splice_sites_classification_head.parameters()] +
+    list(usage_head.parameters()) +
+    [p for n, p in model.named_parameters() if 'lora' in n]
+)
+optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+scheduler = create_lr_scheduler(optimizer, warmup_steps=200, total_steps=2000)
+
+for epoch in range(10):
+    train_m = train_epoch_splice(
+        model, usage_head, train_loader, optimizer, scheduler, device,
+        class_weights=class_weights,
+    )
+    val_m = validate_splice(model, usage_head, val_loader, device,
+                            class_weights=class_weights)
+    print(f"Epoch {epoch}: train_loss={train_m.loss:.4f}  val_loss={val_m.loss:.4f}")
+    print(f"  cls acc: {val_m.accuracy:.3f}  "
+          f"splice-site acc: {val_m.per_class_acc.get('acc_cls0', 0):.3f}")
+```
+
+### Batch format
+
+`SpliceSiteDataset` returns (and `collate_splice` stacks):
+
+| Key | Shape | dtype | Description |
+|-----|-------|-------|-------------|
+| `sequence` | `(B, S, 4)` | float32 | One-hot DNA |
+| `organism_index` | `(B,)` | int64 | 0 = human, 1 = mouse |
+| `classification_labels` | `(B, S)` | int64 | 0-3 = splice class, 4 = background |
+| `usage_positions` | `(B, max_sites)` | int64 | Window-relative 0-based positions; -1 = padding |
+| `usage_values` | `(B, max_sites, n_cond)` | float32 | SSE fraction per condition |
+| `usage_mask` | `(B, max_sites, n_cond)` | bool | True where observed |
+
+Usage keys are only present when `usage_index` is passed to `SpliceSiteDataset`.
+

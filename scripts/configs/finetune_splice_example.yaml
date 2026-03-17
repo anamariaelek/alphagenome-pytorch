@@ -1,0 +1,114 @@
+# =============================================================================
+# Example configuration for finetune_splice.py
+#
+# Usage:
+#   python scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
+#
+# CLI flags always override values set here.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Multi-species data (use this block OR the flat genome/annotation/bed keys)
+# ---------------------------------------------------------------------------
+# When 'species' is present, per-species datasets are created and combined.
+# Each species may have a different usage_parquet (or none at all).
+# SpeciesGroupedSampler guarantees every batch is single-species, so
+# n_conditions can differ freely between organisms.
+
+species:
+  - name: human
+    genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
+    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
+    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/train.bed
+    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/valid.bed
+    organism_index: 0
+
+  - name: mouse
+    genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
+    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
+    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/train.bed
+    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/valid.bed
+    organism_index: 1
+
+# ---------------------------------------------------------------------------
+# Single-species alternative (comment out 'species' block above and use these)
+# ---------------------------------------------------------------------------
+# genome: /data/genomes/hg38.fa
+# annotation_parquet: /data/splice/human_splice_sites.parquet
+# usage_parquet: /data/splice/human_usage.parquet   # optional
+# train_bed: /data/beds/human_train.bed
+# val_bed: /data/beds/human_val.bed
+# organism_index: 0
+
+# ---------------------------------------------------------------------------
+# Pretrained weights
+# ---------------------------------------------------------------------------
+pretrained_weights: /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+
+# ---------------------------------------------------------------------------
+# Training mode: linear-probe | lora | full
+# ---------------------------------------------------------------------------
+mode: lora
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+sequence_length: 524288
+max_sites: 1024
+cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
+
+# ---------------------------------------------------------------------------
+# Model / LoRA
+# ---------------------------------------------------------------------------
+dtype: bfloat16            # bfloat16 | float32
+gradient_checkpointing: false
+
+lora_rank: 8
+lora_alpha: 16
+lora_targets: q_proj,v_proj
+
+# ---------------------------------------------------------------------------
+# Optimiser
+# ---------------------------------------------------------------------------
+epochs: 20
+batch_size: 1
+gradient_accumulation_steps: 4   # effective batch = batch_size * accum * gpus
+lr: 1.0e-4
+weight_decay: 0.1
+warmup_steps: 500
+lr_schedule: cosine              # cosine | constant
+
+# Loss weights
+cls_weight: 1.0
+usage_weight: 1.0
+
+# ---------------------------------------------------------------------------
+# Performance
+# ---------------------------------------------------------------------------
+num_workers: 4
+use_amp: true              # set false to disable AMP
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+wandb: false
+wandb_project: alphagenome-splice
+# wandb_entity: my-team
+log_every: 50
+
+# ---------------------------------------------------------------------------
+# Output / checkpointing
+# ---------------------------------------------------------------------------
+output_dir: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+# run_name: my_run           # defaults to timestamp
+save_every: 1
+
+# Resume: path to checkpoint, or "auto" to find latest in output_dir
+# resume: auto
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+seed: 1950

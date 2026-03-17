@@ -139,7 +139,7 @@ def load_trunk(
     
     Args:
         model: AlphaGenome model instance.
-        weights_path: Path to pretrained weights (.pt or .pth).
+        weights_path: Path to pretrained weights (.pt, .pth, or .safetensors).
         exclude_heads: If True, skip loading head-related weights.
             This is useful when you want to train new heads.
         strict: If False (default), allows missing/unexpected keys.
@@ -151,7 +151,25 @@ def load_trunk(
         >>> model = AlphaGenome()
         >>> model = load_trunk(model, 'alphagenome_pretrained.pt')
     """
-    state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+    weights_path = str(weights_path)
+    if weights_path.endswith('.safetensors'):
+        try:
+            from safetensors.torch import load_file as _safetensors_load
+        except ImportError:
+            raise ImportError(
+                "safetensors is required to load .safetensors checkpoints. "
+                "Install it with: pip install safetensors"
+            )
+        state_dict = _safetensors_load(weights_path, device='cpu')
+    else:
+        try:
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+        except Exception:
+            # Fallback for older checkpoints serialised with non-tensor objects
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)  # noqa: S614
+        # Unwrap nested checkpoint dicts produced by save_checkpoint
+        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+            state_dict = state_dict['model_state_dict']
     
     # All head-related prefixes
     head_prefixes = (

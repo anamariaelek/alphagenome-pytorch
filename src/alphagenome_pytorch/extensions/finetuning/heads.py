@@ -1,14 +1,23 @@
 """Fine-tuning heads for AlphaGenome.
 
-Provides a factory function to create GenomeTracksHead instances
-configured for fine-tuning on specific assay types.
+Provides factory functions to create fine-tuning heads:
+- :func:`create_finetuning_head` for BigWig-based GenomeTracks heads.
+- :func:`create_splice_classification_finetuning_head` for splice-site
+  classification (5-class softmax).
+- :func:`create_splice_usage_finetuning_head` for per-condition splice-site
+  usage prediction (sigmoid, n_conditions outputs).
 """
 from __future__ import annotations
 
 import torch
 from typing import Literal
 
-from alphagenome_pytorch.heads import GenomeTracksHead
+from alphagenome_pytorch.heads import (
+    GenomeTracksHead,
+    SpliceSitesClassificationHead,
+    SpliceSitesUsageHead,
+    TRUNK_DIM,
+)
 
 
 # All supported assay types and their squashing behavior
@@ -119,7 +128,70 @@ def create_finetuning_head(
     )
 
 
+def create_splice_classification_finetuning_head(
+    num_organisms: int = 1,
+) -> SpliceSitesClassificationHead:
+    """Create a :class:`~alphagenome_pytorch.heads.SpliceSitesClassificationHead`
+    for fine-tuning.
+
+    Produces a 5-class softmax output at 1 bp resolution:
+    ``Donor+`` (0), ``Acceptor+`` (1), ``Donor-`` (2), ``Acceptor-`` (3),
+    ``Background`` (4).
+
+    Typically used by re-using weights from a pretrained
+    ``model.splice_sites_classification_head``.  This factory is provided as
+    a convenience when training from scratch or changing ``num_organisms``.
+
+    Args:
+        num_organisms: Number of organisms (default: 1 for fine-tuning).
+
+    Returns:
+        Configured :class:`~alphagenome_pytorch.heads.SpliceSitesClassificationHead`.
+
+    Example:
+        >>> head = create_splice_classification_finetuning_head(num_organisms=1)
+    """
+    return SpliceSitesClassificationHead(
+        in_channels=TRUNK_DIM,
+        num_organisms=num_organisms,
+    )
+
+
+def create_splice_usage_finetuning_head(
+    n_conditions: int,
+    num_organisms: int = 1,
+) -> SpliceSitesUsageHead:
+    """Create a :class:`~alphagenome_pytorch.heads.SpliceSitesUsageHead` with
+    a dataset-specific number of conditions for fine-tuning.
+
+    Produces sigmoid outputs at 1 bp resolution, one channel per condition.
+    Use this when your dataset has fewer (or different) conditions than the
+    pretrained model's 734-track head.
+
+    Args:
+        n_conditions: Number of output conditions (e.g. 62 tissue samples).
+        num_organisms: Number of organisms (default: 1 for fine-tuning).
+
+    Returns:
+        Configured :class:`~alphagenome_pytorch.heads.SpliceSitesUsageHead`.
+
+    Example:
+        >>> head = create_splice_usage_finetuning_head(n_conditions=62)
+    """
+    return SpliceSitesUsageHead(
+        in_channels=TRUNK_DIM,
+        num_output_tracks=n_conditions,
+        num_organisms=num_organisms,
+    )
+
+
 # Embedding dimension of the raw CNN encoder output (before transformer/decoder).
 ENCODER_EMBEDDING_DIM = 1536
 
-__all__ = ['ASSAY_TYPES', 'ENCODER_EMBEDDING_DIM', 'create_finetuning_head']
+__all__ = [
+    'ASSAY_TYPES',
+    'ENCODER_EMBEDDING_DIM',
+    'create_finetuning_head',
+    'create_splice_classification_finetuning_head',
+    'create_splice_usage_finetuning_head',
+]
