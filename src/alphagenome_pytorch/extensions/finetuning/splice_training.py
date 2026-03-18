@@ -184,7 +184,7 @@ def train_epoch_splice(
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 usage_loss_val = splice_usage_loss(
-                    usage_out["predictions"], usage_pos, usage_vals, usage_mask
+                    usage_out["logits"], usage_pos, usage_vals, usage_mask
                 )
                 total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -307,7 +307,7 @@ def validate_splice(
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 usage_loss_val = splice_usage_loss(
-                    usage_out["predictions"], usage_pos, usage_vals, usage_mask
+                    usage_out["logits"], usage_pos, usage_vals, usage_mask
                 )
                 total_loss = total_loss + usage_weight * usage_loss_val
 

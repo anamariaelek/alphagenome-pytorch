@@ -25,7 +25,7 @@ from alphagenome_pytorch.extensions.finetuning.distributed import (
 )
 
 # Logging utilities
-from alphagenome_pytorch.extensions.finetuning.logging import TrainingLogger
+from alphagenome_pytorch.extensions.finetuning.logging import TrainingLogger, setup_output_logging
 
 # Checkpointing utilities
 from alphagenome_pytorch.extensions.finetuning.checkpointing import (
@@ -152,6 +152,7 @@ __all__ = [
     "broadcast_object",
     # Logging
     "TrainingLogger",
+    "setup_output_logging",
     # Checkpointing
     "find_latest_checkpoint",
     "load_checkpoint",

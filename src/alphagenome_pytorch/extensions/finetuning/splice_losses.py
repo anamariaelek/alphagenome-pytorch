@@ -81,9 +81,9 @@ def splice_usage_loss(
     an observation (as indicated by *usage_mask*).
 
     Args:
-        predictions: Sigmoid outputs from
+        predictions: Raw logits from
             :class:`~alphagenome_pytorch.heads.SpliceSitesUsageHead`,
-            shape ``(B, S, n_conditions)`` NLC, values in ``[0, 1]``.
+            shape ``(B, S, n_conditions)`` NLC (pre-sigmoid).
         usage_positions: Window-relative position indices for observed splice
             sites, shape ``(B, max_sites)``.  Padding positions are ``-1``
             and are ignored.
@@ -119,7 +119,7 @@ def splice_usage_loss(
         # No observations in this batch — return zero loss with gradient
         return (predictions * 0.0).sum()
 
-    loss = F.binary_cross_entropy(
+    loss = F.binary_cross_entropy_with_logits(
         gathered[final_mask],
         usage_values[final_mask],
         reduction="mean",

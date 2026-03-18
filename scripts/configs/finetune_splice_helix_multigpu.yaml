@@ -1,0 +1,90 @@
+# =============================================================================
+# Multi-GPU configuration for finetune_splice.py (4 × A100/H200 on one node)
+#
+# Usage (matches finetune_splice_submit_multigpu.sh):
+#   torchrun --nproc_per_node=4 scripts/finetune_splice.py \
+#       --config scripts/configs/finetune_splice_helix_multigpu.yaml
+#
+# Effective batch size = batch_size × gradient_accumulation_steps × n_gpus
+#   Single-GPU reference:  2 × 4 × 1 = 8
+#   This config (4 GPUs):  2 × 1 × 4 = 8   (same effective batch, faster throughput)
+# =============================================================================
+
+species:
+  - name: human
+    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/valid.bed
+    organism_index: 0
+
+  - name: mouse
+    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/valid.bed
+    organism_index: 1
+
+pretrained_weights: /home/hd/hd_hd/hd_mf354/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+
+mode: lora
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+sequence_length: 524288
+max_sites: 1024
+cache_genome: false
+
+# ---------------------------------------------------------------------------
+# Model / LoRA
+# ---------------------------------------------------------------------------
+dtype: bfloat16
+gradient_checkpointing: false   # enable if hitting OOM with 4 GPUs
+
+lora_rank: 8
+lora_alpha: 16
+lora_targets: q_proj,v_proj
+
+# ---------------------------------------------------------------------------
+# Optimiser
+# Gradient accumulation reduced from 4→1 because 4 GPUs now provide the
+# same effective batch size (2 × 1 × 4 = 8).
+# ---------------------------------------------------------------------------
+epochs: 20
+batch_size: 2
+gradient_accumulation_steps: 1
+lr: 1.0e-4
+weight_decay: 0.1
+warmup_steps: 500
+lr_schedule: cosine
+
+cls_weight: 1.0
+usage_weight: 1.0
+
+# ---------------------------------------------------------------------------
+# Performance  (4 x 8 = 32 CPUs allocated in the SLURM script)
+# ---------------------------------------------------------------------------
+num_workers: 8
+use_amp: true
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+wandb: false
+wandb_project: alphagenome-splice
+log_every: 50
+
+# ---------------------------------------------------------------------------
+# Output / checkpointing
+# ---------------------------------------------------------------------------
+output_dir: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+save_every: 1
+# resume: auto
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+seed: 1950

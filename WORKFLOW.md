@@ -37,7 +37,9 @@ python scripts/convert_borzoi_folds.py \
     --output-dir ${out_dir}/${species}/folds > logs/convert_borzoi_folds_${species}.log
 ```
 
-# Finetune heads only - one species
+# Finetune
+
+Finetune heads only, single species
 
 ```bash
 python scripts/finetune_splice.py --mode linear-probe \
@@ -47,4 +49,10 @@ python scripts/finetune_splice.py --mode linear-probe \
     --train-bed ${out_dir}/${species}/folds/FOLD_0/train.bed \
     --val-bed ${out_dir}/${species}/folds/FOLD_0/valid.bed \
     --pretrained-weights /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+```
+
+Finetune model for multiple species
+
+```bash
+python scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
 ```

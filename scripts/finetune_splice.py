@@ -109,6 +109,7 @@ from alphagenome_pytorch.extensions.finetuning import (
     broadcast_object,
     # Logging
     TrainingLogger,
+    setup_output_logging,
     # Checkpointing
     find_latest_checkpoint,
     setup_preemption_handler,
@@ -792,6 +793,7 @@ def main() -> None:
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"Output: {output_dir}")
+    setup_output_logging(output_dir, rank)
     barrier()
 
     # Resolve resume checkpoint

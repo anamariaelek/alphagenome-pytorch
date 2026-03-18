@@ -7,11 +7,57 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from alphagenome_pytorch.extensions.finetuning.distributed import is_main_process
+
+
+class _Tee:
+    """Write to multiple streams simultaneously."""
+
+    def __init__(self, *streams) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for s in self._streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for s in self._streams:
+            s.flush()
+
+    def fileno(self) -> int:
+        return self._streams[0].fileno()
+
+    def isatty(self) -> bool:
+        return False
+
+
+def setup_output_logging(output_dir: Path, rank: int) -> None:
+    """Tee stdout to ``output_dir/train.log`` on rank 0.
+
+    All subsequent ``print()`` calls (and anything written to *sys.stdout*)
+    will be mirrored to the log file in addition to the terminal.
+    Safe to call multiple times — subsequent calls on the same process are
+    no-ops once the tee is already installed.
+
+    Args:
+        output_dir: Directory that already exists (created by caller).
+        rank: Process rank; only rank 0 writes the file.
+    """
+    if not is_main_process(rank):
+        return
+    # Already tee'd — don't double-wrap.
+    if isinstance(sys.stdout, _Tee):
+        return
+    log_path = Path(output_dir) / "train.log"
+    log_fh = open(log_path, "a", buffering=1)  # line-buffered
+    sys.stdout = _Tee(sys.__stdout__, log_fh)
+    print(f"Logging to {log_path}")
 
 
 class TrainingLogger:
@@ -235,4 +281,4 @@ class TrainingLogger:
             self.wandb.finish()
 
 
-__all__ = ["TrainingLogger"]
+__all__ = ["TrainingLogger", "setup_output_logging"]
