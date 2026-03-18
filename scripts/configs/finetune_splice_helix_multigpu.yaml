@@ -34,7 +34,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 524288
+sequence_length: 131072
 max_sites: 1024
 cache_genome: false
 
@@ -42,7 +42,7 @@ cache_genome: false
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16
-gradient_checkpointing: false   # enable if hitting OOM with 4 GPUs
+gradient_checkpointing: true   # saves activation memory; re-enable for 4-GPU runs
 
 lora_rank: 8
 lora_alpha: 16
@@ -58,7 +58,7 @@ batch_size: 2
 gradient_accumulation_steps: 1
 lr: 1.0e-4
 weight_decay: 0.1
-warmup_steps: 500
+warmup_steps: 1000
 lr_schedule: cosine
 
 cls_weight: 1.0
@@ -75,7 +75,7 @@ use_amp: true
 # ---------------------------------------------------------------------------
 wandb: false
 wandb_project: alphagenome-splice
-log_every: 50
+log_every: 500
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing

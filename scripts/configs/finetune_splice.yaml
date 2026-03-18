@@ -55,7 +55,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 524288
+sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 
@@ -63,7 +63,7 @@ cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16            # bfloat16 | float32
-gradient_checkpointing: false
+gradient_checkpointing: true
 
 lora_rank: 8
 lora_alpha: 16
@@ -73,11 +73,11 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 1
+batch_size: 2
 gradient_accumulation_steps: 4   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
-warmup_steps: 500
+warmup_steps: 1000
 lr_schedule: cosine              # cosine | constant
 
 # Loss weights
@@ -96,7 +96,7 @@ use_amp: true              # set false to disable AMP
 wandb: false
 wandb_project: alphagenome-splice
 # wandb_entity: my-team
-log_every: 50
+log_every: 500
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing

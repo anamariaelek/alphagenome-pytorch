@@ -85,13 +85,16 @@ def annotate_splice_site_type(df: "pd.DataFrame") -> "pd.DataFrame":
     - ``+`` strand: partners > Site → Donor,  partners < Site → Acceptor
     - ``-`` strand: partners < Site → Donor,  partners > Site → Acceptor
 
+    When a site has both donor and acceptor partners the type with greater
+    total read support (sum of partner dict values) is chosen.
+
     Args:
         df: Raw combined DataFrame with columns ``Site``, ``Strand``,
             ``Partners``.
 
     Returns:
         Copy of *df* with an added ``Splice_Site_Type`` column containing
-        ``"Donor"``, ``"Acceptor"``, ``"Both"``, or ``"None"``.
+        ``"Donor"``, ``"Acceptor"``, or ``"None"``.
     """
     import pandas as pd
 
@@ -109,7 +112,10 @@ def annotate_splice_site_type(df: "pd.DataFrame") -> "pd.DataFrame":
             acceptor_partners = [p for p in partners if p > site]
 
         if donor_partners and acceptor_partners:
-            splice_site_types.append("Both")
+            donor_support = sum(partners[p] for p in donor_partners)
+            acceptor_support = sum(partners[p] for p in acceptor_partners)
+            # splice_site_types.append("Both")
+            splice_site_types.append("Donor" if donor_support >= acceptor_support else "Acceptor")
         elif donor_partners:
             splice_site_types.append("Donor")
         elif acceptor_partners:
@@ -210,6 +216,7 @@ def convert_usage_to_parquet(
     df["beta_count"] = df["beta_count"].astype(int)
 
     # ── Expand "Both" rows ──────────────────────────────────────────────────
+    # (annotate_splice_site_type now resolves ties by support; kept as safety net)
     both_mask = df["Splice_Site_Type"] == "Both"
     df_both = df[both_mask]
     df_donor = df_both.copy()

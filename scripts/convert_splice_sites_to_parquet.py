@@ -206,7 +206,7 @@ def convert_splice_sites_to_parquet(
     min_coverage: int = 10,
     alpha_min: int | None = None,
     compression: str = "snappy",
-    usage_coord_base: int = 1,
+    usage_coord_base: int = 0,
     add_chr_prefix: bool = False,
     strip_chr_prefix: bool = False,
 ) -> None:
@@ -226,7 +226,11 @@ def convert_splice_sites_to_parquet(
         compression: Parquet compression codec (``'snappy'``, ``'gzip'``,
             ``'zstd'``, or ``'none'``).
         usage_coord_base: Coordinate base in usage parquet (1 or 0).
-            Most genomic files use 1-based; default is 1 (subtract 1 on read).
+            Default is 0: ``convert_splice_usage_to_parquet.py`` already
+            outputs 0-based positions (the position adjustments in that
+            script convert Spliser coords to match GTF 0-based convention).
+            Set to 1 only if the usage parquet was produced by a different
+            tool that stores 1-based positions.
         add_chr_prefix: Add ``chr`` prefix to all Chromosome values.
         strip_chr_prefix: Remove ``chr`` prefix from all Chromosome values.
     """
@@ -249,6 +253,29 @@ def convert_splice_sites_to_parquet(
                 usage_coord_base=usage_coord_base,
             )
         )
+
+    # ── Overlap report ──────────────────────────────────────────────────────
+    if len(frames) == 2:
+        gtf_df, usage_df = frames
+        key = ["Chromosome", "Position", "SiteType"]
+        gtf_set = set(map(tuple, gtf_df[key].drop_duplicates().values.tolist()))
+        usage_set = set(map(tuple, usage_df[key].drop_duplicates().values.tolist()))
+        n_gtf = len(gtf_set)
+        n_usage = len(usage_set)
+        n_overlap = len(gtf_set & usage_set)
+        n_gtf_only = len(gtf_set - usage_set)
+        n_usage_only = len(usage_set - gtf_set)
+        print(f"\nOverlap between GTF-derived and usage sites:")
+        print(f"  GTF sites          : {n_gtf:>10,}")
+        print(f"  Usage sites        : {n_usage:>10,}")
+        print(f"  Overlap (both)     : {n_overlap:>10,}  "
+              f"({100*n_overlap/n_gtf:.1f}% of GTF, "
+              f"{100*n_overlap/n_usage:.1f}% of usage)")
+        print(f"  GTF only           : {n_gtf_only:>10,}  "
+              f"({100*n_gtf_only/n_gtf:.1f}% of GTF)")
+        print(f"  Usage only         : {n_usage_only:>10,}  "
+              f"({100*n_usage_only/n_usage:.1f}% of usage)")
+        print(f"  Union (output)     : {n_gtf + n_usage_only:>10,}")
 
     combined = pd.concat(frames, ignore_index=True)
 
@@ -317,8 +344,8 @@ Examples:
     parser.add_argument("--compression", default="snappy",
                         choices=["snappy", "gzip", "zstd", "none"],
                         help="Parquet compression codec (default: snappy).")
-    parser.add_argument("--usage-coord-base", type=int, default=1, choices=[0, 1],
-                        help="Coordinate base in usage parquet (default: 1 = 1-based).")
+    parser.add_argument("--usage-coord-base", type=int, default=0, choices=[0, 1],
+                        help="Coordinate base in usage parquet (default: 0 = already 0-based).")
     parser.add_argument("--add-chr-prefix", action="store_true",
                         help="Prepend 'chr' to all chromosome names (e.g. '1' → 'chr1').")
     parser.add_argument("--strip-chr-prefix", action="store_true",

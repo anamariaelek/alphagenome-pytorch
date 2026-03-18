@@ -158,7 +158,7 @@ DEFAULTS = {
     "num_workers": 4,
     # Logging
     "wandb_project": "alphagenome-splice",
-    "log_every": 50,
+    "log_every": 500,
     "save_every": 1,
     # Output
     "output_dir": "finetuning_output",
