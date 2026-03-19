@@ -23,7 +23,9 @@ source ${HOME}/miniforge3/etc/profile.d/conda.sh
 
 # Load CUDA module before activating conda environment
 module load devel/cuda
-export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+
+# Set OpenMP threads (fallback to 8 if not set by SLURM)
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 
 # Fix PyTorch memory fragmentation (reduces reserved-but-unallocated memory)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -50,7 +52,27 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
 CONFIG="${WORK_DIR}/scripts/configs/finetune_splice_helix.yaml"
-python ${WORK_DIR}/scripts/finetune_splice.py --config ${CONFIG} > ${WORK_DIR}/logs/finetune_splice_${TIMESTAMP}.log 2>&1
+
+# Verify config file exists
+if [ ! -f "${CONFIG}" ]; then
+    echo "ERROR: Config file not found: ${CONFIG}"
+    exit 1
+fi
+
+# Create logs directory if it doesn't exist
+mkdir -p ${WORK_DIR}/logs
+
+# Log file
+LOG_FILE="${WORK_DIR}/logs/finetune_splice_${TIMESTAMP}.log"
+
+echo "Starting finetuning at $(date)" | tee -a "${LOG_FILE}"
+echo "Config: ${CONFIG}" | tee -a "${LOG_FILE}"
+echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
+echo "---" | tee -a "${LOG_FILE}"
+
+# Run training (both stdout and stderr captured, plus displayed in real-time)
+python ${WORK_DIR}/scripts/finetune_splice.py --config ${CONFIG} 2>&1 | tee -a "${LOG_FILE}"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-echo "Finetuning completed at ${TIMESTAMP}. Logs saved to ${WORK_DIR}/logs/finetune_splice_${TIMESTAMP}.log"
+echo "---" | tee -a "${LOG_FILE}"
+echo "Finetuning completed at ${TIMESTAMP}. Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"

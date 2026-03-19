@@ -73,7 +73,7 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 2
+batch_size: 8
 gradient_accumulation_steps: 4   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1

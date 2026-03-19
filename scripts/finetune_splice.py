@@ -1046,9 +1046,13 @@ def main() -> None:
                 summary = (
                     f"Epoch {epoch}: "
                     f"train_loss={train_loss:.4f}  "
+                    f"train_cls_loss={train_metrics.cls_loss:.4f}  "
+                    f"train_usage_loss={train_metrics.usage_loss:.4f}  "
+                    f"train_accuracy={train_metrics.accuracy:.4f}  "
                     f"val_loss={val_loss:.4f}  "
                     f"val_cls_loss={val_metrics.cls_loss:.4f}  "
-                    f"val_acc={val_metrics.accuracy:.4f}  "
+                    f"val_usage_loss={val_metrics.usage_loss:.4f}  "
+                    f"val_accuracy={val_metrics.accuracy:.4f}  "
                     f"lr={current_lr:.2e}"
                 )
                 if val_metrics.usage_loss > 0:
