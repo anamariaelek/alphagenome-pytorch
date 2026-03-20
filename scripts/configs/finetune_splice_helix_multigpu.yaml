@@ -27,14 +27,20 @@ species:
     val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/valid.bed
     organism_index: 1
 
+# ---------------------------------------------------------------------------
+# Pretrained weights
+# ---------------------------------------------------------------------------
 pretrained_weights: /home/hd/hd_hd/hd_mf354/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
 
-mode: lora
+# ---------------------------------------------------------------------------
+# Training mode: linear-probe | lora | full
+# ---------------------------------------------------------------------------
+mode: full
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 131072
+sequence_length: 524288
 max_sites: 1024
 cache_genome: false
 
@@ -54,7 +60,7 @@ lora_targets: q_proj,v_proj
 # same effective batch size (2 × 1 × 4 = 8).
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 2
+batch_size: 16
 gradient_accumulation_steps: 1
 lr: 1.0e-4
 weight_decay: 0.1
