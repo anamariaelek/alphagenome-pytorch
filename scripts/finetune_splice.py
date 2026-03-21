@@ -790,7 +790,7 @@ def main() -> None:
 
     # Output directory
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / run_name
+    output_dir = Path(args.output_dir) / str(run_name)
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"Output: {output_dir}")
@@ -1102,22 +1102,6 @@ def main() -> None:
                         **usage_extra,
                     )
                     print(f"  Saved best model (val_loss={val_loss:.4f})")
-
-                if epoch % args.save_every == 0:
-                    save_checkpoint(
-                        path=output_dir / f"checkpoint_epoch{epoch}.pth",
-                        epoch=epoch,
-                        model=model_module,
-                        optimizer=optimizer,
-                        val_loss=val_loss,
-                        track_names=[],
-                        modality="splice",
-                        resolutions=(1,),
-                        scheduler=scheduler,
-                        best_val_loss=best_val_loss,
-                        wandb_run_id=logger.wandb_run_id,
-                        **usage_extra,
-                    )
 
             barrier()
 

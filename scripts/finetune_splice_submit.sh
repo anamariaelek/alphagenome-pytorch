@@ -34,6 +34,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 conda activate alphagenome_pytorch_genomicsxai
 
 # Verify CUDA setup
+# Use conda env's libstdc++ instead of the (older) system /lib64/libstdc++.so.6
+# Fixes: GLIBCXX_3.4.29 not found when numpy/torch C-extensions are loaded
+export LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}
 echo "CUDA setup verification:"
 echo "  CUDA_HOME: ${CUDA_HOME}"
 echo "  LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
@@ -44,14 +47,12 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
     exit 1
 }
 
-# Create a timestamp for unique log file names
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Work directory
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/scripts/configs/finetune_splice_helix.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_splice_helix.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then
@@ -59,20 +60,39 @@ if [ ! -f "${CONFIG}" ]; then
     exit 1
 fi
 
-# Create logs directory if it doesn't exist
-mkdir -p ${WORK_DIR}/logs
+# Read output_dir and run_name from config YAML
+OUTPUT_DIR=$(python -c "import yaml; c=yaml.safe_load(open('${CONFIG}')); print(c.get('output_dir','').rstrip('/'))")
+RUN_NAME=$(python -c "import yaml; c=yaml.safe_load(open('${CONFIG}')); print(c.get('run_name',''))")
 
-# Log file
-LOG_FILE="${WORK_DIR}/logs/finetune_splice_${TIMESTAMP}.log"
+# Fallback to timestamp if run_name is empty
+if [ -z "$RUN_NAME" ]; then
+    RUN_NAME=$(date +%Y%m%d_%H%M%S)
+fi
+
+
+LOG_DIR="${OUTPUT_DIR}/${RUN_NAME}"
+mkdir -p "${LOG_DIR}"
+LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="${LOG_DIR}/train_${LOG_TIMESTAMP}.log"
 
 echo "Starting finetuning at $(date)" | tee -a "${LOG_FILE}"
 echo "Config: ${CONFIG}" | tee -a "${LOG_FILE}"
 echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
 echo "---" | tee -a "${LOG_FILE}"
 
-# Run training (both stdout and stderr captured, plus displayed in real-time)
-python ${WORK_DIR}/scripts/finetune_splice.py --config ${CONFIG} 2>&1 | tee -a "${LOG_FILE}"
+# Resume if checkpoint exists
+RESUME="${LOG_DIR}/best_model.pth"
+if [ -f "${RESUME}" ]; then
+    echo "Resuming from checkpoint: ${RESUME}" | tee -a "${LOG_FILE}"
+else
+    echo "No checkpoint found at ${RESUME}. Starting fresh training." | tee -a "${LOG_FILE}"
+    RESUME="auto"
+fi
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+# Run training (stdout/stderr merged with train.log)
+python ${WORK_DIR}/scripts/finetune_splice.py \
+    --config ${CONFIG} \
+    --resume ${RESUME} 2>&1 | tee -a "${LOG_FILE}"
+
 echo "---" | tee -a "${LOG_FILE}"
-echo "Finetuning completed at ${TIMESTAMP}. Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"
+echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"
