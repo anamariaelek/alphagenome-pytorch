@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ft
+#SBATCH --job-name=ft-lora
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
@@ -51,7 +51,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/scripts/configs/finetune_splice_helix.yaml"
+CONFIG="${WORK_DIR}/scripts/configs/finetune_splice_lora_helix.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

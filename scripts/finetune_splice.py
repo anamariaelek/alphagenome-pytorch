@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1000,6 +1001,7 @@ def main() -> None:
                 train_sampler.set_epoch(epoch)
 
             # Training epoch
+            epoch_start_time = time.monotonic()
             train_metrics: SpliceTrainMetrics = train_epoch_splice(
                 model=model,
                 usage_head=usage_heads or None,
@@ -1043,8 +1045,9 @@ def main() -> None:
 
             # Print epoch summary
             if is_main_process(rank):
+                epoch_elapsed = time.monotonic() - epoch_start_time
                 summary = (
-                    f"Epoch {epoch}: "
+                    f"Epoch {epoch} [{epoch_elapsed:.0f}s train={train_metrics.elapsed_s:.0f}s val={val_metrics.elapsed_s:.0f}s]: "
                     f"train_loss={train_loss:.4f}  "
                     f"train_cls_loss={train_metrics.cls_loss:.4f}  "
                     f"train_usage_loss={train_metrics.usage_loss:.4f}  "

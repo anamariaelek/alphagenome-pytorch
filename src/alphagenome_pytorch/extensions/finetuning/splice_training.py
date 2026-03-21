@@ -73,6 +73,7 @@ class SpliceTrainMetrics:
     # Per-class accuracy (class 0-3 = splice sites, 4 = background)
     per_class_acc: dict[str, float] = field(default_factory=dict)
     n_batches: int = 0
+    elapsed_s: float = 0.0   # wall-clock seconds for this epoch
 
 
 def train_epoch_splice(
@@ -144,6 +145,9 @@ def train_epoch_splice(
 
     optimizer.zero_grad()
 
+    epoch_start = time.perf_counter()
+    step_start  = time.perf_counter()
+
     for batch_idx, batch in enumerate(train_loader):
         seq = batch["sequence"].to(device)
         org_idx = batch["organism_index"].to(device)
@@ -211,10 +215,14 @@ def train_epoch_splice(
                 avg = metrics.loss / metrics.n_batches
                 avg_cls = metrics.cls_loss / metrics.n_batches
                 avg_usg = metrics.usage_loss / metrics.n_batches
+                elapsed = time.perf_counter() - step_start
+                sps = log_every / elapsed  # optimizer steps per second
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
-                    f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}"
+                    f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}  "
+                    f"{sps:.2f} steps/s"
                 )
+                step_start = time.perf_counter()
 
     # Average
     if metrics.n_batches > 0:
@@ -225,6 +233,7 @@ def train_epoch_splice(
         metrics.per_class_acc = {
             k: v / metrics.n_batches for k, v in metrics.per_class_acc.items()
         }
+    metrics.elapsed_s = time.perf_counter() - epoch_start
 
     return metrics
 
@@ -269,6 +278,8 @@ def validate_splice(
     metrics = SpliceTrainMetrics()
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
+
+    val_start = time.perf_counter()
 
     for batch in val_loader:
         seq = batch["sequence"].to(device)
@@ -327,5 +338,6 @@ def validate_splice(
         metrics.per_class_acc = {
             k: v / metrics.n_batches for k, v in metrics.per_class_acc.items()
         }
+    metrics.elapsed_s = time.perf_counter() - val_start
 
     return metrics
