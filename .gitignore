@@ -75,3 +75,6 @@ docs/_build/
 
 # Hatch VCS
 src/alphagenome_pytorch/_version.py
+
+slurm*
+tmp

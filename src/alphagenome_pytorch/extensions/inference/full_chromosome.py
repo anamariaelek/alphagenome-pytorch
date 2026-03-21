@@ -53,6 +53,8 @@ def _ensure_deps():
 
 
 # Head configurations: name -> (num_tracks, supported_resolutions)
+# Splice heads additionally carry an 'output_key' that selects from their nested output dict
+# (e.g. preds['splice_sites_classification']['probs']).
 HEAD_CONFIGS = {
     'atac': {'num_tracks': 256, 'resolutions': [1, 128]},
     'dnase': {'num_tracks': 384, 'resolutions': [1, 128]},
@@ -61,6 +63,11 @@ HEAD_CONFIGS = {
     'rna_seq': {'num_tracks': 768, 'resolutions': [1, 128]},
     'chip_tf': {'num_tracks': 1664, 'resolutions': [128]},
     'chip_histone': {'num_tracks': 1152, 'resolutions': [128]},
+    # Splice heads — 1bp only
+    # splice_sites_classification: 5-class softmax (Donor+, Acceptor+, Donor-, Acceptor-, Background)
+    'splice_sites_classification': {'num_tracks': 5, 'resolutions': [1], 'output_key': 'probs'},
+    # splice_sites_usage: 367 tissues × 2 strands, sigmoid probabilities
+    'splice_sites_usage': {'num_tracks': 734, 'resolutions': [1], 'output_key': 'predictions'},
 }
 
 
@@ -373,7 +380,13 @@ def predict_full_chromosome(
 
         # Extract predictions for the requested head
         # Output shape: (batch, seq_len_at_res, n_tracks)
-        head_preds = preds[head][config.resolution]
+        #
+        # Standard heads: preds[head][resolution] -> (B, S//res, T)
+        # Splice heads:   preds[head][output_key]  -> (B, S, T)  (always 1bp)
+        if 'output_key' in head_config:
+            head_preds = preds[head][head_config['output_key']]
+        else:
+            head_preds = preds[head][config.resolution]
         head_preds = head_preds[:, :, track_indices].cpu().numpy()
 
         # Place kept regions into output

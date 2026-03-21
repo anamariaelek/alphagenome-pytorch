@@ -73,7 +73,10 @@ def main():
     parser.add_argument(
         "--head",
         required=True,
-        choices=["atac", "dnase", "cage", "rna_seq", "chip_tf", "chip_histone", "procap"],
+        choices=[
+            "atac", "dnase", "cage", "rna_seq", "chip_tf", "chip_histone", "procap",
+            "splice_sites_classification", "splice_sites_usage",
+        ],
         help="Prediction head to use",
     )
 

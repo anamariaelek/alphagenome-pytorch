@@ -312,14 +312,14 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         self.annotation = annotation
         self.usage_index = usage_index
 
-        # Genome backend
+        # Load BED intervals first so we know which chromosomes are needed
+        all_intervals, chromosomes = _load_intervals_from_bed(bed_file)
+
+        # Genome backend – pass chromosome set to avoid loading the full genome
         if isinstance(genome, str) or isinstance(genome, Path):
-            self._cached_genome = CachedGenome(str(genome))
+            self._cached_genome = CachedGenome(str(genome), chromosomes=chromosomes)
         else:
             self._cached_genome = genome  # CachedGenome passed directly
-
-        # Load and process BED intervals
-        all_intervals, chromosomes = _load_intervals_from_bed(bed_file)
 
         half = sequence_length // 2
         chrom_sizes = self._cached_genome.chrom_sizes
