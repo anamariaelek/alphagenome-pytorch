@@ -732,19 +732,29 @@ def create_model(
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
+    # Attach usage heads to the model as a ModuleDict BEFORE DDP wrapping.
+    # This ensures a single DDP instance covers all parameters, avoiding NCCL
+    # AllReduce desync that occurs when separate per-organism DDP instances are
+    # used and different ranks process different species in the same step.
+    model.usage_heads = nn.ModuleDict({str(k): v for k, v in usage_heads.items()})
+
     # Move to device
     model = model.to(device)
-    for h in usage_heads.values():
-        h.to(device)
 
-    # Wrap with DDP if multi-GPU
+    # Wrap with DDP if multi-GPU — single instance with find_unused_parameters
+    # because not every forward pass exercises every organism's usage head.
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-        usage_heads = {
-            k: DDP(v, device_ids=[local_rank], output_device=local_rank)
-            for k, v in usage_heads.items()
-        }
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
         print_rank0("Model(s) wrapped with DistributedDataParallel", rank)
+
+    # Rebuild usage_heads to point at the sub-modules now owned by the model.
+    model_module = model.module if isinstance(model, DDP) else model
+    usage_heads = {int(k): v for k, v in model_module.usage_heads.items()}
 
     # Optionally compile
     if args.compile:
@@ -752,15 +762,10 @@ def create_model(
         import torch._inductor.config as inductor_config
         inductor_config.group_fusion = False
         model = torch.compile(model)
-        usage_heads = {k: torch.compile(v) for k, v in usage_heads.items()}
 
-    # Parameter counts
-    model_module = model.module if isinstance(model, DDP) else model
+    # Parameter counts (model_module.parameters() now includes usage heads)
     n_trainable = sum(p.numel() for p in trainable_params)
     n_total = sum(p.numel() for p in model_module.parameters())
-    for h in usage_heads.values():
-        usage_m = h.module if isinstance(h, DDP) else h
-        n_total += sum(p.numel() for p in usage_m.parameters())
     print_rank0(f"Trainable: {n_trainable:,} / {n_total:,} ({100*n_trainable/n_total:.2f}%)", rank)
 
     return model, usage_heads, trainable_params
@@ -854,10 +859,8 @@ def main() -> None:
         args, species_n_conditions, device, rank, world_size, local_rank
     )
     model_module = model.module if isinstance(model, DDP) else model
-    # Unwrapped usage modules for state_dict access
-    usage_modules: dict[int, nn.Module] = {
-        k: (v.module if isinstance(v, DDP) else v) for k, v in usage_heads.items()
-    }
+    # Unwrapped usage modules for state_dict access (they are sub-modules of model_module)
+    usage_modules: dict[int, nn.Module] = dict(usage_heads)
 
     # Optimizer
     optimizer = torch.optim.AdamW(
