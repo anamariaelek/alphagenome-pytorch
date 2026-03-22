@@ -56,12 +56,10 @@ lora_targets: q_proj,v_proj
 
 # ---------------------------------------------------------------------------
 # Optimiser
-# Gradient accumulation reduced from 4→1 because 4 GPUs now provide the
-# same effective batch size (2 × 1 × 4 = 8).
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 16
-gradient_accumulation_steps: 1
+batch_size: 1
+gradient_accumulation_steps: 8
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -81,14 +79,17 @@ use_amp: true
 # ---------------------------------------------------------------------------
 wandb: false
 wandb_project: alphagenome-splice
-log_every: 500
+log_every: 100
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+run_name: 524kb_full_multigpu
 save_every: 1
-# resume: auto
+
+# Resume: path to checkpoint, or "auto" to find latest in output_dir
+resume: auto
 
 # ---------------------------------------------------------------------------
 # Reproducibility

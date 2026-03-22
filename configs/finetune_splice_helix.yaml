@@ -95,8 +95,7 @@ use_amp: true              # set false to disable AMP
 # ---------------------------------------------------------------------------
 wandb: false
 wandb_project: alphagenome-splice
-# wandb_entity: my-team
-log_every: 500
+log_every: 100
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ft_multigpu
+#SBATCH --job-name=ft-multigpu
 #SBATCH --partition=gpu-single
 #SBATCH --nodes=1
 #SBATCH --ntasks=1                  # torchrun manages worker processes internally
@@ -47,11 +47,10 @@ python -c "import torch; print(f'  GPUs available: {torch.cuda.device_count()}')
     exit 1
 }
 
-
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch
 N_GPUS=4
 
-CONFIG="${WORK_DIR}/scripts/configs/finetune_splice_helix_multigpu.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_splice_helix_multigpu.yaml"
 
 # Read output_dir and run_name from config YAML
 OUTPUT_DIR=$(python -c "import yaml; c=yaml.safe_load(open('${CONFIG}')); print(c.get('output_dir','').rstrip('/'))")
@@ -72,18 +71,21 @@ echo "Config: ${CONFIG}" | tee -a "${LOG_FILE}"
 echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
 echo "---" | tee -a "${LOG_FILE}"
 
+# Resume if checkpoint exists
+RESUME="/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/524kb_full_epoch1/best_model.pth"
+if [ -f "${RESUME}" ]; then
+    echo "Resuming from checkpoint: ${RESUME}" | tee -a "${LOG_FILE}"
+else
+    echo "No checkpoint found at ${RESUME}. Starting fresh training." | tee -a "${LOG_FILE}"
+    RESUME="auto"
+fi
+
 torchrun \
     --standalone \
     --nproc_per_node=${N_GPUS} \
     ${WORK_DIR}/scripts/finetune_splice.py \
-    --config ${CONFIG} 2>&1 | tee -a "${LOG_FILE}"
+    --config ${CONFIG} \
+    --resume ${RESUME} 2>&1 | tee -a "${LOG_FILE}"
 
 echo "---" | tee -a "${LOG_FILE}"
 echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"
-
-WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch
-N_GPUS=4
-
-CONFIG="${WORK_DIR}/scripts/configs/finetune_splice_helix_multigpu.yaml"
-
-torchrun \

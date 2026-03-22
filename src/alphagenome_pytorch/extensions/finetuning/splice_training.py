@@ -61,6 +61,8 @@ if TYPE_CHECKING:
     from torch.optim.lr_scheduler import LambdaLR
     from torch.utils.data import DataLoader
 
+    from alphagenome_pytorch.extensions.finetuning.logging import TrainingLogger
+
 
 @dataclass
 class SpliceTrainMetrics:
@@ -90,6 +92,7 @@ def train_epoch_splice(
     accumulation_steps: int = 1,
     log_every: int = 50,
     epoch: int = 0,
+    logger: "TrainingLogger | None" = None,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -222,6 +225,14 @@ def train_epoch_splice(
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}  "
                     f"{sps:.2f} steps/s"
                 )
+                if logger is not None:
+                    logger.log_step({
+                        "epoch": epoch,
+                        "train_loss": avg,
+                        "train_cls_loss": avg_cls,
+                        "train_usage_loss": avg_usg,
+                        "steps_per_sec": sps,
+                    })
                 step_start = time.perf_counter()
 
     # Average

@@ -81,7 +81,7 @@ echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
 echo "---" | tee -a "${LOG_FILE}"
 
 # Resume if checkpoint exists
-RESUME="${LOG_DIR}/best_model.pth"
+RESUME="/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/524kb_full_epoch1/best_model.pth"
 if [ -f "${RESUME}" ]; then
     echo "Resuming from checkpoint: ${RESUME}" | tee -a "${LOG_FILE}"
 else

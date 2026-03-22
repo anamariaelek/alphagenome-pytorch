@@ -870,6 +870,7 @@ def main() -> None:
     total_steps = (args.epochs * len(train_loader)) // args.gradient_accumulation_steps
     scheduler = create_lr_scheduler(optimizer, args.warmup_steps, total_steps, schedule=args.lr_schedule)
     effective_batch_size = args.batch_size * args.gradient_accumulation_steps * world_size
+    print_rank0(f"Batch size: {args.batch_size}", rank)
     print_rank0(f"Gradient accumulation: {args.gradient_accumulation_steps}", rank)
     print_rank0(f"Effective batch size: {effective_batch_size}", rank)
     print_rank0(f"Total optimizer steps: {total_steps:,}", rank)
@@ -935,6 +936,7 @@ def main() -> None:
         "dtype": args.dtype,
         "world_size": world_size,
         "seed": args.seed,
+        "log_every": args.log_every,
         "resumed_from": str(resume_path) if resume_path else None,
     }
 
@@ -1016,6 +1018,7 @@ def main() -> None:
                 accumulation_steps=args.gradient_accumulation_steps,
                 log_every=args.log_every,
                 epoch=epoch,
+                logger=logger,
             )
 
             if handler.preempted:
