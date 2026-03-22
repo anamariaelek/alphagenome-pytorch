@@ -52,7 +52,7 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
 DIR=/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=20260318_114448_132kb_lora
+RUN=132kb_lora
 mkdir -p ${DIR}/${RUN}/predictions/
 
 python scripts/evaluate_splice.py \

@@ -50,6 +50,12 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.amp import autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Return the underlying module, unwrapping DistributedDataParallel if needed."""
+    return model.module if isinstance(model, DDP) else model
 
 from alphagenome_pytorch.extensions.finetuning.splice_losses import (
     splice_classification_loss,
@@ -174,7 +180,7 @@ def train_epoch_splice(
             emb_1bp = outputs["embeddings_1bp"]  # (B, TRUNK_DIM, S) NCL
 
             # ── Classification loss ─────────────────────────────────────────
-            cls_out = model.splice_sites_classification_head(
+            cls_out = _unwrap(model).splice_sites_classification_head(
                 emb_1bp, org_idx, channels_last=True
             )
             cls_loss_val, cls_acc = splice_classification_loss(
@@ -313,7 +319,7 @@ def validate_splice(
             )
             emb_1bp = outputs["embeddings_1bp"]
 
-            cls_out = model.splice_sites_classification_head(
+            cls_out = _unwrap(model).splice_sites_classification_head(
                 emb_1bp, org_idx, channels_last=True
             )
             cls_loss_val, cls_acc = splice_classification_loss(
