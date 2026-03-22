@@ -190,8 +190,25 @@ def load_checkpoint(
     """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
 
-    # Load entire model state (trunk + heads)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # Load entire model state (trunk + heads).
+    # Use strict=False to allow resuming when new heads (e.g. usage_heads) were
+    # added after the checkpoint was saved; missing keys will be left at their
+    # randomly-initialised values.
+    missing, unexpected = model.load_state_dict(
+        checkpoint["model_state_dict"], strict=False
+    )
+    if missing:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Checkpoint missing keys (will use initialised weights): %s", missing
+        )
+    if unexpected:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Checkpoint has unexpected keys (ignored): %s", unexpected
+        )
 
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 

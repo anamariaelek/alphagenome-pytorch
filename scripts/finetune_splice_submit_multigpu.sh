@@ -71,21 +71,11 @@ echo "Config: ${CONFIG}" | tee -a "${LOG_FILE}"
 echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
 echo "---" | tee -a "${LOG_FILE}"
 
-# Resume if checkpoint exists
-RESUME="/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/524kb_full_epoch1/best_model.pth"
-if [ -f "${RESUME}" ]; then
-    echo "Resuming from checkpoint: ${RESUME}" | tee -a "${LOG_FILE}"
-else
-    echo "No checkpoint found at ${RESUME}. Starting fresh training." | tee -a "${LOG_FILE}"
-    RESUME="auto"
-fi
-
 torchrun \
     --standalone \
     --nproc_per_node=${N_GPUS} \
     ${WORK_DIR}/scripts/finetune_splice.py \
-    --config ${CONFIG} \
-    --resume ${RESUME} 2>&1 | tee -a "${LOG_FILE}"
+    --config ${CONFIG} | tee -a "${LOG_FILE}"
 
 echo "---" | tee -a "${LOG_FILE}"
 echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"
