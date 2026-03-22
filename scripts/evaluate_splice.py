@@ -37,12 +37,39 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+
+
+class _Tee:
+    """Mirror writes to both the original stream and an open log file."""
+
+    def __init__(self, stream, log_path: Path):
+        self._stream = stream
+        self._log = open(log_path, "a", buffering=1)  # line-buffered
+
+    def write(self, data: str) -> int:
+        self._stream.write(data)
+        self._log.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        self._log.flush()
+
+    def fileno(self) -> int:          # needed by some C libs
+        return self._stream.fileno()
+
+    def isatty(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        self._log.close()
 
 # Splice class labels (must match SpliceSiteAnnotation)
 SPLICE_CLASS_NAMES = ["Donor+", "Acceptor+", "Donor-", "Acceptor-"]
@@ -148,7 +175,7 @@ def parse_args() -> argparse.Namespace:
              "config.json species_specs. If omitted, val_bed from config.json is used.",
     )
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--min-coverage", type=int, default=10,
                         help="Min (Alpha+Beta) coverage for usage targets (default: 10)")
@@ -516,19 +543,21 @@ def plot_pr_curves(
     from sklearn.metrics import precision_recall_curve, average_precision_score
 
     fig, ax = plt.subplots(figsize=(5, 4))
+    n_sites = len(cls_labels)
     for c in range(4):
         y_true = (cls_labels == c).astype(np.int32)
-        if y_true.sum() == 0:
+        n_pos = y_true.sum()
+        if n_pos == 0:
             continue
         precision, recall, _ = precision_recall_curve(y_true, cls_probs[:, c])
         pr_auc = float(average_precision_score(y_true, cls_probs[:, c]))
         ax.plot(recall, precision,
-                label=f"{CLASS_LABELS[c]} (AUC={pr_auc:.3f})",
+                label=f"{CLASS_LABELS[c]} (AUC={pr_auc:.3f}, n={n_pos:,})",
                 color=CLASS_COLORS[c])
 
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
-    ax.set_title(f"PR Curve – {title}")
+    ax.set_title(f"PR Curve – {title} (n={n_sites:,})")
     ax.legend(loc="lower left", fontsize=8)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -614,18 +643,19 @@ def save_predictions(
     usage_per_cond: dict,
     src_tags: np.ndarray | None = None,
 ) -> None:
-    """Persist prediction arrays to disk for later re-plotting / re-analysis."""
+    """Persist prediction arrays to disk for later re-plotting / re-analysis as Parquet."""
     out_dir.mkdir(parents=True, exist_ok=True)
     npz_kwargs: dict = dict(
         cls_probs  = cls_probs.astype(np.float32),
         cls_labels = cls_labels.astype(np.int64),
     )
     if src_tags is not None:
-        npz_kwargs["src_tags"] = src_tags
+        npz_kwargs["src_tags"] = src_tags.astype(np.int8)
     npz_path = out_dir / f"predictions_{org_name}.npz"
     np.savez_compressed(npz_path, **npz_kwargs)
 
     usage_path = out_dir / f"usage_{org_name}.json"
+    import json
     with open(usage_path, "w") as f:
         json.dump({str(k): v for k, v in usage_per_cond.items()}, f)
     print(f"  Saved: {npz_path}  {usage_path}")
@@ -679,10 +709,11 @@ def compute_source_metrics(
         if not ann_mask.any():
             continue
 
-        # Binary AUPRC: annotated sites of this source vs background
-        combined = ann_mask | bg_mask
-        y_bin = (cls_labels[combined] != BACKGROUND_CLASS).astype(np.int32)
-        s_bin = 1.0 - cls_probs[combined, BACKGROUND_CLASS]
+        # Only include positives from this source and negatives from background
+        mask = ann_mask | bg_mask
+        # y_bin: 1 for this source, 0 for background
+        y_bin = ann_mask[mask].astype(np.int32)
+        s_bin = 1.0 - cls_probs[mask, BACKGROUND_CLASS]
         binary_ap = (
             float(average_precision_score(y_bin, s_bin))
             if y_bin.sum() > 0 else float("nan")
@@ -781,20 +812,22 @@ def plot_pr_curves_by_source(
             continue
         probs_s  = cls_probs[mask]
         labels_s = cls_labels[mask]
+        n_sites = len(labels_s)
 
         fig, ax = plt.subplots(figsize=(5, 4))
         for c in range(4):
             y_true = (labels_s == c).astype(np.int32)
-            if y_true.sum() == 0:
+            n_pos = y_true.sum()
+            if n_pos == 0:
                 continue
             precision, recall, _ = precision_recall_curve(y_true, probs_s[:, c])
             ap = float(average_precision_score(y_true, probs_s[:, c]))
             ax.plot(recall, precision,
-                    label=f"{CLASS_LABELS[c]} (AUC={ap:.3f})",
+                    label=f"{CLASS_LABELS[c]} (AUC={ap:.3f}, n={n_pos:,})",
                     color=CLASS_COLORS[c])
         ax.set_xlabel("Recall")
         ax.set_ylabel("Precision")
-        ax.set_title(f"PR Curve \u2013 {org_name} / {src_name}")
+        ax.set_title(f"PR Curve \u2013 {org_name} / {src_name} (n={n_sites:,})")
         ax.legend(loc="lower left", fontsize=8)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -812,6 +845,15 @@ def main() -> None:
     args = parse_args()
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # -- Set up log file (tee stdout + stderr to eval.log) -------------------
+    log_path = out_dir / "eval.log"
+    _tee_out = _Tee(sys.stdout, log_path)
+    _tee_err = _Tee(sys.stderr, log_path)
+    sys.stdout = _tee_out  # type: ignore[assignment]
+    sys.stderr = _tee_err  # type: ignore[assignment]
+    print(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    print(f"Log: {log_path}")
 
     # -- Resolve checkpoint and config ---------------------------------------
     pth_path, cfg_path = resolve_checkpoint(args.checkpoint)
