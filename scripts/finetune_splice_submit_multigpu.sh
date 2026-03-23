@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=32          # 4 GPUs × 8 workers each
 #SBATCH --gres=gpu:4,gpumem_per_gpu:80GB
 #SBATCH --mem=200gb
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 #
@@ -66,16 +66,20 @@ mkdir -p "${LOG_DIR}"
 LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/train_${LOG_TIMESTAMP}.log"
 
-echo "Starting finetuning at $(date)" | tee -a "${LOG_FILE}"
-echo "Config: ${CONFIG}" | tee -a "${LOG_FILE}"
-echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
-echo "---" | tee -a "${LOG_FILE}"
+# Redirect all stdout + stderr for the rest of this script to LOG_FILE.
+# Everything — shell echos, Python output from all ranks — ends up in one file.
+exec >> "${LOG_FILE}" 2>&1
+
+echo "Starting finetuning at $(date)"
+echo "Config: ${CONFIG}"
+echo "Log file: ${LOG_FILE}"
+echo "---"
 
 torchrun \
     --standalone \
     --nproc_per_node=${N_GPUS} \
     ${WORK_DIR}/scripts/finetune_splice.py \
-    --config ${CONFIG} | tee -a "${LOG_FILE}"
+    --config ${CONFIG}
 
-echo "---" | tee -a "${LOG_FILE}"
-echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"
+echo "---"
+echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}"

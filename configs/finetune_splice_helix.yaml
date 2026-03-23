@@ -63,7 +63,7 @@ cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16            # bfloat16 | float32
-gradient_checkpointing: true
+gradient_checkpointing: false
 
 lora_rank: 8
 lora_alpha: 16

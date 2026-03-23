@@ -37,8 +37,12 @@ class _Tee:
         return False
 
 
-def setup_output_logging(output_dir: Path, rank: int) -> None:
-    """Tee stdout to ``output_dir/train.log`` on rank 0.
+def setup_output_logging(
+    output_dir: Path,
+    rank: int,
+    log_file: "str | Path | None" = None,
+) -> None:
+    """Tee stdout to a log file on rank 0.
 
     All subsequent ``print()`` calls (and anything written to *sys.stdout*)
     will be mirrored to the log file in addition to the terminal.
@@ -48,13 +52,20 @@ def setup_output_logging(output_dir: Path, rank: int) -> None:
     Args:
         output_dir: Directory that already exists (created by caller).
         rank: Process rank; only rank 0 writes the file.
+        log_file: Optional explicit path for the log file.  When given it is
+            used as-is (absolute or relative); when omitted the log is written
+            to ``output_dir/train.log`` (previous default behaviour).
     """
     if not is_main_process(rank):
         return
     # Already tee'd — don't double-wrap.
     if isinstance(sys.stdout, _Tee):
         return
-    log_path = Path(output_dir) / "train.log"
+    if log_file is not None:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        log_path = Path(output_dir) / "train.log"
     log_fh = open(log_path, "a", buffering=1)  # line-buffered
     sys.stdout = _Tee(sys.__stdout__, log_fh)
     print(f"Logging to {log_path}")

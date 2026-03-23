@@ -208,6 +208,16 @@ def train_epoch_splice(
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
 
+                # Ensure every parameter participates in backward so plain DDP
+                # (without find_unused_parameters / static_graph) does not hang.
+                # embeddings_only=True skips output heads, and only one organism's
+                # usage head is active per batch — the zero-valued dummy touches
+                # all remaining parameters without affecting gradients.
+                if isinstance(model, DDP):
+                    total_loss = total_loss + 0.0 * sum(
+                        p.sum() for p in model.parameters() if p.requires_grad
+                    )
+
             # Scale for accumulation
             (total_loss / accumulation_steps).backward()
 
