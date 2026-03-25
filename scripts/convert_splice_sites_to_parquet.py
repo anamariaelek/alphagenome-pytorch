@@ -18,8 +18,11 @@ Splice-site extraction rules (pyranges uses 0-based half-open [Start, End) coord
       e1 … eN-1:    Acceptor- at End-1, Donor- at Start
       eN only:       Donor-   at Start           (no upstream intron in tx direction)
 
-Optional --usage-parquet adds the union of GTF-derived sites and sites found
-in a Spliser _usage.parquet file (after applying Alpha+Beta and Alpha filters).
+Optional --usage-parquet combines GTF-derived sites with sites found in a
+Spliser _usage.parquet file (after applying Alpha+Beta and Alpha filters).
+Use --usage-mode to control how they are combined:
+  union     (default) adds usage sites on top of GTF sites
+  intersect restricts output to GTF sites that also appear in the usage parquet
 The companion _usage.json must reside in the same directory.
 
 Usage
@@ -209,6 +212,7 @@ def convert_splice_sites_to_parquet(
     usage_coord_base: int = 0,
     add_chr_prefix: bool = False,
     strip_chr_prefix: bool = False,
+    usage_mode: str = "union",
 ) -> None:
     """Build splice site annotation Parquet from GTF and/or Spliser usage data.
 
@@ -219,8 +223,7 @@ def convert_splice_sites_to_parquet(
         output_path: Destination Parquet file path.
         usage_parquet: Path to a ``_usage.parquet`` file produced by
             ``convert_splice_usage_to_parquet.py``. A sibling ``_usage.json``
-            must exist in the same directory. Sites are unioned with
-            GTF-derived sites.
+            must exist in the same directory.
         min_coverage: Minimum Alpha+Beta value for usage sites (default 10).
         alpha_min: Optional minimum Alpha value for usage sites.
         compression: Parquet compression codec (``'snappy'``, ``'gzip'``,
@@ -233,6 +236,11 @@ def convert_splice_sites_to_parquet(
             tool that stores 1-based positions.
         add_chr_prefix: Add ``chr`` prefix to all Chromosome values.
         strip_chr_prefix: Remove ``chr`` prefix from all Chromosome values.
+        usage_mode: How to combine GTF-derived and usage sites when both are
+            provided. ``'union'`` (default) adds usage sites on top of GTF
+            sites. ``'intersect'`` restricts GTF sites to only those that
+            also appear in the usage parquet (no new usage-only sites are
+            added).
     """
     import pandas as pd
 
@@ -245,19 +253,20 @@ def convert_splice_sites_to_parquet(
         frames.append(_extract_from_gtf(Path(gtf_path)))
 
     if usage_parquet is not None:
-        frames.append(
-            _extract_from_usage(
-                Path(usage_parquet),
-                min_coverage=min_coverage,
-                alpha_min=alpha_min,
-                usage_coord_base=usage_coord_base,
-            )
+        usage_df = _extract_from_usage(
+            Path(usage_parquet),
+            min_coverage=min_coverage,
+            alpha_min=alpha_min,
+            usage_coord_base=usage_coord_base,
         )
+    else:
+        usage_df = None
 
-    # ── Overlap report ──────────────────────────────────────────────────────
-    if len(frames) == 2:
-        gtf_df, usage_df = frames
-        key = ["Chromosome", "Position", "SiteType"]
+    # ── Combine GTF and usage frames according to usage_mode ────────────────
+    key = ["Chromosome", "Position", "SiteType"]
+
+    if gtf_path is not None and usage_df is not None:
+        gtf_df = frames[0]
         gtf_set = set(map(tuple, gtf_df[key].drop_duplicates().values.tolist()))
         usage_set = set(map(tuple, usage_df[key].drop_duplicates().values.tolist()))
         n_gtf = len(gtf_set)
@@ -265,7 +274,7 @@ def convert_splice_sites_to_parquet(
         n_overlap = len(gtf_set & usage_set)
         n_gtf_only = len(gtf_set - usage_set)
         n_usage_only = len(usage_set - gtf_set)
-        print(f"\nOverlap between GTF-derived and usage sites:")
+        print(f"\nOverlap between GTF-derived and usage sites (mode={usage_mode}):")
         print(f"  GTF sites          : {n_gtf:>10,}")
         print(f"  Usage sites        : {n_usage:>10,}")
         print(f"  Overlap (both)     : {n_overlap:>10,}  "
@@ -275,7 +284,23 @@ def convert_splice_sites_to_parquet(
               f"({100*n_gtf_only/n_gtf:.1f}% of GTF)")
         print(f"  Usage only         : {n_usage_only:>10,}  "
               f"({100*n_usage_only/n_usage:.1f}% of usage)")
-        print(f"  Union (output)     : {n_gtf + n_usage_only:>10,}")
+
+        if usage_mode == "union":
+            print(f"  Union (output)     : {n_gtf + n_usage_only:>10,}")
+            frames.append(usage_df)
+        elif usage_mode == "intersect":
+            n_intersect = n_overlap
+            print(f"  Intersect (output) : {n_intersect:>10,}")
+            gtf_df_filtered = gtf_df[
+                gtf_df[key].apply(tuple, axis=1).isin(usage_set)
+            ].copy()
+            frames = [gtf_df_filtered]
+        else:
+            raise ValueError(f"Unknown usage_mode: {usage_mode!r}. Expected 'union' or 'intersect'.")  # noqa: E501
+    elif usage_df is not None:
+        # No GTF provided — usage only
+        frames.append(usage_df)
+    # else: GTF only, frames already contains the GTF frame
 
     combined = pd.concat(frames, ignore_index=True)
 
@@ -350,6 +375,11 @@ Examples:
                         help="Prepend 'chr' to all chromosome names (e.g. '1' → 'chr1').")
     parser.add_argument("--strip-chr-prefix", action="store_true",
                         help="Remove 'chr' prefix from chromosome names (e.g. 'chr1' → '1').")
+    parser.add_argument("--usage-mode", default="union", choices=["union", "intersect"],
+                        help="How to combine GTF and usage sites when --usage-parquet is given. "
+                             "'union' (default): add usage sites on top of GTF sites. "
+                             "'intersect': restrict output to GTF sites that also appear "
+                             "in the usage parquet.")
     args = parser.parse_args()
 
     if args.add_chr_prefix and args.strip_chr_prefix:
@@ -368,6 +398,7 @@ Examples:
         usage_coord_base=args.usage_coord_base,
         add_chr_prefix=args.add_chr_prefix,
         strip_chr_prefix=args.strip_chr_prefix,
+        usage_mode=args.usage_mode,
     )
 
 

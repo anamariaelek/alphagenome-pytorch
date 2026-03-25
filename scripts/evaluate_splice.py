@@ -36,9 +36,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -48,57 +47,39 @@ import torch.nn as nn
 from tqdm import tqdm
 
 
-class _Timer:
-    """Simple context manager and utility for timing operations."""
+def setup_logging(log_path: Path) -> logging.Logger:
+    """Configure logging to write to both file and console."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     
-    def __init__(self, name: str = "Operation"):
-        self.name = name
-        self.start_time = None
-        self.elapsed = None
+    # Create logger
+    logger = logging.getLogger("evaluate_splice")
+    logger.setLevel(logging.DEBUG)
     
-    def __enter__(self):
-        self.start_time = time.perf_counter()
-        return self
+    # Remove any existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
     
-    def __exit__(self, *args):
-        self.elapsed = time.perf_counter() - self.start_time
-        print(f"  ⏱  {self.name:<45s} {self.elapsed:>7.2f}s")
+    # File handler (verbose, all levels)
+    fh = logging.FileHandler(log_path, mode="w")
+    fh.setLevel(logging.DEBUG)
     
-    @staticmethod
-    def format_time(seconds: float) -> str:
-        """Format seconds to a readable string."""
-        if seconds < 60:
-            return f"{seconds:.2f}s"
-        elif seconds < 3600:
-            return f"{seconds/60:.2f}m"
-        else:
-            return f"{seconds/3600:.2f}h"
+    # Console handler (info and above)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    
+    # Formatter with timestamp
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)-8s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    
+    return logger
 
-
-class _Tee:
-    """Mirror writes to both the original stream and an open log file."""
-
-    def __init__(self, stream, log_path: Path):
-        self._stream = stream
-        self._log = open(log_path, "a", buffering=1)  # line-buffered
-
-    def write(self, data: str) -> int:
-        self._stream.write(data)
-        self._log.write(data)
-        return len(data)
-
-    def flush(self) -> None:
-        self._stream.flush()
-        self._log.flush()
-
-    def fileno(self) -> int:          # needed by some C libs
-        return self._stream.fileno()
-
-    def isatty(self) -> bool:
-        return False
-
-    def close(self) -> None:
-        self._log.close()
 
 # Splice class labels (must match SpliceSiteAnnotation)
 SPLICE_CLASS_NAMES = ["Donor+", "Acceptor+", "Donor-", "Acceptor-"]
@@ -180,6 +161,164 @@ def build_source_arrays(
 
 
 # ---------------------------------------------------------------------------
+# Gene-overlap filtering
+# ---------------------------------------------------------------------------
+
+def build_gene_intervals(gene_annotation_parquet: str) -> dict[str, np.ndarray]:
+    """Build merged gene intervals per chromosome from a gene annotation parquet.
+
+    Reads transcript (or all) features and merges overlapping intervals per
+    chromosome.  Returns ``{chrom: array of shape (N, 2)}`` where each row is
+    a ``[start, end)`` 0-based half-open interval (sorted, non-overlapping).
+    """
+    import pandas as pd
+
+    df = pd.read_parquet(
+        gene_annotation_parquet,
+        columns=["Chromosome", "Feature", "Start", "End"],
+    )
+    tx = df[df["Feature"] == "transcript"][["Chromosome", "Start", "End"]]
+    if tx.empty:
+        # Fallback: use all rows (some annotations lack an explicit transcript feature)
+        tx = df[["Chromosome", "Start", "End"]].drop_duplicates()
+    tx = tx.copy()
+    tx["Chromosome"] = tx["Chromosome"].astype(str)
+
+    result: dict[str, np.ndarray] = {}
+    for chrom, grp in tx.groupby("Chromosome"):
+        starts = grp["Start"].values.astype(np.int64)
+        ends = grp["End"].values.astype(np.int64)
+        order = np.argsort(starts)
+        starts = starts[order]
+        ends = ends[order]
+
+        # Merge overlapping / adjacent intervals
+        ms = [int(starts[0])]
+        me = [int(ends[0])]
+        for i in range(1, len(starts)):
+            if starts[i] <= me[-1]:
+                me[-1] = max(me[-1], int(ends[i]))
+            else:
+                ms.append(int(starts[i]))
+                me.append(int(ends[i]))
+        result[str(chrom)] = np.column_stack([ms, me])
+    return result
+
+
+def _window_overlaps_genes(
+    chrom: str,
+    win_start: int,
+    win_end: int,
+    gene_intervals: dict[str, np.ndarray],
+) -> bool:
+    """Return True if [win_start, win_end) overlaps any merged gene interval."""
+    intervals = gene_intervals.get(chrom)
+    if intervals is None:
+        return False
+    starts = intervals[:, 0]
+    ends = intervals[:, 1]
+    # Overlap condition: interval.start < win_end AND interval.end > win_start
+    lo = int(np.searchsorted(ends, win_start, side="right"))   # first end > win_start
+    hi = int(np.searchsorted(starts, win_end, side="left"))    # first start >= win_end
+    return lo < hi
+
+
+def filter_bed_by_gene_overlap(
+    bed_file: str,
+    gene_intervals: dict[str, np.ndarray],
+    output_bed: str | Path,
+    sequence_length: int = 131_072,
+) -> tuple[int, int]:
+    """Write a filtered BED keeping only windows that overlap gene regions.
+
+    Returns ``(n_kept, n_total)``.
+    """
+    half = sequence_length // 2
+    output_bed = Path(output_bed)
+    output_bed.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build a chromosome alias map (handle chr-prefix mismatches)
+    alias: dict[str, str] = {}
+    for chrom in gene_intervals:
+        alias[chrom] = chrom
+        if chrom.startswith("chr"):
+            alias[chrom[3:]] = chrom
+        else:
+            alias["chr" + chrom] = chrom
+
+    n_kept = n_total = 0
+    with open(bed_file) as fin, open(output_bed, "w") as fout:
+        for line in fin:
+            if line.startswith("#"):
+                fout.write(line)
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            n_total += 1
+            chrom_raw = parts[0]
+            chrom = alias.get(chrom_raw, chrom_raw)
+            center = (int(parts[1]) + int(parts[2])) // 2
+            win_start = center - half
+            win_end = center + half
+            if _window_overlaps_genes(chrom, win_start, win_end, gene_intervals):
+                fout.write(line)
+                n_kept += 1
+    return n_kept, n_total
+
+
+def build_gene_overlap_mask(
+    bed_file: str,
+    gene_intervals: dict[str, np.ndarray],
+    sequence_length: int = 131_072,
+) -> np.ndarray:
+    """Build a boolean mask over all per-position predictions.
+
+    Returns a 1-D boolean array of length ``n_windows * sequence_length``
+    where ``True`` means the position falls within a gene interval.
+    """
+    half = sequence_length // 2
+
+    # Chromosome alias map (handle chr-prefix mismatches)
+    alias: dict[str, str] = {}
+    for chrom in gene_intervals:
+        alias[chrom] = chrom
+        if chrom.startswith("chr"):
+            alias[chrom[3:]] = chrom
+        else:
+            alias["chr" + chrom] = chrom
+
+    masks: list[np.ndarray] = []
+    with open(bed_file) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            chrom_raw = parts[0]
+            chrom = alias.get(chrom_raw, chrom_raw)
+            center = (int(parts[1]) + int(parts[2])) // 2
+            win_start = center - half
+
+            win_mask = np.zeros(sequence_length, dtype=bool)
+            intervals = gene_intervals.get(chrom)
+            if intervals is not None:
+                starts = intervals[:, 0]
+                ends = intervals[:, 1]
+                lo = int(np.searchsorted(ends, win_start, side="right"))
+                hi = int(np.searchsorted(starts, win_start + sequence_length, side="left"))
+                for gs, ge in zip(starts[lo:hi], ends[lo:hi]):
+                    rel_start = max(0, int(gs) - win_start)
+                    rel_end = min(sequence_length, int(ge) - win_start)
+                    if rel_start < rel_end:
+                        win_mask[rel_start:rel_end] = True
+            masks.append(win_mask)
+
+    return np.concatenate(masks)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -215,9 +354,15 @@ def parse_args() -> argparse.Namespace:
         help="Skip inference; load saved predictions from --output-dir instead.",
     )
     parser.add_argument(
-        "--gtf-annotation", nargs="*", default=None,
+        "--annotated-sites", nargs="*", default=None,
         help="GTF-only splice-site parquets, one per organism (same order as "
              "species_specs). Enables per-source evaluation.",
+    )
+    parser.add_argument(
+        "--gene-annotation", nargs="*", default=None,
+        help="Gene annotation parquets (with Chromosome/Start/End/Feature columns), "
+             "one per organism. When provided, only BED windows overlapping gene "
+             "regions are evaluated (intergenic windows are skipped).",
     )
     parser.add_argument(
         "--per-condition", action="store_true",
@@ -268,7 +413,7 @@ def load_config(cfg_path: Path) -> dict:
 # Model reconstruction
 # ---------------------------------------------------------------------------
 
-def build_model(cfg: dict, ckpt: dict, device: torch.device) -> nn.Module:
+def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Logger | None = None) -> nn.Module:
     """Reconstruct the AlphaGenome model with LoRA and splice heads from a checkpoint.
 
     Mirrors the model construction logic in finetune_splice.py:create_model().
@@ -294,8 +439,11 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device) -> nn.Module:
         else DtypePolicy.mixed_precision()
     )
 
-    print(f"Building model (mode={cfg['mode']}, dtype={dtype_str}, "
-          f"num_organisms={num_organisms})...")
+    msg = f"Building model (mode={cfg['mode']}, dtype={dtype_str}, num_organisms={num_organisms})..."
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
 
     model = AlphaGenome(dtype_policy=dtype_policy)
 
@@ -309,8 +457,11 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device) -> nn.Module:
     # so the parameter names match)
     if cfg["mode"] == "lora" and cfg.get("lora_rank", 0) > 0:
         lora_targets = [t.strip() for t in cfg["lora_targets"].split(",")]
-        print(f"  Applying LoRA: rank={cfg['lora_rank']}, alpha={cfg['lora_alpha']}, "
-              f"targets={lora_targets}")
+        msg = f"  Applying LoRA: rank={cfg['lora_rank']}, alpha={cfg['lora_alpha']}, targets={lora_targets}"
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
         lora_cfg = TransferConfig(
             mode="lora",
             lora_targets=lora_targets,
@@ -325,7 +476,11 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device) -> nn.Module:
 
     # Load fine-tuned weights (LoRA adapters + classification head)
     model.load_state_dict(ckpt["model_state_dict"])
-    print(f"  Loaded model_state_dict (epoch {ckpt.get('epoch', '?')})")
+    msg = f"  Loaded model_state_dict (epoch {ckpt.get('epoch', '?')})"
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
 
     model.to(device).eval()
     return model
@@ -335,6 +490,7 @@ def build_usage_heads(
     cfg: dict,
     ckpt: dict,
     device: torch.device,
+    logger: logging.Logger | None = None,
 ) -> dict[int, nn.Module]:
     """Reconstruct per-organism usage heads and load their weights."""
     from alphagenome_pytorch.extensions.finetuning.heads import (
@@ -359,10 +515,17 @@ def build_usage_heads(
         sd_key = str(org_idx)
         if sd_key in usage_heads_state_dicts:
             head.load_state_dict(usage_heads_state_dicts[sd_key])
-            print(f"  Loaded usage head for organism {org_idx} ({n_cond} conditions)")
+            msg = f"  Loaded usage head for organism {org_idx} ({n_cond} conditions)"
+            if logger:
+                logger.info(msg)
+            else:
+                print(msg)
         else:
-            print(f"  Warning: no saved weights for usage head organism {org_idx}, using random init",
-                  file=sys.stderr)
+            msg = f"  Warning: no saved weights for usage head organism {org_idx}, using random init"
+            if logger:
+                logger.warning(msg)
+            else:
+                print(msg, file=sys.stderr)
         head.to(device).eval()
         usage_heads[org_idx] = head
 
@@ -562,17 +725,6 @@ def _accumulate_usage_by_source(
 # Metrics
 # ---------------------------------------------------------------------------
 
-def _compute_class_auprc(c: int, labels: np.ndarray, probs: np.ndarray) -> tuple[int, str, float, int]:
-    """Compute AUPRC for a single class (for parallelization)."""
-    from sklearn.metrics import average_precision_score
-    y_c = (labels == c).astype(np.int32)
-    n_pos = int(y_c.sum())
-    if n_pos == 0:
-        return c, SPLICE_CLASS_NAMES[c], float("nan"), 0
-    ap = float(average_precision_score(y_c, probs[:, c]))
-    return c, SPLICE_CLASS_NAMES[c], ap, n_pos
-
-
 def compute_classification_metrics(probs: np.ndarray, labels: np.ndarray) -> dict:
     try:
         from sklearn.metrics import average_precision_score
@@ -584,19 +736,16 @@ def compute_classification_metrics(probs: np.ndarray, labels: np.ndarray) -> dic
     binary_auprc = float(average_precision_score(y_binary, s_binary))
     pos_rate = float(y_binary.mean())
 
-    # Parallel per-class AUPRC computation
     per_class_auprc: dict[str, float] = {}
     per_class_n: dict[str, int] = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [
-            executor.submit(_compute_class_auprc, c, labels, probs)
-            for c in range(len(SPLICE_CLASS_NAMES))
-        ]
-        for future in futures:
-            c, name, ap, n_pos = future.result()
-            if not np.isnan(ap):
-                per_class_auprc[name] = ap
-                per_class_n[name] = n_pos
+    for c, name in enumerate(SPLICE_CLASS_NAMES):
+        y_c = (labels == c).astype(np.int32)
+        n_pos = int(y_c.sum())
+        if n_pos == 0:
+            continue
+        ap = float(average_precision_score(y_c, probs[:, c]))
+        per_class_auprc[name] = ap
+        per_class_n[name] = n_pos
 
     mean_per_class = (
         float(np.mean(list(per_class_auprc.values()))) if per_class_auprc else float("nan")
@@ -612,18 +761,6 @@ def compute_classification_metrics(probs: np.ndarray, labels: np.ndarray) -> dic
     }
 
 
-def _compute_condition_pearsonr(cond_data: tuple[int, dict]) -> float:
-    """Compute Pearson r for a single condition (for parallelization)."""
-    from scipy.stats import pearsonr
-    cond_idx, data = cond_data
-    pred = np.array(data["pred"], dtype=np.float32)
-    true = np.array(data["true"], dtype=np.float32)
-    if len(pred) < 2 or pred.std() < 1e-8 or true.std() < 1e-8:
-        return float("nan")
-    r, _ = pearsonr(pred, true)
-    return float(r)
-
-
 def compute_usage_metrics(usage_per_cond: dict) -> dict:
     try:
         from scipy.stats import pearsonr
@@ -631,18 +768,15 @@ def compute_usage_metrics(usage_per_cond: dict) -> dict:
         sys.exit("scipy is required. Install: pip install scipy")
 
     n_obs_total = sum(len(data["pred"]) for data in usage_per_cond.values())
-    
-    # Parallel Pearson r computation per condition
+
     rs: list[float] = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [
-            executor.submit(_compute_condition_pearsonr, (cond_idx, data))
-            for cond_idx, data in usage_per_cond.items()
-        ]
-        for future in futures:
-            r = future.result()
-            if not np.isnan(r):
-                rs.append(r)
+    for data in usage_per_cond.values():
+        pred = np.array(data["pred"], dtype=np.float32)
+        true = np.array(data["true"], dtype=np.float32)
+        if len(pred) < 2 or pred.std() < 1e-8 or true.std() < 1e-8:
+            continue
+        r, _ = pearsonr(pred, true)
+        rs.append(float(r))
 
     if not rs:
         return {
@@ -662,75 +796,59 @@ def compute_usage_metrics(usage_per_cond: dict) -> dict:
     }
 
 
-def _compute_source_usage_metrics(src_name: str, src_conds_dict: dict) -> tuple[str, dict]:
-    """Compute usage metrics for a single source (for parallelization)."""
-    from scipy.stats import pearsonr
-    
-    rs: list[float] = []
-    n_obs_total = 0
-    
-    for data in src_conds_dict.values():
-        pred = np.array(data["pred"], dtype=np.float32)
-        true = np.array(data["true"], dtype=np.float32)
-        n_obs_total += len(pred)
-        if len(pred) < 2 or pred.std() < 1e-8 or true.std() < 1e-8:
-            continue
-        r, _ = pearsonr(pred, true)
-        rs.append(float(r))
-    
-    if rs:
-        result = {
-            "usage_mean_pearson_r": float(np.mean(rs)),
-            "usage_median_pearson_r": float(np.median(rs)),
-            "usage_n_conditions_evaluated": len(rs),
-            "usage_n_conditions_total": len(src_conds_dict),
-            "usage_n_observations": n_obs_total,
-        }
-    else:
-        result = {
-            "usage_mean_pearson_r": float("nan"),
-            "usage_median_pearson_r": float("nan"),
-            "usage_n_conditions_evaluated": 0,
-            "usage_n_conditions_total": len(src_conds_dict),
-            "usage_n_observations": n_obs_total,
-        }
-    
-    return src_name, result
-
-
 def compute_usage_metrics_by_source(usage_by_source: dict) -> dict:
-    """Compute usage metrics separately for GTF-only and usage-only sites (parallelized)."""
+    """Compute usage metrics separately for GTF-only and usage-only sites."""
+    from scipy.stats import pearsonr
+
     results = {}
-    
-    # Parallel computation per source
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for src_name in ("gtf_only", "usage_only"):
-            if src_name in usage_by_source:
-                futures.append(
-                    executor.submit(_compute_source_usage_metrics, src_name, usage_by_source[src_name])
-                )
-        
-        for future in futures:
-            src_name, src_result = future.result()
-            results[src_name] = src_result
-    
+    for src_name in ("gtf_only", "usage_only"):
+        if src_name not in usage_by_source:
+            continue
+        src_conds_dict = usage_by_source[src_name]
+        rs: list[float] = []
+        n_obs_total = 0
+        for data in src_conds_dict.values():
+            pred = np.array(data["pred"], dtype=np.float32)
+            true = np.array(data["true"], dtype=np.float32)
+            n_obs_total += len(pred)
+            if len(pred) < 2 or pred.std() < 1e-8 or true.std() < 1e-8:
+                continue
+            r, _ = pearsonr(pred, true)
+            rs.append(float(r))
+        if rs:
+            results[src_name] = {
+                "usage_mean_pearson_r": float(np.mean(rs)),
+                "usage_median_pearson_r": float(np.median(rs)),
+                "usage_n_conditions_evaluated": len(rs),
+                "usage_n_conditions_total": len(src_conds_dict),
+                "usage_n_observations": n_obs_total,
+            }
+        else:
+            results[src_name] = {
+                "usage_mean_pearson_r": float("nan"),
+                "usage_median_pearson_r": float("nan"),
+                "usage_n_conditions_evaluated": 0,
+                "usage_n_conditions_total": len(src_conds_dict),
+                "usage_n_observations": n_obs_total,
+            }
     return results
 
 
-def print_usage_metrics(org_name: str, usage_m: dict) -> None:
-    print(f"\n{org_name} – Usage Prediction Metrics:")
-    print(f"  Mean Pearson r (across conditions): {usage_m['usage_mean_pearson_r']:.4f}")
-    print(f"  Median Pearson r (across conditions): {usage_m['usage_median_pearson_r']:.4f}")
-    print(
+def print_usage_metrics(org_name: str, usage_m: dict, logger: logging.Logger | None = None) -> None:
+    log_func = logger.info if logger else print
+    log_func(f"\n{org_name} – Usage Prediction Metrics:")
+    log_func(f"  Mean Pearson r (across conditions): {usage_m['usage_mean_pearson_r']:.4f}")
+    log_func(f"  Median Pearson r (across conditions): {usage_m['usage_median_pearson_r']:.4f}")
+    log_func(
         f"  Conditions evaluated: {usage_m['usage_n_conditions_evaluated']} / {usage_m['usage_n_conditions_total']}"
     )
-    print(f"  Total observations: {usage_m['usage_n_observations']:,}")
+    log_func(f"  Total observations: {usage_m['usage_n_observations']:,}")
 
 
-def print_usage_metrics_by_source(org_name: str, usage_by_source_m: dict) -> None:
+def print_usage_metrics_by_source(org_name: str, usage_by_source_m: dict, logger: logging.Logger | None = None) -> None:
     """Print usage metrics separately for GTF-only and usage-only sites."""
-    print(f"\n{org_name} – Usage Prediction Metrics by Source:")
+    log_func = logger.info if logger else print
+    log_func(f"\n{org_name} – Usage Prediction Metrics by Source:")
     
     for src_name in ("gtf_only", "usage_only"):
         if src_name not in usage_by_source_m:
@@ -738,11 +856,11 @@ def print_usage_metrics_by_source(org_name: str, usage_by_source_m: dict) -> Non
         
         m = usage_by_source_m[src_name]
         src_label = "GTF-only" if src_name == "gtf_only" else "Usage-only"
-        print(f"\n  {src_label}:")
-        print(f"    Mean Pearson r: {m['usage_mean_pearson_r']:.4f}")
-        print(f"    Median Pearson r: {m['usage_median_pearson_r']:.4f}")
-        print(f"    Conditions evaluated: {m['usage_n_conditions_evaluated']} / {m['usage_n_conditions_total']}")
-        print(f"    Total observations: {m['usage_n_observations']:,}")
+        log_func(f"\n  {src_label}:")
+        log_func(f"    Mean Pearson r: {m['usage_mean_pearson_r']:.4f}")
+        log_func(f"    Median Pearson r: {m['usage_median_pearson_r']:.4f}")
+        log_func(f"    Conditions evaluated: {m['usage_n_conditions_evaluated']} / {m['usage_n_conditions_total']}")
+        log_func(f"    Total observations: {m['usage_n_observations']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +901,7 @@ def plot_pr_curves(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
-    print(f"  Saved: {output_path}")
+    logging.getLogger("evaluate_splice").info(f"  Saved: {output_path}")
 
 
 def plot_usage_density(
@@ -816,10 +934,9 @@ def plot_usage_density(
     true_arr = np.array(true_all, dtype=np.float32)
     pred_arr = np.array(pred_all, dtype=np.float32)
 
-    fig, ax = plt.subplots(figsize=(4.8, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
 
     hb = ax.hexbin(true_arr, pred_arr, gridsize=25, cmap="magma_r", mincnt=1)
-    plt.colorbar(hb, ax=ax, label="Count", pad=0.02)
 
     num_points = len(true_arr)
     if true_arr.std() > 1e-8 and pred_arr.std() > 1e-8:
@@ -827,7 +944,7 @@ def plot_usage_density(
         ax.text(0.05, 0.95, f"r = {corr:.3f}\nn = {num_points:,}",
                 transform=ax.transAxes, fontsize=10, verticalalignment="top")
 
-    # Marginal histograms (matching plot_sse_density style)
+    # Marginal histograms
     ax_histx = ax.inset_axes([0, 1.05, 1, 0.2], sharex=ax)
     ax_histx.hist(true_arr, bins=30, color="gray", alpha=0.7)
     ax_histx.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
@@ -836,6 +953,10 @@ def plot_usage_density(
     ax_histy.hist(pred_arr, bins=30, orientation="horizontal", color="gray", alpha=0.7)
     ax_histy.tick_params(axis="y", which="both", left=False, right=False, labelleft=False)
 
+    # Place colorbar below the marginal histograms
+    cax = ax.inset_axes([1.28, 0, 0.04, 1])
+    fig.colorbar(hb, cax=cax, label="Count")
+
     ax.set_xlabel("True Usage")
     ax.set_ylabel("Predicted Usage")
     ax.set_xlim(0, 1)
@@ -843,11 +964,10 @@ def plot_usage_density(
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
 
-    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved: {output_path}")
+    logging.getLogger("evaluate_splice").info(f"  Saved: {output_path}")
 
 
 def plot_usage_per_condition(
@@ -891,7 +1011,7 @@ def plot_usage_per_condition(
         fn = out_dir / f"usage_per_condition_{org_name}_cond_{cond_idx}.png"
         fig.savefig(fn, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved: {fn}")
+        logging.getLogger("evaluate_splice").info(f"  Saved: {fn}")
 
 
 def plot_usage_per_tissue(
@@ -905,32 +1025,38 @@ def plot_usage_per_tissue(
         return
     
     if not usage_metadata_path.exists():
-        print(f"  Warning: Usage metadata not found at {usage_metadata_path}, skipping per-tissue plots")
+        logging.getLogger("evaluate_splice").warning(f"Usage metadata not found at {usage_metadata_path}, skipping per-tissue plots")
         return
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Load tissue mapping from metadata
+    # Load condition labels from metadata and build tissue map on the fly.
+    # condition_labels is {"Brain_1": 0, "Cerebellum_2": 8, ...}
+    # We invert to {0: "Brain_1", 8: "Cerebellum_2", ...} then split on
+    # the last underscore to extract tissue name.
     try:
         with open(usage_metadata_path) as f:
             metadata = json.load(f)
     except Exception as e:
-        print(f"  Warning: Could not load usage metadata: {e}, skipping per-tissue plots")
+        logging.getLogger("evaluate_splice").warning(f"Could not load usage metadata: {e}, skipping per-tissue plots")
         return
 
-    # Extract tissue mapping if available
-    tissue_map = metadata.get("tissue_map", metadata.get("condition_tissue", {}))
-    if not tissue_map:
-        print(f"  Warning: No tissue mapping in metadata, skipping per-tissue plots")
+    condition_labels = metadata.get("condition_labels", {})
+    if not condition_labels:
+        logging.getLogger("evaluate_splice").warning("No condition_labels in metadata, skipping per-tissue plots")
         return
+
+    # Invert: condition index -> label string
+    idx_to_label = {int(v): k for k, v in condition_labels.items()}
 
     # Group conditions by tissue
     tissue_data: dict[str, dict[str, list]] = {}
     for cond_idx, data in usage_per_cond.items():
-        cond_idx_str = str(cond_idx)
-        tissue = tissue_map.get(cond_idx_str, f"unknown_{cond_idx}")
+        label = idx_to_label.get(int(cond_idx), f"unknown_{cond_idx}")
+        # Split on last underscore: "Brain_1" -> tissue="Brain"
+        tissue = label.rsplit("_", 1)[0] if "_" in label else label
         if tissue not in tissue_data:
             tissue_data[tissue] = {"pred": [], "true": []}
         tissue_data[tissue]["pred"].extend(data["pred"])
@@ -965,7 +1091,7 @@ def plot_usage_per_tissue(
         fn = out_dir / f"usage_per_tissue_{org_name}_{tissue}.png"
         fig.savefig(fn, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved: {fn}")
+        logging.getLogger("evaluate_splice").info(f"  Saved: {fn}")
 
 
 def plot_usage_by_source(
@@ -1002,9 +1128,8 @@ def plot_usage_by_source(
         true_arr = np.array(true_all, dtype=np.float32)
         pred_arr = np.array(pred_all, dtype=np.float32)
 
-        fig, ax = plt.subplots(figsize=(4.8, 4))
+        fig, ax = plt.subplots(figsize=(5.5, 4.5))
         hb = ax.hexbin(true_arr, pred_arr, gridsize=25, cmap="magma_r", mincnt=1)
-        plt.colorbar(hb, ax=ax, label="Count", pad=0.02)
 
         num_points = len(true_arr)
         if true_arr.std() > 1e-8 and pred_arr.std() > 1e-8:
@@ -1021,6 +1146,10 @@ def plot_usage_by_source(
         ax_histy.hist(pred_arr, bins=30, orientation="horizontal", color="gray", alpha=0.7)
         ax_histy.tick_params(axis="y", which="both", left=False, right=False, labelleft=False)
 
+        # Place colorbar to the right of the marginal histogram
+        cax = ax.inset_axes([1.28, 0, 0.04, 1])
+        fig.colorbar(hb, cax=cax, label="Count")
+
         ax.set_xlabel("True Usage")
         ax.set_ylabel("Predicted Usage")
         ax.set_xlim(0, 1)
@@ -1029,11 +1158,10 @@ def plot_usage_by_source(
         ax.set_title(f"Usage {src_label}")
         ax.grid(True, alpha=0.3)
 
-        fig.tight_layout()
         fn = out_dir / f"usage_by_source_{org_name}_{src_name}.png"
         fig.savefig(fn, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved: {fn}")
+        logging.getLogger("evaluate_splice").info(f"  Saved: {fn}")
 
 
 # ---------------------------------------------------------------------------
@@ -1074,7 +1202,7 @@ def save_predictions(
                 serializable[src_name] = {str(k): v for k, v in cond_dict.items()}
             json.dump(serializable, f)
     
-    print(f"  Saved: {npz_path}  {usage_path}")
+    logging.getLogger("evaluate_splice").info(f"  Saved: {npz_path}  {usage_path}")
 
 
 def load_predictions(
@@ -1104,7 +1232,7 @@ def load_predictions(
             for src_name, cond_dict in data_by_src.items():
                 usage_by_source[src_name] = {int(k): v for k, v in cond_dict.items()}
     
-    print(f"  Loaded predictions from {npz_path}")
+    logging.getLogger("evaluate_splice").info(f"  Loaded predictions from {npz_path}")
     return cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source
 
 
@@ -1112,93 +1240,61 @@ def load_predictions(
 # Per-source metrics
 # ---------------------------------------------------------------------------
 
-def _compute_source_metrics_single(
-    src_val: int,
-    cls_probs: np.ndarray,
-    cls_labels: np.ndarray,
-    src_tags: np.ndarray,
-    true_bg_mask: np.ndarray,
-    bg_probs: np.ndarray,
-) -> tuple[str, dict]:
-    """Compute metrics for a single source (for parallelization)."""
-    from sklearn.metrics import average_precision_score
-
-    src_name = SOURCE_LABELS[src_val]
-    ann_mask = src_tags == src_val
-    if not ann_mask.any():
-        return src_name, {}
-
-    # Binary AUPRC
-    mask = ann_mask | true_bg_mask
-    y_bin = ann_mask[mask].astype(np.int32)
-    s_bin = 1.0 - cls_probs[mask, BACKGROUND_CLASS]
-    binary_ap = (
-        float(average_precision_score(y_bin, s_bin))
-        if y_bin.sum() > 0 else float("nan")
-    )
-
-    # Per-class AUPRC
-    ann_probs = cls_probs[ann_mask]
-    ann_labels = cls_labels[ann_mask]
-    per_class: dict[str, float] = {}
-    per_class_n: dict[str, int] = {}
-    
-    for c, name in enumerate(SPLICE_CLASS_NAMES):
-        y_c_ann = (ann_labels == c).astype(np.int32)
-        if y_c_ann.sum() == 0:
-            continue
-        # Build combined scores once (reuse bg_probs)
-        y_c_combined = np.concatenate([y_c_ann, np.zeros(len(bg_probs), dtype=np.int32)])
-        s_c_combined = np.concatenate([ann_probs[:, c], bg_probs[:, c]])
-        per_class[name] = float(average_precision_score(y_c_combined, s_c_combined))
-        per_class_n[name] = int(y_c_ann.sum())
-
-    mean_pc = float(np.mean(list(per_class.values()))) if per_class else float("nan")
-    
-    return src_name, {
-        "n_sites": int(ann_mask.sum()),
-        "n_background_sites": int(true_bg_mask.sum()),
-        "binary_auprc_vs_bg": binary_ap,
-        "per_class_auprc": per_class,
-        "per_class_n_positives": per_class_n,
-        "mean_per_class_auprc": mean_pc,
-    }
-
-
 def compute_source_metrics(
     cls_probs: np.ndarray,
     cls_labels: np.ndarray,
     src_tags: np.ndarray,
 ) -> dict:
-    """AUPRC per annotation source group (parallelized).
+    """AUPRC per annotation source group.
 
     For each source (intersect, gtf_only, usage_only):
       - Binary AUPRC: sites of that source vs background
       - Per-class AUPRC (one-vs-rest) among annotated sites of that source
     """
+    from sklearn.metrics import average_precision_score
+
     true_bg_mask = cls_labels == BACKGROUND_CLASS
     bg_probs = cls_probs[true_bg_mask]
 
     results: dict[str, dict] = {}
-    
-    # Parallel computation of each source
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [
-            executor.submit(
-                _compute_source_metrics_single,
-                src_val,
-                cls_probs,
-                cls_labels,
-                src_tags,
-                true_bg_mask,
-                bg_probs,
-            )
-            for src_val in (SRC_INTERSECT, SRC_GTF_ONLY, SRC_USAGE_ONLY)
-        ]
-        for future in futures:
-            src_name, src_result = future.result()
-            if src_result:
-                results[src_name] = src_result
+    for src_val in (SRC_INTERSECT, SRC_GTF_ONLY, SRC_USAGE_ONLY):
+        src_name = SOURCE_LABELS[src_val]
+        ann_mask = src_tags == src_val
+        if not ann_mask.any():
+            continue
+
+        # Binary AUPRC
+        mask = ann_mask | true_bg_mask
+        y_bin = ann_mask[mask].astype(np.int32)
+        s_bin = 1.0 - cls_probs[mask, BACKGROUND_CLASS]
+        binary_ap = (
+            float(average_precision_score(y_bin, s_bin))
+            if y_bin.sum() > 0 else float("nan")
+        )
+
+        # Per-class AUPRC
+        ann_probs = cls_probs[ann_mask]
+        ann_labels = cls_labels[ann_mask]
+        per_class: dict[str, float] = {}
+        per_class_n: dict[str, int] = {}
+        for c, name in enumerate(SPLICE_CLASS_NAMES):
+            y_c_ann = (ann_labels == c).astype(np.int32)
+            if y_c_ann.sum() == 0:
+                continue
+            y_c_combined = np.concatenate([y_c_ann, np.zeros(len(bg_probs), dtype=np.int32)])
+            s_c_combined = np.concatenate([ann_probs[:, c], bg_probs[:, c]])
+            per_class[name] = float(average_precision_score(y_c_combined, s_c_combined))
+            per_class_n[name] = int(y_c_ann.sum())
+
+        mean_pc = float(np.mean(list(per_class.values()))) if per_class else float("nan")
+        results[src_name] = {
+            "n_sites": int(ann_mask.sum()),
+            "n_background_sites": int(true_bg_mask.sum()),
+            "binary_auprc_vs_bg": binary_ap,
+            "per_class_auprc": per_class,
+            "per_class_n_positives": per_class_n,
+            "mean_per_class_auprc": mean_pc,
+        }
 
     return results
 
@@ -1207,50 +1303,52 @@ def compute_source_metrics(
 # Reporting
 # ---------------------------------------------------------------------------
 
-def print_metrics(org_name: str, cls_m: dict, usage_m: dict | None) -> None:
+def print_metrics(org_name: str, cls_m: dict, usage_m: dict | None, logger: logging.Logger | None = None) -> None:
     sep = "=" * 62
-    print(f"\n{sep}")
-    print(f"  {org_name.upper()} RESULTS")
-    print(sep)
-    print(f"  Positions evaluated : {cls_m['n_positions']:>12,}")
-    print(f"  Positive rate       : {cls_m['positive_rate']:>12.4%}  (splice / all)")
-    print(f"\n  Classification AUPRC")
-    print(f"  {'Binary (splice vs background)':<38s} {cls_m['binary_auprc']:.4f}")
-    print(f"  {'Mean per-class AUPRC':<38s} {cls_m['mean_splice_class_auprc']:.4f}")
+    log_func = logger.info if logger else print
+    log_func(f"\n{sep}")
+    log_func(f"  {org_name.upper()} RESULTS")
+    log_func(sep)
+    log_func(f"  Positions evaluated : {cls_m['n_positions']:>12,}")
+    log_func(f"  Positive rate       : {cls_m['positive_rate']:>12.4%}  (splice / all)")
+    log_func(f"\n  Classification AUPRC")
+    log_func(f"  {'Binary (splice vs background)':<38s} {cls_m['binary_auprc']:.4f}")
+    log_func(f"  {'Mean per-class AUPRC':<38s} {cls_m['mean_splice_class_auprc']:.4f}")
     for name in SPLICE_CLASS_NAMES:
         if name in cls_m["per_class_auprc"]:
             auprc = cls_m["per_class_auprc"][name]
             n = cls_m["per_class_n_positives"][name]
-            print(f"    {name:<36s} {auprc:.4f}  (n={n:,})")
+            log_func(f"    {name:<36s} {auprc:.4f}  (n={n:,})")
 
     if usage_m and usage_m.get("usage_n_conditions_evaluated", 0) > 0:
-        print(
+        log_func(
             f"\n  Usage Pearson r  (evaluated on "
             f"{usage_m['usage_n_conditions_evaluated']} / "
             f"{usage_m['usage_n_conditions_total']} conditions, "
             f"{usage_m['usage_n_observations']:,} observations)"
         )
-        print(f"  {'Mean r':<38s} {usage_m['usage_mean_pearson_r']:.4f}")
-        print(f"  {'Median r':<38s} {usage_m['usage_median_pearson_r']:.4f}")
+        log_func(f"  {'Mean r':<38s} {usage_m['usage_mean_pearson_r']:.4f}")
+        log_func(f"  {'Median r':<38s} {usage_m['usage_median_pearson_r']:.4f}")
     elif usage_m:
-        print("\n  Usage: no valid conditions found (too few observations per condition)")
+        log_func("\n  Usage: no valid conditions found (too few observations per condition)")
 
 
-def print_source_metrics(org_name: str, source_m: dict) -> None:
+def print_source_metrics(org_name: str, source_m: dict, logger: logging.Logger | None = None) -> None:
     if not source_m:
         return
-    print(f"\n  [{org_name.upper()}] BY-SOURCE CLASSIFICATION AUPRC")
+    log_func = logger.info if logger else print
+    log_func(f"\n  [{org_name.upper()}] BY-SOURCE CLASSIFICATION AUPRC")
     for src_name, m in source_m.items():
         n       = m.get("n_sites", 0)
         n_bg    = m.get("n_background_sites", 0)
         bin_ap  = m.get("binary_auprc_vs_bg", float("nan"))
         mean_pc = m.get("mean_per_class_auprc", float("nan"))
-        print(f"\n  Source: {src_name}  (n={n:,} sites, {n_bg:,} background)")
-        print(f"    {'Binary AUPRC (vs background)':<38s} {bin_ap:.4f}")
-        print(f"    {'Mean per-class AUPRC':<38s} {mean_pc:.4f}")
+        log_func(f"\n  Source: {src_name}  (n={n:,} sites, {n_bg:,} background)")
+        log_func(f"    {'Binary AUPRC (vs background)':<38s} {bin_ap:.4f}")
+        log_func(f"    {'Mean per-class AUPRC':<38s} {mean_pc:.4f}")
         for cls_name, ap in m.get("per_class_auprc", {}).items():
             n_pos = m.get("per_class_n_positives", {}).get(cls_name, "?")
-            print(f"      {cls_name:<36s} {ap:.4f}  (n={n_pos:,})")
+            log_func(f"      {cls_name:<36s} {ap:.4f}  (n={n_pos:,})")
 
 
 def plot_pr_curves_by_source(
@@ -1266,60 +1364,43 @@ def plot_pr_curves_by_source(
     import matplotlib.pyplot as plt
     from sklearn.metrics import precision_recall_curve, average_precision_score
 
+    true_bg_mask = cls_labels == BACKGROUND_CLASS
+    bg_probs = cls_probs[true_bg_mask]
+    n_bg = int(true_bg_mask.sum())
+
     for src_val in (SRC_INTERSECT, SRC_GTF_ONLY, SRC_USAGE_ONLY):
         src_name = SOURCE_LABELS[src_val]
-        mask = src_tags == src_val
-        if not mask.any():
+        ann_mask = src_tags == src_val
+        if not ann_mask.any():
             continue
-        probs_s  = cls_probs[mask]
-        labels_s = cls_labels[mask]
-        n_sites = len(labels_s)
+        ann_probs = cls_probs[ann_mask]
+        ann_labels = cls_labels[ann_mask]
+        n_sites = int(ann_mask.sum())
 
         fig, ax = plt.subplots(figsize=(5, 4))
         for c in range(4):
-            y_true = (labels_s == c).astype(np.int32)
-            n_pos = y_true.sum()
+            y_c_ann = (ann_labels == c).astype(np.int32)
+            n_pos = int(y_c_ann.sum())
             if n_pos == 0:
                 continue
-            precision, recall, _ = precision_recall_curve(y_true, probs_s[:, c])
-            ap = float(average_precision_score(y_true, probs_s[:, c]))
+            # Include all background sites (matching metric computation)
+            y_combined = np.concatenate([y_c_ann, np.zeros(n_bg, dtype=np.int32)])
+            s_combined = np.concatenate([ann_probs[:, c], bg_probs[:, c]])
+            precision, recall, _ = precision_recall_curve(y_combined, s_combined)
+            ap = float(average_precision_score(y_combined, s_combined))
             ax.plot(recall, precision,
                     label=f"{CLASS_LABELS[c]} (AUC={ap:.3f}, n={n_pos:,})",
                     color=CLASS_COLORS[c])
         ax.set_xlabel("Recall")
         ax.set_ylabel("Precision")
-        ax.set_title(f"PR Curve \u2013 {org_name} / {src_name} (n={n_sites:,})")
+        ax.set_title(f"PR Curve \u2013 {org_name} / {src_name}\n(n={n_sites:,} sites, {n_bg:,} background)")
         ax.legend(loc="lower left", fontsize=8)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fn = out_dir / f"pr_curve_{org_name}_{src_name}.png"
         fig.savefig(fn, dpi=150)
         plt.close(fig)
-        print(f"  Saved: {fn}")
-
-
-# ---------------------------------------------------------------------------
-# Parallel plotting
-# ---------------------------------------------------------------------------
-
-def execute_plots_parallel(plot_tasks: list[tuple]) -> None:
-    """Execute plot tasks in parallel using ThreadPoolExecutor.
-    
-    Each task is a tuple: (callable, args, kwargs)
-    """
-    if not plot_tasks:
-        return
-    
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [
-            executor.submit(func, *args, **kwargs)
-            for func, args, kwargs in plot_tasks
-        ]
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"  Warning: Plot generation failed: {e}")
+        logging.getLogger("evaluate_splice").info(f"  Saved: {fn}")
 
 
 # ---------------------------------------------------------------------------
@@ -1327,25 +1408,22 @@ def execute_plots_parallel(plot_tasks: list[tuple]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    main_start = time.perf_counter()
     args = parse_args()
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- Set up log file (tee stdout + stderr to eval.log) -------------------
+    # -- Set up logging -------------------------------------------------------
     log_path = out_dir / "eval.log"
-    _tee_out = _Tee(sys.stdout, log_path)
-    _tee_err = _Tee(sys.stderr, log_path)
-    sys.stdout = _tee_out  # type: ignore[assignment]
-    sys.stderr = _tee_err  # type: ignore[assignment]
-    print(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    print(f"Log: {log_path}")
+    logger = setup_logging(log_path)
+    
+    logger.info(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    logger.info(f"Log: {log_path}")
 
     # -- Resolve checkpoint and config ---------------------------------------
     pth_path, cfg_path = resolve_checkpoint(args.checkpoint)
     cfg = load_config(cfg_path)
-    print(f"Checkpoint : {pth_path}")
-    print(f"Config     : {cfg_path}")
+    logger.info(f"Checkpoint : {pth_path}")
+    logger.info(f"Config     : {cfg_path}")
 
     # -- Resolve organisms / BED files ---------------------------------------
     species_specs = sorted(cfg["species_specs"], key=lambda s: s["organism_index"])
@@ -1357,26 +1435,29 @@ def main() -> None:
                 f"(one per organism), got {len(args.bed)}"
             )
         bed_files = args.bed
-        print(f"BED files  : {bed_files}  (user-supplied)")
+        logger.info(f"BED files  : {bed_files}  (user-supplied)")
     else:
         bed_files = [s["val_bed"] for s in species_specs]
-        print(f"BED files  : {bed_files}  (val_bed from config)")
+        logger.info(f"BED files  : {bed_files}  (val_bed from config)")
 
-    if args.gtf_annotation is not None and len(args.gtf_annotation) != len(species_specs):
+    if args.annotated_sites is not None and len(args.annotated_sites) != len(species_specs):
         sys.exit(
-            f"--gtf-annotation: expected {len(species_specs)} file(s), "
-            f"got {len(args.gtf_annotation)}"
+            f"--annotated-sites: expected {len(species_specs)} file(s), "
+            f"got {len(args.annotated_sites)}"
+        )
+
+    if args.gene_annotation is not None and len(args.gene_annotation) != len(species_specs):
+        sys.exit(
+            f"--gene-annotation: expected {len(species_specs)} file(s), "
+            f"got {len(args.gene_annotation)}"
         )
 
     device = torch.device(args.device)
 
     if not args.skip_predictions:
-        with _Timer("Loading checkpoint"):
-            ckpt = torch.load(pth_path, map_location="cpu", weights_only=False)
-        with _Timer("Building model"):
-            model = build_model(cfg, ckpt, device)
-        with _Timer("Building usage heads"):
-            usage_heads = build_usage_heads(cfg, ckpt, device)
+        ckpt = torch.load(pth_path, map_location="cpu", weights_only=False)
+        model = build_model(cfg, ckpt, device, logger=logger)
+        usage_heads = build_usage_heads(cfg, ckpt, device, logger=logger)
 
         from torch.utils.data import DataLoader
         from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
@@ -1392,21 +1473,22 @@ def main() -> None:
         org_idx: int = spec["organism_index"]
         org_name: str = spec.get("name", ORGANISM_NAMES.get(org_idx, f"organism_{org_idx}"))
 
-        print(f"\n{'='*62}")
-        print(f"  {org_name.upper()}")
-        print(f"{'='*62}")
+        logger.info(f"\n{'='*62}")
+        logger.info(f"  {org_name.upper()}")
+        logger.info(f"{'='*62}")
 
         if args.skip_predictions:
-            print(f"[{org_name}] Loading saved predictions …")
+            logger.info(f"[{org_name}] Loading saved predictions …")
             cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source = load_predictions(out_dir, org_name)
+            seq_len = cfg.get("sequence_length", 131_072)
         else:
             # -- Optionally build per-source annotation index ----------------
             source_arrays = None
-            if args.gtf_annotation is not None:
-                gtf_path   = args.gtf_annotation[i]
+            if args.annotated_sites is not None:
+                gtf_path   = args.annotated_sites[i]
                 usage_path = spec.get("usage_parquet")
                 if usage_path:
-                    print(f"[{org_name}] Building source annotation …")
+                    logger.info(f"[{org_name}] Building source annotation …")
                     gtf_positions   = build_gtf_position_set(gtf_path)
                     usage_positions = build_usage_position_set(usage_path)
                     source_arrays   = build_source_arrays(
@@ -1415,28 +1497,45 @@ def main() -> None:
                     n_i = sum((s == SRC_INTERSECT).sum()  for _, s in source_arrays.values())
                     n_g = sum((s == SRC_GTF_ONLY).sum()   for _, s in source_arrays.values())
                     n_u = sum((s == SRC_USAGE_ONLY).sum() for _, s in source_arrays.values())
-                    print(f"  Intersect: {n_i:,}  GTF-only: {n_g:,}  Usage-only: {n_u:,}")
+                    logger.info(f"  Intersect: {n_i:,}  GTF-only: {n_g:,}  Usage-only: {n_u:,}")
                 else:
-                    print(
-                        f"[{org_name}] Warning: no usage_parquet in config, "
-                        "skipping source tagging.",
-                        file=sys.stderr,
+                    logger.warning(
+                        f"[{org_name}] no usage_parquet in config, "
+                        "skipping source tagging."
                     )
 
-            # -- Dataset & loader --------------------------------------------
+            # -- Optionally filter BED to gene-overlapping windows -----------
             seq_len = cfg.get("sequence_length", 131_072)
-            print(f"[{org_name}] Loading annotation from {spec['annotation_parquet']} …")
+            if args.gene_annotation is not None:
+                gene_intervals = build_gene_intervals(args.gene_annotation[i])
+                n_genes = sum(len(iv) for iv in gene_intervals.values())
+                logger.info(
+                    f"[{org_name}] Loaded {n_genes:,} merged gene intervals "
+                    f"across {len(gene_intervals)} chromosomes"
+                )
+                filtered_bed = out_dir / f"filtered_bed_{org_name}.bed"
+                n_kept, n_total = filter_bed_by_gene_overlap(
+                    bed_file, gene_intervals, filtered_bed, seq_len,
+                )
+                logger.info(
+                    f"[{org_name}] Gene-overlap filter: kept {n_kept:,} / "
+                    f"{n_total:,} windows ({100*n_kept/max(n_total,1):.1f}%)"
+                )
+                bed_file = str(filtered_bed)
+
+            # -- Dataset & loader --------------------------------------------
+            logger.info(f"[{org_name}] Loading annotation from {spec['annotation_parquet']} …")
             annotation = SpliceSiteAnnotation(spec["annotation_parquet"])
 
             usage_index: SpliceSiteUsageIndex | None = None
             if spec.get("usage_parquet"):
-                print(f"[{org_name}] Loading usage index from {spec['usage_parquet']} …")
+                logger.info(f"[{org_name}] Loading usage index from {spec['usage_parquet']} …")
                 usage_index = SpliceSiteUsageIndex(
                     spec["usage_parquet"],
                     min_coverage=args.min_coverage,
                 )
 
-            print(f"[{org_name}] Building dataset from {bed_file} …")
+            logger.info(f"[{org_name}] Building dataset from {bed_file} …")
             dataset = SpliceSiteDataset(
                 genome=spec["genome"],
                 bed_file=bed_file,
@@ -1446,7 +1545,7 @@ def main() -> None:
                 organism_index=org_idx,
                 max_sites=cfg.get("max_sites", 1024),
             )
-            print(f"[{org_name}] {len(dataset):,} windows to evaluate")
+            logger.info(f"[{org_name}] {len(dataset):,} windows to evaluate")
 
             loader = DataLoader(
                 dataset,
@@ -1471,88 +1570,66 @@ def main() -> None:
                         windows.append((chrom, center - half, center + half))
 
             # -- Inference ---------------------------------------------------
-            print(f"[{org_name}] Running inference …")
-            with _Timer(f"Inference ({org_name})"):
-                cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source = collect_predictions(
-                    model=model,
-                    usage_heads=usage_heads,
-                    loader=loader,
-                    device=device,
-                    organism_index=org_idx,
-                    windows=windows,
-                    source_arrays=source_arrays,
-                    seq_len=seq_len,
-                )
+            logger.info(f"[{org_name}] Running inference …")
+            cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source = collect_predictions(
+                model=model,
+                usage_heads=usage_heads,
+                loader=loader,
+                device=device,
+                organism_index=org_idx,
+                windows=windows,
+                source_arrays=source_arrays,
+                seq_len=seq_len,
+            )
 
-            with _Timer(f"Saving predictions ({org_name})"):
-                save_predictions(out_dir, org_name, cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source)
+            save_predictions(out_dir, org_name, cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source)
+
+        # -- Filter positions to gene-overlapping sites ----------------------
+        if args.gene_annotation is not None:
+            gene_intervals = build_gene_intervals(args.gene_annotation[i])
+
+            # Determine which BED was used for predictions
+            filtered_bed_path = out_dir / f"filtered_bed_{org_name}.bed"
+            if filtered_bed_path.exists():
+                mask_bed = str(filtered_bed_path)
+            else:
+                mask_bed = str(bed_file)
+
+            gene_mask = build_gene_overlap_mask(
+                mask_bed, gene_intervals, seq_len,
+            )
+            n_in_gene = int(gene_mask.sum())
+            n_total_pos = len(gene_mask)
+            logger.info(
+                f"[{org_name}] Position-level gene filter: {n_in_gene:,} / "
+                f"{n_total_pos:,} positions in genes ({100*n_in_gene/max(n_total_pos,1):.1f}%)"
+            )
+
+            cls_probs = cls_probs[gene_mask]
+            cls_labels = cls_labels[gene_mask]
+            if src_tags is not None:
+                src_tags = src_tags[gene_mask]
 
         # -- Metrics ---------------------------------------------------------
-        print(f"[{org_name}] Computing metrics …")
-        with _Timer(f"Classification metrics ({org_name})"):
-            cls_m = compute_classification_metrics(cls_probs, cls_labels)
-        with _Timer(f"Usage metrics ({org_name})"):
-            usage_m = compute_usage_metrics(usage_per_cond) if usage_per_cond else None
-        with _Timer(f"Usage metrics by source ({org_name})"):
-            usage_by_source_m = compute_usage_metrics_by_source(usage_by_source) if (args.per_source and usage_by_source) else {}
-        with _Timer(f"Source metrics ({org_name})"):
-            source_m = compute_source_metrics(cls_probs, cls_labels, src_tags) if (args.per_source and src_tags is not None) else {}
-        print_metrics(org_name, cls_m, usage_m)
+        logger.info(f"[{org_name}] Computing metrics …")
+        cls_m = compute_classification_metrics(cls_probs, cls_labels)
+        usage_m = compute_usage_metrics(usage_per_cond) if usage_per_cond else None
+        usage_by_source_m = compute_usage_metrics_by_source(usage_by_source) if (args.per_source and usage_by_source) else {}
+        source_m = compute_source_metrics(cls_probs, cls_labels, src_tags) if (args.per_source and src_tags is not None) else {}
+        print_metrics(org_name, cls_m, usage_m, logger=logger)
         if source_m:
-            print_source_metrics(org_name, source_m)
+            print_source_metrics(org_name, source_m, logger=logger)
         if usage_by_source_m:
-            print_usage_metrics_by_source(org_name, usage_by_source_m)
+            print_usage_metrics_by_source(org_name, usage_by_source_m, logger=logger)
 
-        # -- Plots (parallel) ------------------------------------------------
+        # -- Plots -----------------------------------------------------------
         if not args.skip_plots:
-            plot_tasks = []
-            
-            # PR curves
-            plot_tasks.append((
-                plot_pr_curves,
-                (cls_probs, cls_labels, org_name, out_dir / f"pr_curve_{org_name}.png"),
-                {}
-            ))
-            
-            # Usage plots
+            logger.info(f"[{org_name}] Generating plots …")
+            plot_pr_curves(cls_probs, cls_labels, org_name, out_dir / f"pr_curve_{org_name}.png")
             if usage_per_cond:
-                plot_tasks.append((
-                    plot_usage_density,
-                    (usage_per_cond, org_name, out_dir / f"usage_density_{org_name}.png"),
-                    {}
-                ))
-                if args.per_condition:
-                    plot_tasks.append((
-                        plot_usage_per_condition,
-                        (usage_per_cond, out_dir, org_name),
-                        {}
-                    ))
-                if args.per_tissue and spec.get("usage_parquet"):
-                    usage_json = Path(spec["usage_parquet"]).with_suffix(".json")
-                    plot_tasks.append((
-                        plot_usage_per_tissue,
-                        (usage_per_cond, usage_json, out_dir, org_name),
-                        {}
-                    ))
-            
-            # By-source plots
+                plot_usage_density(usage_per_cond, org_name, out_dir / f"usage_density_{org_name}.png")
             if args.per_source and src_tags is not None:
-                plot_tasks.append((
-                    plot_pr_curves_by_source,
-                    (cls_probs, cls_labels, src_tags, org_name, out_dir),
-                    {}
-                ))
-            if args.per_source and usage_by_source:
-                plot_tasks.append((
-                    plot_usage_by_source,
-                    (usage_by_source, out_dir, org_name),
-                    {}
-                ))
-            
-            if plot_tasks:
-                print(f"[{org_name}] Generating {len(plot_tasks)} plot(s) in parallel …")
-                with _Timer(f"Plotting ({org_name})"):
-                    execute_plots_parallel(plot_tasks)
+                plot_pr_curves_by_source(cls_probs, cls_labels, src_tags, org_name, out_dir)
 
         all_results[org_name] = {
             **cls_m,
@@ -1567,27 +1644,21 @@ def main() -> None:
             "binary_auprc", "mean_splice_class_auprc",
             "usage_mean_pearson_r", "usage_median_pearson_r",
         ]
-        print(f"\n{'='*62}")
-        print("  MACRO-AVERAGE ACROSS SPECIES")
-        print(f"{'='*62}")
+        logger.info(f"\n{'='*62}")
+        logger.info("  MACRO-AVERAGE ACROSS SPECIES")
+        logger.info(f"{'='*62}")
         for k in keys_to_avg:
             vals = [v[k] for v in all_results.values()
                     if k in v and not np.isnan(v.get(k, float("nan")))]
             if vals:
-                print(f"  {k:<38s} {np.mean(vals):.4f}")
+                logger.info(f"  {k:<38s} {np.mean(vals):.4f}")
 
     # -- Save JSON -----------------------------------------------------------
-    with _Timer("Saving JSON results"):
-        out_path = out_dir / "metrics.json"
-        with open(out_path, "w") as f:
-            json.dump(all_results, f, indent=2, default=lambda x: None)
-    
-    # -- Overall timing --------------------------------------------------
-    total_time = time.perf_counter() - main_start
-    print(f"\n{'='*62}")
-    print(f"  TOTAL TIME: {_Timer.format_time(total_time)}")
-    print(f"{'='*62}")
-    print(f"\nResults saved to {out_path}")
+    out_path = out_dir / "metrics.json"
+    with open(out_path, "w") as f:
+        json.dump(all_results, f, indent=2, default=lambda x: None)
+
+    logger.info(f"\nResults saved to {out_path}")
 
 
 if __name__ == "__main__":

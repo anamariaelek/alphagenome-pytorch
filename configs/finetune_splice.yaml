@@ -18,7 +18,7 @@
 species:
   - name: human
     genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites_intersect.parquet
     usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
     train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/train.bed
     val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/valid.bed
@@ -26,7 +26,7 @@ species:
 
   - name: mouse
     genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites_intersect.parquet
     usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
     train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/train.bed
     val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/valid.bed
@@ -55,7 +55,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 524288
+sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 
@@ -73,7 +73,7 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 1
+batch_size: 4
 gradient_accumulation_steps: 32  # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
@@ -87,7 +87,7 @@ usage_weight: 1.0
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
-num_workers: 4
+num_workers: 6
 use_amp: true              # set false to disable AMP
 
 # ---------------------------------------------------------------------------
@@ -96,13 +96,13 @@ use_amp: true              # set false to disable AMP
 wandb: false
 wandb_project: alphagenome-splice
 # wandb_entity: my-team
-log_every: 500
+log_every: 100
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-# run_name: my_run           # defaults to timestamp
+run_name: 132kb_strict
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir
