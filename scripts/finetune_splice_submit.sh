@@ -4,9 +4,9 @@
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
-#SBATCH --mem=120gb
-#SBATCH --time=24:00:00
+#SBATCH --gres=gpu:1,gpumem_per_gpu:141GB
+#SBATCH --mem=96gb
+#SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -75,24 +75,29 @@ mkdir -p "${LOG_DIR}"
 LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/train_${LOG_TIMESTAMP}.log"
 
-echo "Starting finetuning at $(date)" | tee -a "${LOG_FILE}"
-echo "Config: ${CONFIG}" | tee -a "${LOG_FILE}"
-echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
-echo "---" | tee -a "${LOG_FILE}"
+# Redirect all stdout + stderr for the rest of this script to LOG_FILE.
+# Everything — shell echos, Python output from all ranks — ends up in one file.
+exec >> "${LOG_FILE}" 2>&1
+
+echo "Starting finetuning at $(date)"
+echo "Config: ${CONFIG}"
+echo "Log file: ${LOG_FILE}"
+echo "---"
 
 # Resume if checkpoint exists
 RESUME="/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/524kb_full_epoch1/best_model.pth"
 if [ -f "${RESUME}" ]; then
-    echo "Resuming from checkpoint: ${RESUME}" | tee -a "${LOG_FILE}"
+    echo "Resuming from checkpoint: ${RESUME}"
 else
-    echo "No checkpoint found at ${RESUME}. Starting fresh training." | tee -a "${LOG_FILE}"
+    echo "No checkpoint found at ${RESUME}. Starting fresh training."
     RESUME="auto"
 fi
 
-# Run training (stdout/stderr merged with train.log)
+# Run training — no tee needed; exec already redirects everything to LOG_FILE.
 python ${WORK_DIR}/scripts/finetune_splice.py \
     --config ${CONFIG} \
-    --resume ${RESUME} 2>&1 | tee -a "${LOG_FILE}"
+    --compile \
+    --resume ${RESUME}
 
-echo "---" | tee -a "${LOG_FILE}"
-echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}" | tee -a "${LOG_FILE}"
+echo "---"
+echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}"

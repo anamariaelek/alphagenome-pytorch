@@ -310,6 +310,12 @@ def parse_args() -> argparse.Namespace:
     log_grp.add_argument("--wandb-project", type=str, default=DEFAULTS["wandb_project"])
     log_grp.add_argument("--wandb-entity", type=str, default=None)
     log_grp.add_argument("--log-every", type=int, default=DEFAULTS["log_every"], help="Log every N steps")
+    log_grp.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Path to a file where stdout will be tee'd (default: <output-dir>/train.log)",
+    )
 
     # Output arguments
     out_grp = parser.add_argument_group("Output")
@@ -741,14 +747,15 @@ def create_model(
     # Move to device
     model = model.to(device)
 
-    # Wrap with DDP if multi-GPU — single instance with find_unused_parameters
-    # because not every forward pass exercises every organism's usage head.
+    # Wrap with DDP if multi-GPU.  We use plain DDP (no find_unused_parameters
+    # or static_graph) because both conflict with gradient checkpointing.  The
+    # training loop adds a zero-valued dummy contribution from every parameter
+    # so that no parameter is ever truly "unused" and plain DDP works correctly.
     if world_size > 1:
         model = DDP(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True,
         )
         print_rank0("Model(s) wrapped with DistributedDataParallel", rank)
 
@@ -799,7 +806,7 @@ def main() -> None:
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"Output: {output_dir}")
-    setup_output_logging(output_dir, rank)
+    setup_output_logging(output_dir, rank, log_file=args.log_file)
     barrier()
 
     # Resolve resume checkpoint

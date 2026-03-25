@@ -5,9 +5,6 @@
 #   torchrun --nproc_per_node=4 scripts/finetune_splice.py \
 #       --config scripts/configs/finetune_splice_helix_multigpu.yaml
 #
-# Effective batch size = batch_size × gradient_accumulation_steps × n_gpus
-#   Single-GPU reference:  2 × 4 × 1 = 8
-#   This config (4 GPUs):  2 × 1 × 4 = 8   (same effective batch, faster throughput)
 # =============================================================================
 
 species:
@@ -48,7 +45,7 @@ cache_genome: false
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16
-gradient_checkpointing: true   # saves activation memory; re-enable for 4-GPU runs
+gradient_checkpointing: true   # needed for 524kb sequences on 80GB GPUs
 
 lora_rank: 8
 lora_alpha: 16
@@ -56,6 +53,7 @@ lora_targets: q_proj,v_proj
 
 # ---------------------------------------------------------------------------
 # Optimiser
+# Effective batch size = batch_size × gradient_accumulation_steps × n_gpus
 # ---------------------------------------------------------------------------
 epochs: 20
 batch_size: 1

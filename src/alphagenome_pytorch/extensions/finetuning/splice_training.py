@@ -169,40 +169,57 @@ def train_epoch_splice(
         else:
             active_usage_head = usage_head
 
-        with autocast(amp_device, enabled=amp_enabled):
-            # Run trunk (encoder + transformer + decoder) to get 1 bp embeddings
-            outputs = model.forward(
-                seq, org_idx,
-                resolutions=(1,),
-                channels_last=False,
-                embeddings_only=True,
-            )
-            emb_1bp = outputs["embeddings_1bp"]  # (B, TRUNK_DIM, S) NCL
+        # Use no_sync() for all but the last accumulation step to avoid DDP
+        # "parameter marked ready twice" errors that arise when find_unused_parameters
+        # is True and backward is called multiple times per optimizer step.
+        is_last_accum = (batch_idx + 1) % accumulation_steps == 0
+        sync_ctx = nullcontext() if is_last_accum else model.no_sync() if isinstance(model, DDP) else nullcontext()
 
-            # ── Classification loss ─────────────────────────────────────────
-            cls_out = _unwrap(model).splice_sites_classification_head(
-                emb_1bp, org_idx, channels_last=True
-            )
-            cls_loss_val, cls_acc = splice_classification_loss(
-                cls_out["logits"], cls_labels, class_weights=class_weights
-            )
-            total_loss = cls_weight * cls_loss_val
-
-            # ── Usage loss (optional) ────────────────────────────────────────
-            usage_loss_val = torch.tensor(0.0, device=device)
-            if active_usage_head is not None and "usage_positions" in batch:
-                usage_pos = batch["usage_positions"].to(device)
-                usage_vals = batch["usage_values"].to(device)
-                usage_mask = batch["usage_mask"].to(device)
-
-                usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                usage_loss_val = splice_usage_loss(
-                    usage_out["logits"], usage_pos, usage_vals, usage_mask
+        with sync_ctx:
+            with autocast(amp_device, enabled=amp_enabled):
+                # Run trunk (encoder + transformer + decoder) to get 1 bp embeddings
+                outputs = model.forward(
+                    seq, org_idx,
+                    resolutions=(1,),
+                    channels_last=False,
+                    embeddings_only=True,
                 )
-                total_loss = total_loss + usage_weight * usage_loss_val
+                emb_1bp = outputs["embeddings_1bp"]  # (B, TRUNK_DIM, S) NCL
 
-        # Scale for accumulation
-        (total_loss / accumulation_steps).backward()
+                # ── Classification loss ─────────────────────────────────────────
+                cls_out = _unwrap(model).splice_sites_classification_head(
+                    emb_1bp, org_idx, channels_last=True
+                )
+                cls_loss_val, cls_acc = splice_classification_loss(
+                    cls_out["logits"], cls_labels, class_weights=class_weights
+                )
+                total_loss = cls_weight * cls_loss_val
+
+                # ── Usage loss (optional) ────────────────────────────────────────
+                usage_loss_val = torch.tensor(0.0, device=device)
+                if active_usage_head is not None and "usage_positions" in batch:
+                    usage_pos = batch["usage_positions"].to(device)
+                    usage_vals = batch["usage_values"].to(device)
+                    usage_mask = batch["usage_mask"].to(device)
+
+                    usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
+                    usage_loss_val = splice_usage_loss(
+                        usage_out["logits"], usage_pos, usage_vals, usage_mask
+                    )
+                    total_loss = total_loss + usage_weight * usage_loss_val
+
+                # Ensure every parameter participates in backward so plain DDP
+                # (without find_unused_parameters / static_graph) does not hang.
+                # embeddings_only=True skips output heads, and only one organism's
+                # usage head is active per batch — the zero-valued dummy touches
+                # all remaining parameters without affecting gradients.
+                if isinstance(model, DDP):
+                    total_loss = total_loss + 0.0 * sum(
+                        p.sum() for p in model.parameters() if p.requires_grad
+                    )
+
+            # Scale for accumulation
+            (total_loss / accumulation_steps).backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
             optimizer.step()
