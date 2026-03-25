@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 from torch.amp import autocast
@@ -99,6 +100,7 @@ def train_epoch_splice(
     log_every: int = 50,
     epoch: int = 0,
     logger: "TrainingLogger | None" = None,
+    max_grad_norm: float = 1.0,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -169,11 +171,11 @@ def train_epoch_splice(
         else:
             active_usage_head = usage_head
 
-        # Use no_sync() for all but the last accumulation step to avoid DDP
-        # "parameter marked ready twice" errors that arise when find_unused_parameters
-        # is True and backward is called multiple times per optimizer step.
-        is_last_accum = (batch_idx + 1) % accumulation_steps == 0
-        sync_ctx = nullcontext() if is_last_accum else model.no_sync() if isinstance(model, DDP) else nullcontext()
+        # Always suppress DDP's automatic gradient sync.  We manually
+        # all-reduce gradients at the optimizer step instead.  This sidesteps
+        # DDP's unused-parameter detection which is incompatible with gradient
+        # checkpointing (both find_unused_parameters and static_graph fail).
+        sync_ctx = model.no_sync() if isinstance(model, DDP) else nullcontext()
 
         with sync_ctx:
             with autocast(amp_device, enabled=amp_enabled):
@@ -208,20 +210,44 @@ def train_epoch_splice(
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
 
-                # Ensure every parameter participates in backward so plain DDP
-                # (without find_unused_parameters / static_graph) does not hang.
-                # embeddings_only=True skips output heads, and only one organism's
-                # usage head is active per batch — the zero-valued dummy touches
-                # all remaining parameters without affecting gradients.
-                if isinstance(model, DDP):
-                    total_loss = total_loss + 0.0 * sum(
-                        p.sum() for p in model.parameters() if p.requires_grad
-                    )
+            # Skip backward entirely if this microbatch produced NaN/Inf loss.
+            # This prevents NaN from entering the accumulated gradients and
+            # poisoning the entire accumulation window.
+            if not torch.isfinite(total_loss):
+                continue
 
             # Scale for accumulation
             (total_loss / accumulation_steps).backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
+            # Manually average gradients across ranks (DDP reducer is bypassed).
+            # Every rank must all-reduce the SAME set of parameters in the SAME
+            # order, otherwise NCCL hangs.  Different ranks may process different
+            # species, so some usage-head params can have None grads on certain
+            # ranks.  We fill those with zeros before the collective.
+            if isinstance(model, DDP):
+                for param in model.parameters():
+                    if param.requires_grad:
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
+            # Gradient clipping to prevent exploding gradients
+            if max_grad_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    max_grad_norm,
+                )
+                # Skip optimizer step if gradients contain NaN/Inf
+                if not torch.isfinite(grad_norm):
+                    print(
+                        f"  WARNING: Non-finite grad norm ({grad_norm:.4f}) at "
+                        f"epoch {epoch} batch {batch_idx+1} — skipping step"
+                    )
+                    optimizer.zero_grad()
+                    step += 1
+                    continue
+
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()

@@ -55,7 +55,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 524288
+sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 
@@ -63,7 +63,7 @@ cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16            # bfloat16 | float32
-gradient_checkpointing: false
+gradient_checkpointing: true
 
 lora_rank: 8
 lora_alpha: 16
@@ -83,12 +83,14 @@ lr_schedule: cosine              # cosine | constant
 # Loss weights
 cls_weight: 1.0
 usage_weight: 1.0
+max_grad_norm: 1.0             # gradient clipping (0 to disable)
 
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
 num_workers: 6
 use_amp: true              # set false to disable AMP
+compile: true              # torch.compile for fused kernels
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -102,7 +104,7 @@ log_every: 100
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 524kb_lora           # defaults to timestamp
+run_name: 131kb_lora           # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

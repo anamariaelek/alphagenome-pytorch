@@ -58,13 +58,14 @@ lora_targets: q_proj,v_proj
 epochs: 20
 batch_size: 1
 gradient_accumulation_steps: 8
-lr: 1.0e-4
+lr: 3.0e-5
 weight_decay: 0.1
 warmup_steps: 1000
 lr_schedule: cosine
 
 cls_weight: 1.0
 usage_weight: 1.0
+max_grad_norm: 1.0             # gradient clipping (0 to disable)
 
 # ---------------------------------------------------------------------------
 # Performance  (4 x 8 = 32 CPUs allocated in the SLURM script)

@@ -156,6 +156,7 @@ DEFAULTS = {
     "lr_schedule": "cosine",
     "cls_weight": 1.0,
     "usage_weight": 1.0,
+    "max_grad_norm": 1.0,
     "num_workers": 4,
     # Logging
     "wandb_project": "alphagenome-splice",
@@ -300,6 +301,12 @@ def parse_args() -> argparse.Namespace:
         help="Weight for the splice usage loss term (only used when --usage-parquet is provided)",
     )
     train_grp.add_argument("--num-workers", type=int, default=DEFAULTS["num_workers"])
+    train_grp.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=DEFAULTS["max_grad_norm"],
+        help="Max gradient norm for clipping (0 to disable)",
+    )
     train_grp.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision")
     train_grp.add_argument("--compile", action="store_true", help="Use torch.compile on the model")
     train_grp.add_argument("--seed", type=int, default=None, help="Random seed")
@@ -391,6 +398,7 @@ def parse_args() -> argparse.Namespace:
         "lr_schedule",
         "cls_weight",
         "usage_weight",
+        "max_grad_norm",
         "num_workers",
         "compile",
         "seed",
@@ -1029,6 +1037,7 @@ def main() -> None:
                 log_every=args.log_every,
                 epoch=epoch,
                 logger=logger,
+                max_grad_norm=args.max_grad_norm,
             )
 
             if handler.preempted:

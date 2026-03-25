@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1                  # torchrun manages worker processes internally
 #SBATCH --cpus-per-task=32          # 4 GPUs × 8 workers each
 #SBATCH --gres=gpu:4,gpumem_per_gpu:80GB
-#SBATCH --mem=200gb
+#SBATCH --mem=400gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
