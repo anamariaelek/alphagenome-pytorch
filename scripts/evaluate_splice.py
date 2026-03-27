@@ -475,7 +475,7 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Log
     model.splice_sites_classification_head = cls_head
 
     # Load fine-tuned weights (LoRA adapters + classification head)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
     msg = f"  Loaded model_state_dict (epoch {ckpt.get('epoch', '?')})"
     if logger:
         logger.info(msg)

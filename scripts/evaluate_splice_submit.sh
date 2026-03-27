@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=predict-splice
+#SBATCH --job-name=eval-splice
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
+#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
 #SBATCH --mem=90gb
 #SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
@@ -33,6 +33,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Activate conda environment
 conda activate alphagenome_pytorch_genomicsxai
 
+# Ensure correct libstdc++ is used (fix GLIBCXX errors)
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
 # Verify CUDA setup
 echo "CUDA setup verification:"
 echo "  CUDA_HOME: ${CUDA_HOME}"
@@ -51,13 +54,14 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
-DIR=/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai
+DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 RUN=132kb_lora
 mkdir -p ${DIR}/${RUN}/predictions/
 
 python scripts/evaluate_splice.py \
-    --checkpoint ${DIR}/${RUN} \
-    --bed ${DIR}/Homo_sapiens/folds/FOLD_0/test.bed ${DIR}/Mus_musculus/folds/FOLD_0/test.bed \
-    --gtf-annotation ${DIR}/Homo_sapiens/splice_sites_gtf.parquet ${DIR}/Mus_musculus/splice_sites_gtf.parquet \
+    --checkpoint "${DIR}/${RUN}" \
+    --bed "${DIR}/Homo_sapiens/folds/FOLD_0/test.bed" "${DIR}/Mus_musculus/folds/FOLD_0/test.bed" \
+    --gene-annotation "${DIR}/Homo_sapiens/gene_annotation.parquet" "${DIR}/Mus_musculus/gene_annotation.parquet" \
+    --batch-size 8 \
     --device cuda \
-    --output-dir ${DIR}/${RUN}/predictions
+    --output-dir "${DIR}/${RUN}/predictions"

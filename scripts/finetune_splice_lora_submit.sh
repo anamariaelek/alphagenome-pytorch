@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
-#SBATCH --mem=80gb
+#SBATCH --mem=120gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -84,7 +84,8 @@ echo "---"
 
 # Run training — no tee needed; exec already redirects everything to LOG_FILE.
 python ${WORK_DIR}/scripts/finetune_splice.py \
-    --config ${CONFIG}
+    --config ${CONFIG} \
+    --resume "auto"
 
 echo "---"
 echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}"
