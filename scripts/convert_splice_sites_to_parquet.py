@@ -136,7 +136,7 @@ def _extract_from_gtf(gtf_path: Path) -> "pd.DataFrame":
 def _extract_from_usage(
     usage_parquet: Path,
     min_coverage: int,
-    alpha_min: int | None,
+    min_alpha: int | None,
     usage_coord_base: int,
 ) -> "pd.DataFrame":
     """Return DataFrame [Chromosome, Position, SiteType] from Spliser usage parquet."""
@@ -169,8 +169,8 @@ def _extract_from_usage(
     df = df[df["Alpha"] + df["Beta"] >= min_coverage]
 
     # Filter by alpha if requested
-    if alpha_min is not None:
-        df = df[df["Alpha"] >= alpha_min]
+    if min_alpha is not None:
+        df = df[df["Alpha"] >= min_alpha]
 
     print(f"  After filters: {len(df):,} sites")
 
@@ -207,7 +207,7 @@ def convert_splice_sites_to_parquet(
     output_path: str | Path,
     usage_parquet: str | Path | None = None,
     min_coverage: int = 10,
-    alpha_min: int | None = None,
+    min_alpha: int | None = None,
     compression: str = "snappy",
     usage_coord_base: int = 0,
     add_chr_prefix: bool = False,
@@ -225,7 +225,7 @@ def convert_splice_sites_to_parquet(
             ``convert_splice_usage_to_parquet.py``. A sibling ``_usage.json``
             must exist in the same directory.
         min_coverage: Minimum Alpha+Beta value for usage sites (default 10).
-        alpha_min: Optional minimum Alpha value for usage sites.
+        min_alpha: Optional minimum Alpha value for usage sites.
         compression: Parquet compression codec (``'snappy'``, ``'gzip'``,
             ``'zstd'``, or ``'none'``).
         usage_coord_base: Coordinate base in usage parquet (1 or 0).
@@ -256,7 +256,7 @@ def convert_splice_sites_to_parquet(
         usage_df = _extract_from_usage(
             Path(usage_parquet),
             min_coverage=min_coverage,
-            alpha_min=alpha_min,
+            min_alpha=min_alpha,
             usage_coord_base=usage_coord_base,
         )
     else:
@@ -296,7 +296,7 @@ def convert_splice_sites_to_parquet(
             ].copy()
             frames = [gtf_df_filtered]
         else:
-            raise ValueError(f"Unknown usage_mode: {usage_mode!r}. Expected 'union' or 'intersect'.")  # noqa: E501
+            raise ValueError(f"Unknown usage_mode: {usage_mode!r}. Expected 'union' or 'intersect'.")
     elif usage_df is not None:
         # No GTF provided — usage only
         frames.append(usage_df)
@@ -351,7 +351,7 @@ Examples:
   python scripts/convert_splice_sites_to_parquet.py \\
       --gtf gencode.v47.parquet \\
       --usage-parquet /path/to/spliser/Homo_sapiens/_usage.parquet \\
-      --alpha-min 5 \\
+      --min-alpha 5 \\
       --output human_splice_sites.parquet
 """,
     )
@@ -364,7 +364,7 @@ Examples:
                         help="Output Parquet path.")
     parser.add_argument("--min-coverage", type=int, default=10,
                         help="Minimum Alpha+Beta for usage sites (default: 10).")
-    parser.add_argument("--alpha-min", type=int, default=None,
+    parser.add_argument("--min-alpha", type=int, default=None,
                         help="Optional minimum Alpha count for usage sites.")
     parser.add_argument("--compression", default="snappy",
                         choices=["snappy", "gzip", "zstd", "none"],
@@ -379,7 +379,7 @@ Examples:
                         help="How to combine GTF and usage sites when --usage-parquet is given. "
                              "'union' (default): add usage sites on top of GTF sites. "
                              "'intersect': restrict output to GTF sites that also appear "
-                             "in the usage parquet.")
+                             "in the filtered usage parquet.")
     args = parser.parse_args()
 
     if args.add_chr_prefix and args.strip_chr_prefix:
@@ -393,7 +393,7 @@ Examples:
         output_path=args.output,
         usage_parquet=args.usage_parquet,
         min_coverage=args.min_coverage,
-        alpha_min=args.alpha_min,
+        min_alpha=args.min_alpha,
         compression=args.compression,
         usage_coord_base=args.usage_coord_base,
         add_chr_prefix=args.add_chr_prefix,

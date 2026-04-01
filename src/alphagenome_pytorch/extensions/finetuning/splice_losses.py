@@ -5,7 +5,7 @@ Provides two task-specific losses:
 :func:`splice_classification_loss`
     Weighted cross-entropy over 5 classes (Donor+, Acceptor+, Donor-,
     Acceptor-, Background).  Background positions typically outnumber
-    real splice sites by ~10,000:1, so class reweighting is critical.
+    real splice sites by ~10,000:1, so class reweighting is advised.
 
 :func:`splice_usage_loss`
     Masked binary cross-entropy over *observed* (position, condition) pairs.
@@ -19,6 +19,7 @@ Provides two task-specific losses:
 
 from __future__ import annotations
 
+from alphagenome_pytorch import metrics
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -94,8 +95,10 @@ def splice_usage_loss(
             ``(B, max_sites, n_conditions)``.
 
     Returns:
-        Scalar mean binary cross-entropy over all observed entries.
-        Returns zero (with valid grad) when no observed entries are present.
+        Tuple of:
+        - ``loss``: Scalar mean binary cross-entropy over all observed entries.
+        - ``metrics``: dict with ``'correlation'`` (overall) and
+          ``'corr_cond0'`` … ``'corr_cond{n_conditions-1}'`` per-condition correlation strings.
     """
     _B, max_sites, n_conditions = usage_values.shape
 
@@ -116,15 +119,29 @@ def splice_usage_loss(
 
     n_valid = final_mask.sum()
     if n_valid == 0:
-        # No observations in this batch — return zero loss with gradient
-        return (predictions * 0.0).sum()
+        # No observations in this batch — return zero loss with gradient and empty metrics dict
+        loss = (predictions * 0.0).sum()
+        metrics_dict = {"correlation": float("nan")}
+        return loss, metrics_dict
 
     loss = F.binary_cross_entropy_with_logits(
         gathered[final_mask],
         usage_values[final_mask],
         reduction="mean",
     )
-    return loss
+
+    # Calculate correlation metrics
+    metrics_dict = {}
+    with torch.no_grad():
+        pred_sigmoid = torch.sigmoid(gathered[final_mask])
+        true_vals = usage_values[final_mask]
+
+        if pred_sigmoid.numel() > 1:
+            corr = torch.corrcoef(torch.stack([pred_sigmoid, true_vals]))[0, 1].item()
+            metrics_dict["correlation"] = corr
+        else:
+            metrics_dict["correlation"] = float("nan")
+    return loss, metrics_dict
 
 
 def compute_splice_class_weights(

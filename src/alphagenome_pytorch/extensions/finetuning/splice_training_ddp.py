@@ -51,6 +51,12 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 from torch.amp import autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Return the underlying module, unwrapping DistributedDataParallel if needed."""
+    return model.module if isinstance(model, DDP) else model
 
 from alphagenome_pytorch.extensions.finetuning.splice_losses import (
     splice_classification_loss,
@@ -71,12 +77,12 @@ class SpliceTrainMetrics:
 
     loss: float = 0.0
     cls_loss: float = 0.0
-    cls_accuracy: float = 0.0
     usage_loss: float = 0.0
-    usage_corr: float = 0.0
+    accuracy: float = 0.0
+    # Per-class accuracy (class 0-3 = splice sites, 4 = background)
+    per_class_acc: dict[str, float] = field(default_factory=dict)
     n_batches: int = 0
     elapsed_s: float = 0.0   # wall-clock seconds for this epoch
-    latency_ms: float = 0.0  # average batch latency in milliseconds
 
 
 def train_epoch_splice(
@@ -122,7 +128,7 @@ def train_epoch_splice(
         usage_weight: Scalar weight for the usage loss (default: 1.0).
         class_weights: Optional 1-D Tensor of length 5 for
             :func:`~alphagenome_pytorch.extensions.finetuning.splice_losses\
-.splice_classification_loss` class reweighting;
+.splice_classification_loss` class reweighting.  Strongly recommended;
             see :func:`~alphagenome_pytorch.extensions.finetuning.splice_losses\
 .compute_splice_class_weights`.
         use_amp: Use ``torch.amp.autocast`` for mixed-precision training
@@ -153,9 +159,7 @@ def train_epoch_splice(
     epoch_start = time.perf_counter()
     step_start  = time.perf_counter()
 
-    batch_latencies = []
     for batch_idx, batch in enumerate(train_loader):
-        batch_start = time.perf_counter()
         seq = batch["sequence"].to(device)
         org_idx = batch["organism_index"].to(device)
         cls_labels = batch["classification_labels"].to(device)
@@ -167,8 +171,13 @@ def train_epoch_splice(
         else:
             active_usage_head = usage_head
 
-        # Single-GPU mode
-        with nullcontext():
+        # Always suppress DDP's automatic gradient sync.  We manually
+        # all-reduce gradients at the optimizer step instead.  This sidesteps
+        # DDP's unused-parameter detection which is incompatible with gradient
+        # checkpointing (both find_unused_parameters and static_graph fail).
+        sync_ctx = model.no_sync() if isinstance(model, DDP) else nullcontext()
+
+        with sync_ctx:
             with autocast(amp_device, enabled=amp_enabled):
                 # Run trunk (encoder + transformer + decoder) to get 1 bp embeddings
                 outputs = model.forward(
@@ -180,7 +189,7 @@ def train_epoch_splice(
                 emb_1bp = outputs["embeddings_1bp"]  # (B, TRUNK_DIM, S) NCL
 
                 # ── Classification loss ─────────────────────────────────────────
-                cls_out = model.splice_sites_classification_head(
+                cls_out = _unwrap(model).splice_sites_classification_head(
                     emb_1bp, org_idx, channels_last=True
                 )
                 cls_loss_val, cls_acc = splice_classification_loss(
@@ -196,12 +205,14 @@ def train_epoch_splice(
                     usage_mask = batch["usage_mask"].to(device)
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                    usage_loss_val, usage_corr = splice_usage_loss(
+                    usage_loss_val = splice_usage_loss(
                         usage_out["logits"], usage_pos, usage_vals, usage_mask
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
 
-            # Skip backward entirely if this microbatch produced NaN/Inf loss
+            # Skip backward entirely if this microbatch produced NaN/Inf loss.
+            # This prevents NaN from entering the accumulated gradients and
+            # poisoning the entire accumulation window.
             if not torch.isfinite(total_loss):
                 continue
 
@@ -209,6 +220,18 @@ def train_epoch_splice(
             (total_loss / accumulation_steps).backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
+            # Manually average gradients across ranks (DDP reducer is bypassed).
+            # Every rank must all-reduce the SAME set of parameters in the SAME
+            # order, otherwise NCCL hangs.  Different ranks may process different
+            # species, so some usage-head params can have None grads on certain
+            # ranks.  We fill those with zeros before the collective.
+            if isinstance(model, DDP):
+                for param in model.parameters():
+                    if param.requires_grad:
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
             # Gradient clipping to prevent exploding gradients
             if max_grad_norm > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -234,22 +257,22 @@ def train_epoch_splice(
             # Accumulate metrics
             metrics.loss += total_loss.item()
             metrics.cls_loss += cls_loss_val.item()
-            metrics.cls_accuracy += cls_acc.get("accuracy", 0.0)
             metrics.usage_loss += usage_loss_val.item()
-            metrics.usage_corr += usage_corr.get("correlation", 0.0)
+            metrics.accuracy += cls_acc.get("accuracy", 0.0)
+            for k, v in cls_acc.items():
+                metrics.per_class_acc[k] = metrics.per_class_acc.get(k, 0.0) + v
             metrics.n_batches += 1
 
             if log_every > 0 and step % log_every == 0:
                 avg = metrics.loss / metrics.n_batches
                 avg_cls = metrics.cls_loss / metrics.n_batches
                 avg_usg = metrics.usage_loss / metrics.n_batches
-                avg_latency = metrics.latency_ms
                 elapsed = time.perf_counter() - step_start
                 sps = log_every / elapsed  # optimizer steps per second
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}  "
-                    f"{sps:.2f} steps/s  latency={avg_latency:.1f}ms"
+                    f"{sps:.2f} steps/s"
                 )
                 if logger is not None:
                     logger.log_step({
@@ -258,21 +281,18 @@ def train_epoch_splice(
                         "train_cls_loss": avg_cls,
                         "train_usage_loss": avg_usg,
                         "steps_per_sec": sps,
-                        "latency_ms": avg_latency,
                     })
                 step_start = time.perf_counter()
-        # Record batch latency (for each optimizer step)
-        batch_end = time.perf_counter()
-        batch_latencies.append((batch_end - batch_start) * 1000.0)  # ms
 
     # Average
     if metrics.n_batches > 0:
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
-        metrics.cls_accuracy /= metrics.n_batches
-        metrics.usage_corr /= metrics.n_batches
-        metrics.latency_ms = sum(batch_latencies) / len(batch_latencies)
+        metrics.accuracy /= metrics.n_batches
+        metrics.per_class_acc = {
+            k: v / metrics.n_batches for k, v in metrics.per_class_acc.items()
+        }
     metrics.elapsed_s = time.perf_counter() - epoch_start
 
     return metrics
@@ -321,9 +341,7 @@ def validate_splice(
 
     val_start = time.perf_counter()
 
-    batch_latencies = []
     for batch in val_loader:
-        batch_start = time.perf_counter()
         seq = batch["sequence"].to(device)
         org_idx = batch["organism_index"].to(device)
         cls_labels = batch["classification_labels"].to(device)
@@ -344,7 +362,7 @@ def validate_splice(
             )
             emb_1bp = outputs["embeddings_1bp"]
 
-            cls_out = model.splice_sites_classification_head(
+            cls_out = _unwrap(model).splice_sites_classification_head(
                 emb_1bp, org_idx, channels_last=True
             )
             cls_loss_val, cls_acc = splice_classification_loss(
@@ -359,51 +377,27 @@ def validate_splice(
                 usage_mask = batch["usage_mask"].to(device)
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                usage_loss_val, usage_corr = splice_usage_loss(
+                usage_loss_val = splice_usage_loss(
                     usage_out["logits"], usage_pos, usage_vals, usage_mask
                 )
                 total_loss = total_loss + usage_weight * usage_loss_val
 
         metrics.loss += total_loss.item()
         metrics.cls_loss += cls_loss_val.item()
-        metrics.cls_accuracy += cls_acc.get("accuracy", 0.0)
         metrics.usage_loss += usage_loss_val.item()
-        metrics.usage_corr += usage_corr.get("correlation", 0.0)
+        metrics.accuracy += cls_acc.get("accuracy", 0.0)
+        for k, v in cls_acc.items():
+            metrics.per_class_acc[k] = metrics.per_class_acc.get(k, 0.0) + v
         metrics.n_batches += 1
-        batch_end = time.perf_counter()
-        batch_latencies.append((batch_end - batch_start) * 1000.0)  # ms
 
     if metrics.n_batches > 0:
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
-        metrics.cls_accuracy /= metrics.n_batches
-        metrics.usage_corr /= metrics.n_batches
-        metrics.latency_ms = sum(batch_latencies) / len(batch_latencies)
+        metrics.accuracy /= metrics.n_batches
+        metrics.per_class_acc = {
+            k: v / metrics.n_batches for k, v in metrics.per_class_acc.items()
+        }
     metrics.elapsed_s = time.perf_counter() - val_start
-
-    # Log validation metrics if logger is provided (assume logger is passed as kwarg)
-    logger = None
-    import inspect
-    frame = inspect.currentframe()
-    outer_frames = inspect.getouterframes(frame)
-    for f in outer_frames:
-        if 'logger' in f.frame.f_locals:
-            logger = f.frame.f_locals['logger']
-            break
-    if logger is not None:
-        logger.log_epoch(
-            epoch=None,
-            train_loss=None,
-            val_loss=metrics.loss,
-            lr=None,
-            extra={
-                "val_cls_loss": metrics.cls_loss,
-                "val_usage_loss": metrics.usage_loss,
-                "val_cls_accuracy": metrics.cls_accuracy,
-                "val_usage_corr": metrics.usage_corr,
-                "val_latency_ms": metrics.latency_ms,
-            }
-        )
 
     return metrics

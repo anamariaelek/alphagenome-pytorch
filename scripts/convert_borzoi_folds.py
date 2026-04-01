@@ -44,9 +44,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-# AlphaGenome sequence length (1Mb)
-ALPHAGENOME_SEQ_LENGTH = 2**20  # 1,048,576 bp
-# ALPHAGENOME_SEQ_LENGTH = 2**19  # 524,288 bp
+# AlphaGenome sequence length (default 1Mb, can be overridden by --seq-len)
+DEFAULT_ALPHAGENOME_SEQ_LENGTH = 2**20  # 1,048,576 bp
+ALPHAGENOME_SEQ_LENGTH = DEFAULT_ALPHAGENOME_SEQ_LENGTH
 
 # From https://hgdownload.cse.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes
 HG38_CHROMOSOME_LENGTHS = {
@@ -153,32 +153,36 @@ class Region(NamedTuple):
     def midpoint(self) -> int:
         return (self.start + self.end) // 2
 
-    def to_alphagenome(self, chrom_len: int | None = None) -> Region | None:
-        """Extend region to 1Mb centered on midpoint, with clamping to boundaries.
+
+    def to_alphagenome(self, chrom_len: int | None = None, seq_length: int = None) -> 'Region | None':
+        """Extend region to seq_length centered on midpoint, with clamping to boundaries.
 
         Args:
             chrom_len: Optional chromosome length for boundary clamping.
+            seq_length: Sequence length to use (defaults to ALPHAGENOME_SEQ_LENGTH).
 
         Returns:
-            Region extended to 1Mb, or None if the chromosome is too short.
+            Region extended to seq_length, or None if the chromosome is too short.
         """
-        if chrom_len is not None and chrom_len < ALPHAGENOME_SEQ_LENGTH:
+        if seq_length is None:
+            seq_length = ALPHAGENOME_SEQ_LENGTH
+        if chrom_len is not None and chrom_len < seq_length:
             return None
 
         mid = self.midpoint
-        half_len = ALPHAGENOME_SEQ_LENGTH // 2
+        half_len = seq_length // 2
         start = mid - half_len
         end = mid + half_len
 
         # Clamp to boundaries
         if start < 0:
             start = 0
-            end = ALPHAGENOME_SEQ_LENGTH
+            end = seq_length
         elif chrom_len is not None and end > chrom_len:
             end = chrom_len
-            start = chrom_len - ALPHAGENOME_SEQ_LENGTH
+            start = chrom_len - seq_length
 
-        # Safety check (should not happen if chrom_len >= SEQ_LENGTH)
+        # Safety check (should not happen if chrom_len >= seq_length)
         if start < 0 or (chrom_len is not None and end > chrom_len):
             return None
 
@@ -323,6 +327,7 @@ def convert_borzoi_to_alphagenome(
     output_dir: str | Path,
     organism: str = "human",
     verbose: bool = True,
+    seq_length: int = None,
 ) -> dict[str, dict[str, int]]:
     """Convert Borzoi folds to AlphaGenome format.
 
@@ -363,13 +368,15 @@ def convert_borzoi_to_alphagenome(
         for fold in sorted(regions_by_fold.keys()):
             print(f"    {fold}: {len(regions_by_fold[fold])}")
 
-    # Convert each region to 1Mb with clamping
+    # Convert each region to seq_length with clamping
+    if seq_length is None:
+        seq_length = ALPHAGENOME_SEQ_LENGTH
     alphagenome_regions_by_fold: dict[str, list[Region]] = {}
     for fold, regions in regions_by_fold.items():
         ag_regions = []
         for r in regions:
             chrom_len = chrom_lengths.get(r.chrom)
-            ag_r = r.to_alphagenome(chrom_len=chrom_len)
+            ag_r = r.to_alphagenome(chrom_len=chrom_len, seq_length=seq_length)
             if ag_r:
                 ag_regions.append(ag_r)
         alphagenome_regions_by_fold[fold] = ag_regions
@@ -443,10 +450,17 @@ def convert_borzoi_to_alphagenome(
 
 
 def main():
+    global ALPHAGENOME_SEQ_LENGTH
     parser = argparse.ArgumentParser(
         description="Convert Borzoi sequence folds to AlphaGenome format.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=DEFAULT_ALPHAGENOME_SEQ_LENGTH,
+        help=f"AlphaGenome sequence length (default: {DEFAULT_ALPHAGENOME_SEQ_LENGTH})",
     )
     parser.add_argument(
         "--input",
@@ -476,11 +490,14 @@ def main():
 
     args = parser.parse_args()
 
+    global ALPHAGENOME_SEQ_LENGTH
+    ALPHAGENOME_SEQ_LENGTH = args.seq_len
     stats = convert_borzoi_to_alphagenome(
         input_path=args.input,
         output_dir=args.output_dir,
         organism=args.organism,
         verbose=not args.quiet,
+        seq_length=args.seq_len,
     )
 
     # Print summary

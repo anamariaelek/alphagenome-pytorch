@@ -85,7 +85,7 @@ echo "Log file: ${LOG_FILE}"
 echo "---"
 
 # Resume if checkpoint exists
-RESUME="/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/524kb_full_epoch1/best_model.pth"
+RESUME="${OUTPUT_DIR}/${RUN_NAME}/best_model.pth"
 if [ -f "${RESUME}" ]; then
     echo "Resuming from checkpoint: ${RESUME}"
 else

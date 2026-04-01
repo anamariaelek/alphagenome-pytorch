@@ -169,7 +169,7 @@ def create_splice_usage_finetuning_head(
     pretrained model's 734-track head.
 
     Args:
-        n_conditions: Number of output conditions (e.g. 62 tissue samples).
+        n_conditions: Number of output conditions.
         num_organisms: Number of organisms (default: 1 for fine-tuning).
 
     Returns:

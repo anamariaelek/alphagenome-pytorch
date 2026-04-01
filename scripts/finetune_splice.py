@@ -82,9 +82,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 
 # Workaround for torch.compile bug in quantization pattern matcher
 import torch._inductor.config
@@ -573,8 +571,6 @@ def create_dataloaders(
     val_dataset,
     batch_size: int,
     num_workers: int,
-    world_size: int,
-    rank: int,
     seed: int = 0,
 ) -> tuple[DataLoader, DataLoader, Any, Any]:
     """Create data loaders backed by species-grouped batch samplers.
@@ -582,29 +578,9 @@ def create_dataloaders(
     Each batch is guaranteed to contain sequences from a single species,
     which allows per-species usage heads with different ``n_conditions``.
     """
-    from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
-        DistributedSpeciesGroupedSampler,
-        SpeciesGroupedSampler,
-    )
-
-    if world_size > 1:
-        train_sampler = DistributedSpeciesGroupedSampler(
-            train_dataset, batch_size=batch_size,
-            num_replicas=world_size, rank=rank,
-            shuffle=True, seed=seed,
-        )
-        val_sampler = DistributedSpeciesGroupedSampler(
-            val_dataset, batch_size=batch_size,
-            num_replicas=world_size, rank=rank,
-            shuffle=False, seed=seed,
-        )
-    else:
-        train_sampler = SpeciesGroupedSampler(
-            train_dataset, batch_size=batch_size, shuffle=True, seed=seed,
-        )
-        val_sampler = SpeciesGroupedSampler(
-            val_dataset, batch_size=batch_size, shuffle=False, seed=seed,
-        )
+    from alphagenome_pytorch.extensions.finetuning.splice_datasets import SpeciesGroupedSampler
+    train_sampler = SpeciesGroupedSampler(train_dataset, batch_size=batch_size, shuffle=True, seed=seed)
+    val_sampler = SpeciesGroupedSampler(val_dataset, batch_size=batch_size, shuffle=False, seed=seed)
 
     from alphagenome_pytorch.extensions.finetuning.splice_datasets import collate_splice
 
@@ -639,9 +615,6 @@ def create_model(
     args: argparse.Namespace,
     species_n_conditions: dict[int, int],
     device: torch.device,
-    rank: int,
-    world_size: int,
-    local_rank: int,
 ) -> tuple[nn.Module, dict[int, nn.Module], list[torch.nn.Parameter]]:
     """Create and configure the model for splice fine-tuning.
 
@@ -661,12 +634,11 @@ def create_model(
         *usage_heads* is a ``dict[organism_index, nn.Module]``
         (empty when no species provides usage data).
     """
-    print_rank0(f"Loading pretrained model from {args.pretrained_weights}", rank)
-
+    print(f"Loading pretrained model from {args.pretrained_weights}")
     dtype_policy = (
         DtypePolicy.full_float32() if args.dtype == "float32" else DtypePolicy.mixed_precision()
     )
-    print_rank0(f"Dtype policy: {dtype_policy}", rank)
+    print(f"Dtype policy: {dtype_policy}")
 
     model = AlphaGenome(
         gradient_checkpointing=args.gradient_checkpointing,
@@ -681,16 +653,61 @@ def create_model(
         for param in model.parameters():
             param.requires_grad = False
 
+
     # Remove all existing heads (including splice_sites_classification_head)
     model = remove_all_heads(model)
 
-    # Create and attach a fresh splice classification head
+    # --- Classification head initialization mapping logic ---
     num_organisms = max(s["organism_index"] for s in args.species_specs) + 1
+    # Parse mapping from config/args (dict: new_org_idx -> pretrained_org_idx)
+    classification_head_init = getattr(args, "classification_head_init", None)
+    if classification_head_init is None and hasattr(args, "classification_head_init_dict"):
+        classification_head_init = args.classification_head_init_dict
+
+    # Load pretrained classification head weights (if mapping is provided)
+    pretrained_head_weights = None
+    if classification_head_init is not None:
+        # Load full state dict from pretrained weights
+        import torch
+        weights_path = args.pretrained_weights
+        if weights_path.endswith('.safetensors'):
+            try:
+                from safetensors.torch import load_file as _safetensors_load
+            except ImportError:
+                raise ImportError(
+                    "safetensors is required to load .safetensors checkpoints. "
+                    "Install it with: pip install safetensors"
+                )
+            state_dict = _safetensors_load(weights_path, device='cpu')
+        else:
+            # PyTorch >=2.6: weights_only=True by default, but we want full pickle
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)
+            # Unwrap nested checkpoint dicts produced by save_checkpoint
+            if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+                state_dict = state_dict['model_state_dict']
+        # Find keys for splice_sites_classification_head
+        head_prefix = "splice_sites_classification_head.conv."
+        pretrained_head_weights = {k[len(head_prefix):]: v for k, v in state_dict.items() if k.startswith(head_prefix)}
+
+    # Create a fresh classification head
+    from alphagenome_pytorch.extensions.finetuning.heads import create_splice_classification_finetuning_head
     cls_head = create_splice_classification_finetuning_head(num_organisms=num_organisms)
+
+    # If mapping and weights are available, copy weights for each organism
+    if pretrained_head_weights is not None and classification_head_init is not None:
+        # The conv weights are (num_organisms, out_channels, in_channels) and bias (num_organisms, out_channels)
+        for new_org_idx, pretrained_org_idx in classification_head_init.items():
+            # Copy weights and bias for this organism
+            try:
+                cls_head.conv.weight.data[new_org_idx] = pretrained_head_weights["weight"][pretrained_org_idx].clone()
+                cls_head.conv.bias.data[new_org_idx] = pretrained_head_weights["bias"][pretrained_org_idx].clone()
+            except Exception as e:
+                print(f"[Warning] Could not copy head weights for organism {new_org_idx} from pretrained organism {pretrained_org_idx}: {e}")
+        print(f"Initialized classification head weights from pretrained mapping: {classification_head_init}")
+    else:
+        print(f"Created splice classification head (5-class, 1bp, {num_organisms} organism(s)), random init (no mapping)")
+
     model.splice_sites_classification_head = cls_head
-    print_rank0(
-        f"Created splice classification head (5-class, 1bp, {num_organisms} organism(s))", rank
-    )
 
     # Create per-species usage heads (one per organism that has usage data)
     usage_heads: dict[int, nn.Module] = {}
@@ -700,11 +717,8 @@ def create_model(
                 n_conditions=n_cond,
                 num_organisms=num_organisms,
             )
-            print_rank0(
-                f"Created splice usage head for organism {org_idx} "
-                f"({n_cond} conditions, 1bp, {num_organisms} organism(s))",
-                rank,
-            )
+            print(f"Created splice usage head for organism {org_idx} "
+                  f"({n_cond} conditions, 1bp, {num_organisms} organism(s))")
 
     # Configure trainable parameters based on training mode
     trainable_params: list[torch.nn.Parameter] = []
@@ -714,13 +728,13 @@ def create_model(
         trainable_params.extend(list(cls_head.parameters()))
         for h in usage_heads.values():
             trainable_params.extend(list(h.parameters()))
-        print_rank0("Mode: linear-probe (frozen backbone, heads only)", rank)
+        print("Mode: linear-probe (frozen backbone, heads only)")
 
     elif args.mode == "lora":
         if args.lora_rank > 0:
             lora_targets = [t.strip() for t in args.lora_targets.split(",")]
-            print_rank0(f"Applying LoRA: rank={args.lora_rank}, alpha={args.lora_alpha}", rank)
-            print_rank0(f"  Target modules: {lora_targets}", rank)
+            print(f"Applying LoRA: rank={args.lora_rank}, alpha={args.lora_alpha}")
+            print(f"  Target modules: {lora_targets}")
             config = TransferConfig(
                 mode="lora",
                 lora_targets=lora_targets,
@@ -734,46 +748,27 @@ def create_model(
         for h in usage_heads.values():
             trainable_params.extend(list(h.parameters()))
         mode_desc = f"lora (rank={args.lora_rank})" if args.lora_rank > 0 else "lora (rank=0, heads only)"
-        print_rank0(f"Mode: {mode_desc}", rank)
+        print(f"Mode: {mode_desc}")
 
     elif args.mode == "full":
         # All model parameters
         trainable_params = list(model.parameters())
         for h in usage_heads.values():
             trainable_params.extend(list(h.parameters()))
-        print_rank0("Mode: full (all parameters trainable)", rank)
+        print("Mode: full (all parameters trainable)")
 
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
-    # Attach usage heads to the model as a ModuleDict BEFORE DDP wrapping.
-    # This ensures a single DDP instance covers all parameters, avoiding NCCL
-    # AllReduce desync that occurs when separate per-organism DDP instances are
-    # used and different ranks process different species in the same step.
     model.usage_heads = nn.ModuleDict({str(k): v for k, v in usage_heads.items()})
-
-    # Move to device
     model = model.to(device)
-
-    # Wrap with DDP if multi-GPU.  We use plain DDP (no find_unused_parameters
-    # or static_graph) because both conflict with gradient checkpointing.  The
-    # training loop adds a zero-valued dummy contribution from every parameter
-    # so that no parameter is ever truly "unused" and plain DDP works correctly.
-    if world_size > 1:
-        model = DDP(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-        )
-        print_rank0("Model(s) wrapped with DistributedDataParallel", rank)
-
-    # Rebuild usage_heads to point at the sub-modules now owned by the model.
-    model_module = model.module if isinstance(model, DDP) else model
+    model_module = model
     usage_heads = {int(k): v for k, v in model_module.usage_heads.items()}
 
     # Optionally compile
     if args.compile:
-        print_rank0("Compiling model with torch.compile...", rank)
+        # Use rank=0 for single-process (no DDP)
+        print_rank0("Compiling model with torch.compile...", 0)
         import torch._inductor.config as inductor_config
         inductor_config.group_fusion = False
         model = torch.compile(model)
@@ -781,7 +776,7 @@ def create_model(
     # Parameter counts (model_module.parameters() now includes usage heads)
     n_trainable = sum(p.numel() for p in trainable_params)
     n_total = sum(p.numel() for p in model_module.parameters())
-    print_rank0(f"Trainable: {n_trainable:,} / {n_total:,} ({100*n_trainable/n_total:.2f}%)", rank)
+    print_rank0(f"Trainable: {n_trainable:,} / {n_total:,} ({100*n_trainable/n_total:.2f}%)", 0)
 
     return model, usage_heads, trainable_params
 
@@ -792,45 +787,56 @@ def create_model(
 
 def main() -> None:
     """Main training function."""
+
     args = parse_args()
 
-    # Setup distributed
-    rank, world_size, local_rank, device = setup_distributed()
+    # Support loading classification_head_init mapping from YAML config
+    # If present in config, inject as attribute for create_model
+    if hasattr(args, 'config') and args.config is not None:
+        import yaml
+        with open(args.config, 'r') as f:
+            config_yaml = yaml.safe_load(f)
+        if 'classification_head_init' in config_yaml:
+            # Ensure keys are int (YAML may parse as str)
+            mapping = {int(k): int(v) for k, v in config_yaml['classification_head_init'].items()}
+            setattr(args, 'classification_head_init', mapping)
 
-    # Set random seed
+    # Single-process/single-GPU only
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    import random
+    import numpy as np
     if args.seed is not None:
-        torch.manual_seed(args.seed + rank)
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed + rank)
-        print_rank0(f"Random seed: {args.seed} (+ rank offset)", rank)
-
-    if world_size > 1:
-        print_rank0(f"Distributed training with {world_size} GPUs", rank)
-    print_rank0(f"Device: {device}", rank)
+            torch.cuda.manual_seed_all(args.seed)
+    print(f"Device: {device}")
 
     # Output directory
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output_dir) / str(run_name)
-    if is_main_process(rank):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Output: {output_dir}")
-    setup_output_logging(output_dir, rank, log_file=args.log_file)
-    barrier()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output: {output_dir}")
+    setup_output_logging(output_dir, 0, log_file=args.log_file)
 
     # Resolve resume checkpoint
     resume_path = None
     if args.resume == "auto":
         resume_path = find_latest_checkpoint(output_dir)
-        if is_main_process(rank):
-            if resume_path:
-                print(f"Auto-resume: found {resume_path}")
-            else:
-                print("Auto-resume: no checkpoint found, starting fresh")
+        if resume_path:
+            print(f"Auto-resume: found {resume_path}")
+        else:
+            print("Auto-resume: no checkpoint found, starting fresh")
     elif args.resume:
         resume_path = Path(args.resume)
 
     # Create datasets
-    train_dataset, val_dataset, species_n_conditions = create_datasets(args, rank)
+    train_dataset, val_dataset, species_n_conditions = create_datasets(args, 0)
+
+    # Set rank and world_size for single-process (no DDP)
+    rank = 0
+    world_size = 1
 
     # Create dataloaders
     train_loader, val_loader, train_sampler, _ = create_dataloaders(
@@ -838,43 +844,17 @@ def main() -> None:
         val_dataset,
         args.batch_size,
         args.num_workers,
-        world_size,
-        rank,
         seed=args.seed or 0,
     )
-    print_rank0(f"Train batches: {len(train_loader):,}, Val batches: {len(val_loader):,}", rank)
+    print(f"Train batches: {len(train_loader):,}, Val batches: {len(val_loader):,}")
 
-    # Compute class weights (rank 0 scans training BED(s), then broadcasts).
-    # For multi-species, weights are computed per-species and averaged.
-    if is_main_process(rank):
-        from alphagenome_pytorch.extensions.finetuning.splice_losses import compute_splice_class_weights
-        print("Computing splice class weights from training windows...")
-        cw_list = []
-        for spec in args.species_specs:
-            cw = compute_splice_class_weights(
-                annotation_parquet=spec["annotation_parquet"],
-                bed_file=spec["train_bed"],
-                sequence_length=args.sequence_length,
-            )
-            print(f"  [{spec['name']}] Class weights: {[f'{w:.3f}' for w in cw.tolist()]}")
-            cw_list.append(cw)
-        if len(cw_list) == 1:
-            final_cw = cw_list[0]
-        else:
-            final_cw = torch.stack(cw_list).mean(dim=0)
-            print(f"  Averaged class weights: {[f'{w:.3f}' for w in final_cw.tolist()]}")
-        class_weights_list = final_cw.tolist()
-    else:
-        class_weights_list = None
-    class_weights_list = broadcast_object(class_weights_list, src=0)
-    class_weights: torch.Tensor = torch.tensor(class_weights_list, dtype=torch.float32).to(device)
+    class_weights: torch.Tensor | None = None
 
     # Create model
     model, usage_heads, trainable_params = create_model(
-        args, species_n_conditions, device, rank, world_size, local_rank
+        args, species_n_conditions, device
     )
-    model_module = model.module if isinstance(model, DDP) else model
-    # Unwrapped usage modules for state_dict access (they are sub-modules of model_module)
+    model_module = model
     usage_modules: dict[int, nn.Module] = dict(usage_heads)
 
     # Optimizer
@@ -887,12 +867,12 @@ def main() -> None:
     # Scheduler
     total_steps = (args.epochs * len(train_loader)) // args.gradient_accumulation_steps
     scheduler = create_lr_scheduler(optimizer, args.warmup_steps, total_steps, schedule=args.lr_schedule)
-    effective_batch_size = args.batch_size * args.gradient_accumulation_steps * world_size
-    print_rank0(f"Batch size: {args.batch_size}", rank)
-    print_rank0(f"Gradient accumulation: {args.gradient_accumulation_steps}", rank)
-    print_rank0(f"Effective batch size: {effective_batch_size}", rank)
-    print_rank0(f"Total optimizer steps: {total_steps:,}", rank)
-    print_rank0(f"LR schedule: {args.lr_schedule} (warmup: {args.warmup_steps} steps)", rank)
+    effective_batch_size = args.batch_size * args.gradient_accumulation_steps
+    print(f"Batch size: {args.batch_size}")
+    print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
+    print(f"Effective batch size: {effective_batch_size}")
+    print(f"Total optimizer steps: {total_steps:,}")
+    print(f"LR schedule: {args.lr_schedule} (warmup: {args.warmup_steps} steps)")
 
     # Resume from checkpoint
     start_epoch = 1
@@ -998,12 +978,12 @@ def main() -> None:
             )
             print(f"Preemption checkpoint saved to {ckpt_path}")
 
-    handler = setup_preemption_handler(_save_preempt, rank, world_size)
+    handler = setup_preemption_handler(_save_preempt, 0, 1)
 
     # Training loop
-    print_rank0("\n" + "=" * 60, rank)
-    print_rank0(f"Starting training (epoch {start_epoch} to {args.epochs})", rank)
-    print_rank0("=" * 60, rank)
+    print("\n" + "=" * 60)
+    print(f"Starting training (epoch {start_epoch} to {args.epochs})")
+    print("=" * 60)
 
     try:
         for epoch in range(start_epoch, args.epochs + 1):
@@ -1066,76 +1046,67 @@ def main() -> None:
             is_best = val_loss < best_val_loss
 
             # Print epoch summary
-            if is_main_process(rank):
-                epoch_elapsed = time.monotonic() - epoch_start_time
-                summary = (
-                    f"Epoch {epoch} [{epoch_elapsed:.0f}s train={train_metrics.elapsed_s:.0f}s val={val_metrics.elapsed_s:.0f}s]: "
-                    f"train_loss={train_loss:.4f}  "
-                    f"train_cls_loss={train_metrics.cls_loss:.4f}  "
-                    f"train_usage_loss={train_metrics.usage_loss:.4f}  "
-                    f"train_accuracy={train_metrics.accuracy:.4f}  "
-                    f"val_loss={val_loss:.4f}  "
-                    f"val_cls_loss={val_metrics.cls_loss:.4f}  "
-                    f"val_usage_loss={val_metrics.usage_loss:.4f}  "
-                    f"val_accuracy={val_metrics.accuracy:.4f}  "
-                    f"lr={current_lr:.2e}"
-                )
-                if val_metrics.usage_loss > 0:
-                    summary += f"  val_usage_loss={val_metrics.usage_loss:.4f}"
-                print(summary)
+            epoch_elapsed = time.monotonic() - epoch_start_time
+            summary = (
+                f"Epoch {epoch} [{epoch_elapsed:.0f}s train={train_metrics.elapsed_s:.0f}s val={val_metrics.elapsed_s:.0f}s]: "
+                f"train_loss={train_loss:.4f}  "
+                f"train_cls_loss={train_metrics.cls_loss:.4f}  "
+                f"train_usage_loss={train_metrics.usage_loss:.4f}  "
+                f"train_accuracy={train_metrics.cls_accuracy:.4f}  "
+                f"val_loss={val_loss:.4f}  "
+                f"val_cls_loss={val_metrics.cls_loss:.4f}  "
+                f"val_usage_loss={val_metrics.usage_loss:.4f}  "
+                f"val_accuracy={val_metrics.cls_accuracy:.4f}  "
+                f"lr={current_lr:.2e}"
+            )
+            print(summary)
 
             # Log epoch metrics
+
             extra = {
                 "train_cls_loss": train_metrics.cls_loss,
                 "train_usage_loss": train_metrics.usage_loss,
-                "train_accuracy": train_metrics.accuracy,
+                "train_accuracy": train_metrics.cls_accuracy,
                 "val_cls_loss": val_metrics.cls_loss,
                 "val_usage_loss": val_metrics.usage_loss,
-                "val_accuracy": val_metrics.accuracy,
+                "val_accuracy": val_metrics.cls_accuracy,
             }
-            # Per-class validation accuracy
-            for i, acc in enumerate(val_metrics.per_class_acc):
-                extra[f"val_acc_class{i}"] = acc
 
             logger.log_epoch(epoch, train_loss, val_loss, current_lr, is_best, extra)
 
             # Save checkpoints
-            if is_main_process(rank):
-                usage_extra: dict[str, Any] = {}
-                if usage_modules:
-                    usage_extra["usage_heads_state_dicts"] = {
-                        str(k): v.state_dict() for k, v in usage_modules.items()
-                    }
+            usage_extra: dict[str, Any] = {}
+            if usage_modules:
+                usage_extra["usage_heads_state_dicts"] = {
+                    str(k): v.state_dict() for k, v in usage_modules.items()
+                }
 
-                if is_best:
-                    best_val_loss = val_loss
-                    save_checkpoint(
-                        path=output_dir / "best_model.pth",
-                        epoch=epoch,
-                        model=model_module,
-                        optimizer=optimizer,
-                        val_loss=val_loss,
-                        track_names=[],
-                        modality="splice",
-                        resolutions=(1,),
-                        scheduler=scheduler,
-                        best_val_loss=best_val_loss,
-                        wandb_run_id=logger.wandb_run_id,
-                        **usage_extra,
-                    )
-                    print(f"  Saved best model (val_loss={val_loss:.4f})")
-
-            barrier()
+            if is_best:
+                best_val_loss = val_loss
+                save_checkpoint(
+                    path=output_dir / "best_model.pth",
+                    epoch=epoch,
+                    model=model_module,
+                    optimizer=optimizer,
+                    val_loss=val_loss,
+                    track_names=[],
+                    modality="splice",
+                    resolutions=(1,),
+                    scheduler=scheduler,
+                    best_val_loss=best_val_loss,
+                    wandb_run_id=logger.wandb_run_id,
+                    **usage_extra,
+                )
+                print(f"  Saved best model (val_loss={val_loss:.4f})")
 
     except KeyboardInterrupt:
-        print_rank0("\nTraining interrupted by user", rank)
+        print("\nTraining interrupted by user")
     finally:
         logger.finish()
         handler.unregister()
-        cleanup_distributed()
 
-    print_rank0(f"\nTraining complete! Best val_loss: {best_val_loss:.4f}", rank)
-    print_rank0(f"Output: {output_dir}", rank)
+    print(f"\nTraining complete! Best val_loss: {best_val_loss:.4f}")
+    print(f"Output: {output_dir}")
 
 
 if __name__ == "__main__":
