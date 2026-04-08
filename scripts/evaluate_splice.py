@@ -474,8 +474,11 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Log
     cls_head = create_splice_classification_finetuning_head(num_organisms=num_organisms)
     model.splice_sites_classification_head = cls_head
 
-    # Load fine-tuned weights (LoRA adapters + classification head)
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    # Load fine-tuned weights (LoRA adapters + classification head).
+    # Strip _orig_mod. prefix that torch.compile adds to state-dict keys.
+    raw_sd = ckpt["model_state_dict"]
+    sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in raw_sd.items()}
+    model.load_state_dict(sd, strict=False)
     msg = f"  Loaded model_state_dict (epoch {ckpt.get('epoch', '?')})"
     if logger:
         logger.info(msg)
@@ -514,7 +517,9 @@ def build_usage_heads(
         )
         sd_key = str(org_idx)
         if sd_key in usage_heads_state_dicts:
-            head.load_state_dict(usage_heads_state_dicts[sd_key])
+            raw_usd = usage_heads_state_dicts[sd_key]
+            usd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in raw_usd.items()}
+            head.load_state_dict(usd)
             msg = f"  Loaded usage head for organism {org_idx} ({n_cond} conditions)"
             if logger:
                 logger.info(msg)

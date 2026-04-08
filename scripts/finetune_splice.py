@@ -854,7 +854,9 @@ def main() -> None:
     model, usage_heads, trainable_params = create_model(
         args, species_n_conditions, device
     )
-    model_module = model
+    # When torch.compile wraps the model, _orig_mod holds the original PyTorch module.
+    # Always checkpoint from the uncompiled module so state-dict keys have no _orig_mod. prefix.
+    model_module = getattr(model, '_orig_mod', model)
     usage_modules: dict[int, nn.Module] = dict(usage_heads)
 
     # Optimizer

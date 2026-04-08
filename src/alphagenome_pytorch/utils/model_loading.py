@@ -99,7 +99,10 @@ def load_model_for_inference(checkpoint_path, device, strict=True):
         cls_head = create_splice_classification_finetuning_head(num_organisms=num_organisms)
         model.splice_sites_classification_head = cls_head
         # Use strict=False by default for fine-tuned checkpoints
-        model.load_state_dict(ckpt["model_state_dict"], strict=False if strict is None else strict)
+        # Strip _orig_mod. prefix that torch.compile adds to state-dict keys
+        raw_sd = ckpt["model_state_dict"]
+        sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in raw_sd.items()}
+        model.load_state_dict(sd, strict=False if strict is None else strict)
         model.to(device).eval()
         return model, cfg
     else:

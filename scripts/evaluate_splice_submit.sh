@@ -55,12 +55,12 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=132kb_lora
+RUN=132kb_linear
 mkdir -p ${DIR}/${RUN}/predictions/
 
 python scripts/evaluate_splice.py \
     --checkpoint "${DIR}/${RUN}" \
-    --bed "${DIR}/Homo_sapiens/folds/FOLD_0/test.bed" "${DIR}/Mus_musculus/folds/FOLD_0/test.bed" \
+    --bed "${DIR}/Homo_sapiens/folds_100kb/FOLD_0/test.bed" "${DIR}/Mus_musculus/folds_100kb/FOLD_0/test.bed" \
     --gene-annotation "${DIR}/Homo_sapiens/gene_annotation.parquet" "${DIR}/Mus_musculus/gene_annotation.parquet" \
     --batch-size 8 \
     --device cuda \

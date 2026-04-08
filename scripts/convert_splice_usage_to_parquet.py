@@ -32,8 +32,8 @@ Filename convention (used to extract tissue/timepoint):
 e.g. ``Human.Brain.1.combined.tsv`` → tissue=Brain, timepoint=1
 
 Position adjustment (aligns with GTF-derived exon boundary coordinates):
-  + strand Donor   : ``Site - 2``
-  − strand Acceptor: ``Site - 2``
+  + strand Donor   : ``Site - 1``
+  − strand Acceptor: ``Site - 1``
   All other types  : Site unchanged
 
 After adjustment, positions are stored 1-based to match the expected
@@ -129,13 +129,13 @@ def annotate_splice_site_type(df: "pd.DataFrame") -> "pd.DataFrame":
 
 
 def adjust_splice_site_position(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Shift Donor+/Acceptor- site positions by −2 to match exon-boundary coords.
+    """Shift Donor+/Acceptor- site positions by −1 to match exon-boundary coords.
 
     Spliser records the first intronic base; the GTF convention used in this
     codebase records the last exonic base.  The correction is:
 
-    - ``+`` strand Donor  : ``Site − 2``  (first intron base → last exon base)
-    - ``−`` strand Acceptor: ``Site − 2``
+    - ``+`` strand Donor  : ``Site − 1``  (first intron base → last exon base)
+    - ``−`` strand Acceptor: ``Site − 1``
     - All other combinations: Site unchanged
 
     Args:
@@ -150,7 +150,7 @@ def adjust_splice_site_position(df: "pd.DataFrame") -> "pd.DataFrame":
         ((df["Strand"] == "+") & (df["Splice_Site_Type"] == "Donor"))
         | ((df["Strand"] == "-") & (df["Splice_Site_Type"] == "Acceptor"))
     )
-    df.loc[mask, "Site"] = df.loc[mask, "Site"] - 2
+    df.loc[mask, "Site"] = df.loc[mask, "Site"] - 1
     return df
 
 
@@ -160,6 +160,9 @@ def convert_usage_to_parquet(
     condition_labels: dict[str, int] | None = None,
     output_path: str | Path | None = None,
     compression: str = "snappy",
+    strip_chr: bool = False,
+    min_alpha: int | None = None,
+    min_coverage: int | None = None,
 ) -> "pd.DataFrame | None":
     """Transform the annotated/adjusted DataFrame into the usage Parquet format.
 
@@ -185,6 +188,11 @@ def convert_usage_to_parquet(
             DataFrame.
         compression: Parquet compression codec (``"snappy"``, ``"gzip"``,
             ``"zstd"``, or ``"none"``).
+        strip_chr: Remove ``chr`` prefix from chromosome names (e.g. ``"chr1"``
+            → ``"1"``).
+        min_alpha: Optional minimum Alpha count; rows below this are dropped.
+        min_coverage: Optional minimum Alpha+Beta count; rows below this are
+            dropped.
 
     Returns:
         The transformed DataFrame when *output_path* is ``None``, otherwise
@@ -260,6 +268,19 @@ def convert_usage_to_parquet(
             "Condition_Idx": "Condition",
         }
     )
+
+    # ── Optional chromosome normalisation ───────────────────────────────────
+    if strip_chr:
+        df["Chromosome"] = df["Chromosome"].str.replace(r"^chr", "", regex=True)
+
+    # ── Optional coverage / alpha filters ───────────────────────────────────
+    if min_coverage is not None:
+        df = df[df["Alpha"] + df["Beta"] >= min_coverage]
+    if min_alpha is not None:
+        df = df[df["Alpha"] >= min_alpha]
+
+    # ── Canonical column order ───────────────────────────────────────────────
+    df = df[["Chromosome", "Position", "SSE", "Alpha", "Beta", "Label", "Condition"]]
 
     # ── Metadata ──────────────────────────────────────────────────────────────
     metadata = {
@@ -351,6 +372,9 @@ def convert_spliser_dir_to_usage_parquet(
     class_labels: dict[str, int] | None = None,
     condition_labels: dict[str, int] | None = None,
     compression: str = "snappy",
+    strip_chr: bool = False,
+    min_alpha: int | None = None,
+    min_coverage: int | None = None,
 ) -> None:
     """Full pipeline: load → annotate → adjust → export.
 
@@ -363,6 +387,9 @@ def convert_spliser_dir_to_usage_parquet(
         class_labels: Optional custom label map (see :func:`convert_usage_to_parquet`).
         condition_labels: Optional pre-built condition index map.
         compression: Parquet compression codec.
+        strip_chr: Remove ``chr`` prefix from chromosome names.
+        min_alpha: Optional minimum Alpha count filter.
+        min_coverage: Optional minimum Alpha+Beta count filter.
     """
     print(f"\n{'─'*60}")
     print(f"Step 1/4  Loading {len(tsv_files)} TSV file(s)")
@@ -395,6 +422,9 @@ def convert_spliser_dir_to_usage_parquet(
         condition_labels=condition_labels,
         output_path=output_path,
         compression=compression,
+        strip_chr=strip_chr,
+        min_alpha=min_alpha,
+        min_coverage=min_coverage,
     )
 
 
@@ -468,6 +498,25 @@ Examples:
         choices=["snappy", "gzip", "zstd", "none"],
         help="Parquet compression codec (default: snappy).",
     )
+    parser.add_argument(
+        "--strip-chr-names",
+        action="store_true",
+        help="Remove 'chr' prefix from chromosome names (e.g. 'chr1' → '1').",
+    )
+    parser.add_argument(
+        "--min-alpha",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum Alpha count; rows below this are dropped.",
+    )
+    parser.add_argument(
+        "--min-coverage",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum Alpha+Beta count; rows below this are dropped.",
+    )
     args = parser.parse_args()
 
     # ── Resolve input files ───────────────────────────────────────────────────
@@ -491,6 +540,9 @@ Examples:
         tissue_index=args.tissue_index,
         timepoint_index=args.timepoint_index,
         compression=args.compression,
+        strip_chr=args.strip_chr_names,
+        min_alpha=args.min_alpha,
+        min_coverage=args.min_coverage,
     )
 
 

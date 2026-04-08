@@ -1,5 +1,5 @@
 ```bash
-species=Mus_musculus
+species=Homo_sapiens
 gtf_dir=/home/elek/sds/sd17d003/Anamaria/genomes/mazin/gtf/
 fa_dir=/home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/
 out_dir=/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
@@ -17,8 +17,10 @@ python scripts/convert_gtf_to_parquet.py \
 
 ```bash
 python scripts/convert_splice_usage_to_parquet.py \
-    --input-dir /home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/${species} \
-    --output ${out_dir}/${species}/usage.parquet > logs/usage_to_parquet_${species}.log
+    --input-dir /home/elek/sds/sd17d003/Anamaria/spliser/${species} \
+    --output ${out_dir}/${species}/usage.parquet \
+    --min-alpha 5 \
+    --strip-chr-names > logs/usage_to_parquet_${species}.log
 ```
 
 # Prepare splice site annotation for training
