@@ -62,6 +62,11 @@ mode: linear-probe
 sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
+# Set coordinate base for usage parquet
+# 0 = 0-based coordinates (Python/BED convention, default)
+# 1 = 1-based coordinates (biological/Spliser format)
+# Run scripts/diagnose_coordinate_mismatch.py to verify your data
+usage_coord_base: 0
 
 # ---------------------------------------------------------------------------
 # Model / LoRA

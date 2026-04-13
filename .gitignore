@@ -78,3 +78,4 @@ src/alphagenome_pytorch/_version.py
 
 slurm*
 tmp
+examples/notebooks/*png

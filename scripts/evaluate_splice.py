@@ -119,6 +119,9 @@ def build_usage_position_set(usage_parquet: str) -> set[tuple[str, int]]:
     df = df[df["Label"] != none_class]
     df["Chromosome"] = df["Chromosome"].astype(str)
     df["Position"]   = df["Position"].astype(int)
+    # Convert from 1-based (Spliser format) to 0-based (internal format)
+    # This matches SpliceSiteUsageIndex which does: df["Position"] = df["Position"] - 1
+    df["Position"] = df["Position"] - 1
     return set(zip(df["Chromosome"], df["Position"]))
 
 
@@ -422,6 +425,7 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Log
     from alphagenome_pytorch.config import DtypePolicy
     from alphagenome_pytorch.extensions.finetuning.heads import (
         create_splice_classification_finetuning_head,
+        create_splice_usage_finetuning_head,
     )
     from alphagenome_pytorch.extensions.finetuning.transfer import (
         load_trunk,
@@ -473,12 +477,39 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Log
     # Attach the fine-tuned classification head
     cls_head = create_splice_classification_finetuning_head(num_organisms=num_organisms)
     model.splice_sites_classification_head = cls_head
+    
+    # Attach usage heads (per-organism, stored as ModuleDict in model.splice_sites_usage_head)
+    species_n_conditions: dict[int, int] = {
+        int(k): v for k, v in cfg.get("species_n_conditions", {}).items()
+    }
+    usage_heads_modules = {}
+    for org_idx, n_cond in species_n_conditions.items():
+        if n_cond > 0:
+            head = create_splice_usage_finetuning_head(
+                n_conditions=n_cond,
+                num_organisms=num_organisms,
+            )
+            usage_heads_modules[str(org_idx)] = head
+    
+    if usage_heads_modules:
+        model.splice_sites_usage_head = nn.ModuleDict(usage_heads_modules)
+    else:
+        model.splice_sites_usage_head = None
 
-    # Load fine-tuned weights (LoRA adapters + classification head).
+    # Load fine-tuned weights (LoRA adapters + heads)
     # Strip _orig_mod. prefix that torch.compile adds to state-dict keys.
     raw_sd = ckpt["model_state_dict"]
     sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in raw_sd.items()}
     model.load_state_dict(sd, strict=False)
+    
+    # Load usage head weights from separate storage
+    usage_heads_state_dicts: dict[str, dict] = ckpt.get("usage_heads_state_dicts", {})
+    if model.splice_sites_usage_head is not None and usage_heads_state_dicts:
+        for org_key, raw_usd in usage_heads_state_dicts.items():
+            if org_key in model.splice_sites_usage_head:
+                usd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in raw_usd.items()}
+                model.splice_sites_usage_head[org_key].load_state_dict(usd)
+    
     msg = f"  Loaded model_state_dict (epoch {ckpt.get('epoch', '?')})"
     if logger:
         logger.info(msg)
@@ -495,45 +526,23 @@ def build_usage_heads(
     device: torch.device,
     logger: logging.Logger | None = None,
 ) -> dict[int, nn.Module]:
-    """Reconstruct per-organism usage heads and load their weights."""
-    from alphagenome_pytorch.extensions.finetuning.heads import (
-        create_splice_usage_finetuning_head,
-    )
-
-    species_specs = cfg["species_specs"]
-    num_organisms = max(s["organism_index"] for s in species_specs) + 1
-    species_n_conditions: dict[int, int] = {
-        int(k): v for k, v in cfg.get("species_n_conditions", {}).items()
-    }
-    usage_heads_state_dicts: dict[str, dict] = ckpt.get("usage_heads_state_dicts", {})
-
+    """Extract usage heads from model.splice_sites_usage_head.
+    
+    For backward compatibility with notebooks that expect a separate dict.
+    The actual heads are now stored in model.splice_sites_usage_head as a ModuleDict.
+    """
+    # This function is now deprecated - usage heads are built in build_model()
+    # But we keep it for backward compatibility with existing notebooks
+    
+    # Build a minimal model just to extract usage heads
+    # (This is inefficient but maintains API compatibility)
+    temp_model = build_model(cfg, ckpt, device, logger=logger)
+    
     usage_heads: dict[int, nn.Module] = {}
-    for org_idx, n_cond in species_n_conditions.items():
-        if n_cond <= 0:
-            continue
-        head = create_splice_usage_finetuning_head(
-            n_conditions=n_cond,
-            num_organisms=num_organisms,
-        )
-        sd_key = str(org_idx)
-        if sd_key in usage_heads_state_dicts:
-            raw_usd = usage_heads_state_dicts[sd_key]
-            usd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in raw_usd.items()}
-            head.load_state_dict(usd)
-            msg = f"  Loaded usage head for organism {org_idx} ({n_cond} conditions)"
-            if logger:
-                logger.info(msg)
-            else:
-                print(msg)
-        else:
-            msg = f"  Warning: no saved weights for usage head organism {org_idx}, using random init"
-            if logger:
-                logger.warning(msg)
-            else:
-                print(msg, file=sys.stderr)
-        head.to(device).eval()
-        usage_heads[org_idx] = head
-
+    if temp_model.splice_sites_usage_head is not None:
+        for org_key, head in temp_model.splice_sites_usage_head.items():
+            usage_heads[int(org_key)] = head
+    
     return usage_heads
 
 
@@ -578,30 +587,26 @@ def collect_predictions(
         org_idx_t = batch["organism_index"].to(device)
 
         with torch.no_grad():
+            # Always use model.predict() for classification (works correctly)
+            preds = model.predict(seq, org_idx_t, resolutions=(1,))
+            cls_probs = preds["splice_sites_classification"]["probs"]  # (B, S, 5)
+            
             if usage_head is not None:
-                # Get 1bp NCL embeddings then call each head manually.
-                # channels_last=False -> embeddings are (B, C, S) as expected by head.forward()
+                # For usage, get embeddings separately and call usage head
+                # channels_last=False -> embeddings are (B, C, S) NCL format
                 out = model.predict(
                     seq, org_idx_t,
                     resolutions=(1,),
                     channels_last=False,
                     embeddings_only=True,
                 )
-                emb_1bp = out["embeddings_1bp"]  # (B, C, S)
+                emb_1bp = out["embeddings_1bp"]  # (B, C, S) NCL format
 
-                cls_probs = model.splice_sites_classification_head(
-                    emb_1bp, org_idx_t, channels_last=True
-                )["probs"].float()  # (B, S, 5)
-
-                # Only use the usage head for this organism
+                # Usage head expects channels_last=True even with NCL input
                 usage_preds = usage_head(
                     emb_1bp, org_idx_t, channels_last=True
                 )["predictions"].float()  # (B, S, n_cond)
-
             else:
-                # No usage head: run full forward, get classification only
-                preds = model.predict(seq, org_idx_t, resolutions=(1,))
-                cls_probs = preds["splice_sites_classification"]["probs"]  # (B, S, 5)
                 usage_preds = None
 
         all_cls_probs.append(cls_probs.cpu().numpy().reshape(-1, 5))
@@ -1099,6 +1104,172 @@ def plot_usage_per_tissue(
         logging.getLogger("evaluate_splice").info(f"  Saved: {fn}")
 
 
+def plot_usage_correlation_by_tissue(
+    usage_per_cond: dict,
+    usage_metadata_path: Path,
+    out_dir: Path,
+    org_name: str,
+) -> None:
+    """Plot boxplots of per-condition correlations grouped by tissue.
+    
+    Creates a single plot with boxplots showing the distribution of correlation
+    values across timepoints for each tissue. Individual points are overlaid
+    with size scaled to timepoint and colored by tissue.
+    """
+    if not usage_per_cond:
+        return
+    
+    if not usage_metadata_path.exists():
+        logging.getLogger("evaluate_splice").warning(
+            f"Usage metadata not found at {usage_metadata_path}, skipping tissue correlation boxplot"
+        )
+        return
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from scipy.stats import pearsonr
+
+    # Load condition labels from metadata
+    try:
+        with open(usage_metadata_path) as f:
+            metadata = json.load(f)
+    except Exception as e:
+        logging.getLogger("evaluate_splice").warning(
+            f"Could not load usage metadata: {e}, skipping tissue correlation boxplot"
+        )
+        return
+
+    condition_labels = metadata.get("condition_labels", {})
+    if not condition_labels:
+        logging.getLogger("evaluate_splice").warning(
+            "No condition_labels in metadata, skipping tissue correlation boxplot"
+        )
+        return
+
+    # Parse tissue and timepoint from condition names
+    condition_info = {}
+    for cond_name, cond_idx in condition_labels.items():
+        parts = cond_name.rsplit('_', 1)
+        if len(parts) == 2:
+            tissue = parts[0]
+            try:
+                timepoint = int(parts[1])
+                condition_info[cond_idx] = {
+                    'name': cond_name,
+                    'tissue': tissue,
+                    'timepoint': timepoint
+                }
+            except ValueError:
+                continue
+
+    # Compute per-condition correlations
+    condition_correlations = []
+    for cond_idx, data in usage_per_cond.items():
+        if len(data["pred"]) > 1 and cond_idx in condition_info:
+            try:
+                r, p_value = pearsonr(data["true"], data["pred"])
+                condition_correlations.append({
+                    'condition_idx': cond_idx,
+                    'condition_name': condition_info[cond_idx]['name'],
+                    'tissue': condition_info[cond_idx]['tissue'],
+                    'timepoint': condition_info[cond_idx]['timepoint'],
+                    'correlation': r,
+                    'p_value': p_value,
+                    'n_sites': len(data["pred"])
+                })
+            except Exception:
+                continue
+
+    if not condition_correlations:
+        logging.getLogger("evaluate_splice").warning(
+            "No valid condition correlations computed, skipping tissue correlation boxplot"
+        )
+        return
+
+    import pandas as pd
+    corr_df = pd.DataFrame(condition_correlations)
+    
+    # Tissue colors (matching notebook)
+    TISSUE_COLORS = {
+        'Brain': '#3399cc',
+        'Cerebellum': '#34ccff',
+        'Heart': '#cc0100',
+        'Kidney': '#cc9900',
+        'Liver': '#339900',
+        'Midbrain': '#6699cc',
+        'Ovary': '#cc329a',
+        'Testis': '#ff6600'
+    }
+    
+    tissues = sorted(corr_df['tissue'].unique())
+    n_tissues = len(tissues)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(max(6, n_tissues * 0.8), 5))
+    
+    # Create boxplot with lower zorder
+    sns.boxplot(
+        data=corr_df,
+        x='tissue',
+        y='correlation',
+        order=tissues,
+        showfliers=False,
+        palette=[TISSUE_COLORS.get(t, '#888888') for t in tissues],
+        ax=ax,
+        zorder=1
+    )
+    
+    # Add individual points with size scaled to timepoint and colored by tissue
+    for i, tissue in enumerate(tissues):
+        tissue_data = corr_df[corr_df['tissue'] == tissue]
+        x_positions = np.random.default_rng(42).normal(i, 0.04, size=len(tissue_data))
+        point_sizes = tissue_data['timepoint'].values * 3
+        tissue_color = TISSUE_COLORS.get(tissue, '#888888')
+        ax.scatter(
+            x_positions,
+            tissue_data['correlation'].values,
+            s=point_sizes,
+            color=tissue_color,
+            alpha=0.4,
+            edgecolors='black',
+            linewidths=0.5,
+            zorder=3
+        )
+    
+    # Customize plot
+    ax.set_ylim(0, 1)
+    ax.set_xlabel('Tissue', fontsize=12)
+    ax.set_ylabel('Pearson Correlation (r)', fontsize=12)
+    ax.set_title(f'Splice Usage Correlations by Tissue\n{org_name}', fontsize=14, pad=20)
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    plt.xticks(rotation=45, ha='right')
+    
+    # Add sample size annotations
+    for i, tissue in enumerate(tissues):
+        n = len(corr_df[corr_df['tissue'] == tissue])
+        ax.text(i, 0.05, f'n={n}', ha='center', va='top', fontsize=8)
+    
+    plt.tight_layout()
+    fn = out_dir / f"usage_correlation_by_tissue_{org_name}.png"
+    fig.savefig(fn, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    logging.getLogger("evaluate_splice").info(f"  Saved: {fn}")
+    
+    # Log summary statistics
+    logger = logging.getLogger("evaluate_splice")
+    logger.info(f"\n{org_name} – Correlation Summary by Tissue:")
+    summary = corr_df.groupby('tissue')['correlation'].agg(['count', 'mean', 'median', 'std'])
+    for tissue in tissues:
+        stats = summary.loc[tissue]
+        logger.info(
+            f"  {tissue:<15s} n={int(stats['count']):>3d}  "
+            f"mean={stats['mean']:>5.3f}  median={stats['median']:>5.3f}  "
+            f"std={stats['std']:>5.3f}"
+        )
+
+
 def plot_usage_by_source(
     usage_by_source: dict,
     out_dir: Path,
@@ -1535,9 +1706,12 @@ def main() -> None:
             usage_index: SpliceSiteUsageIndex | None = None
             if spec.get("usage_parquet"):
                 logger.info(f"[{org_name}] Loading usage index from {spec['usage_parquet']} …")
+                # usage.parquet is already in 0-based coordinates (verified by direct overlap with annotations)
+                # Use usage_coord_base=0 to prevent incorrect -1 conversion
                 usage_index = SpliceSiteUsageIndex(
                     spec["usage_parquet"],
                     min_coverage=args.min_coverage,
+                    usage_coord_base=0,
                 )
 
             logger.info(f"[{org_name}] Building dataset from {bed_file} …")
@@ -1633,6 +1807,12 @@ def main() -> None:
             plot_pr_curves(cls_probs, cls_labels, org_name, out_dir / f"pr_curve_{org_name}.png")
             if usage_per_cond:
                 plot_usage_density(usage_per_cond, org_name, out_dir / f"usage_density_{org_name}.png")
+                # Plot correlation boxplot by tissue if usage metadata exists
+                if args.per_tissue and spec.get("usage_parquet"):
+                    usage_metadata_path = Path(spec["usage_parquet"]).with_suffix(".json")
+                    plot_usage_correlation_by_tissue(
+                        usage_per_cond, usage_metadata_path, out_dir, org_name
+                    )
             if args.per_source and src_tags is not None:
                 plot_pr_curves_by_source(cls_probs, cls_labels, src_tags, org_name, out_dir)
 

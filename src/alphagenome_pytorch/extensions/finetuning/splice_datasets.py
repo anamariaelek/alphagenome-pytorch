@@ -209,8 +209,9 @@ class SpliceSiteUsageIndex:
               observation.
             - ``values``: per-site float32 array of shape (n_conditions,) with
               SSE values (0.0 for unobserved conditions).
-            - ``masks``: per-site bool array of shape (n_conditions,) indicating
-              observed conditions.
+            - ``masks``: per-site bool array of shape (n_conditions,) with
+              True for all conditions (both observed and unobserved).
+              Unobserved conditions have value=0, representing no usage.
         """
         site_positions: list[int] = []
         values_list: list[np.ndarray] = []
@@ -222,11 +223,11 @@ class SpliceSiteUsageIndex:
             if not entries:
                 continue
             vals = np.zeros(self.n_conditions, dtype=np.float32)
-            mask = np.zeros(self.n_conditions, dtype=bool)
+            mask = np.ones(self.n_conditions, dtype=bool)  # Evaluate all conditions
+            # Fill in observed SSE values (unobserved remain 0)
             for cond_idx, sse in entries:
                 if 0 <= cond_idx < self.n_conditions:
                     vals[cond_idx] = sse
-                    mask[cond_idx] = True
             site_positions.append(int(pos))
             values_list.append(vals)
             masks_list.append(mask)

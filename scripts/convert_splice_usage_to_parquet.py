@@ -347,7 +347,7 @@ def build_combined_dataframe(
         tissue, timepoint = _parse_tissue_timepoint(p.name, tissue_index, timepoint_index)
         print(f"  Loading {p.name} (tissue={tissue}, timepoint={timepoint}) …", end=" ")
         t0 = time.perf_counter()
-        df_temp = pd.read_csv(p, sep="\t")
+        df_temp = pd.read_csv(p, sep="\t", dtype={"Region": str})
 
         # Drop duplicate rows reported by Spliser
         n_before = len(df_temp)

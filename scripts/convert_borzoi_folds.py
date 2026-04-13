@@ -225,6 +225,15 @@ def load_borzoi_regions(bed_path: str | Path) -> list[Region]:
     return regions
 
 
+def strip_chr_prefix(chrom: str, strip_chr_names: bool) -> str:
+    """Optionally remove leading 'chr' from chromosome names."""
+    if not strip_chr_names:
+        return chrom
+    if chrom.lower().startswith("chr"):
+        return chrom[3:]
+    return chrom
+
+
 def build_interval_index(
     regions: list[Region],
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
@@ -328,6 +337,7 @@ def convert_borzoi_to_alphagenome(
     organism: str = "human",
     verbose: bool = True,
     seq_length: int = None,
+    strip_chr_names: bool = False,
 ) -> dict[str, dict[str, int]]:
     """Convert Borzoi folds to AlphaGenome format.
 
@@ -336,6 +346,7 @@ def convert_borzoi_to_alphagenome(
         output_dir: Output directory for fold files.
         organism: Organism name ('human' or 'mouse').
         verbose: Print progress information.
+        strip_chr_names: If True, remove leading 'chr' from chromosome names.
 
     Returns:
         Statistics dict with counts per fold and split.
@@ -378,6 +389,9 @@ def convert_borzoi_to_alphagenome(
             chrom_len = chrom_lengths.get(r.chrom)
             ag_r = r.to_alphagenome(chrom_len=chrom_len, seq_length=seq_length)
             if ag_r:
+                ag_r = ag_r._replace(
+                    chrom=strip_chr_prefix(ag_r.chrom, strip_chr_names)
+                )
                 ag_regions.append(ag_r)
         alphagenome_regions_by_fold[fold] = ag_regions
 
@@ -487,6 +501,11 @@ def main():
         action="store_true",
         help="Suppress progress output",
     )
+    parser.add_argument(
+        "--strip-chr-names",
+        action="store_true",
+        help="Remove 'chr' prefix from chromosome names in output BED files",
+    )
 
     args = parser.parse_args()
 
@@ -498,6 +517,7 @@ def main():
         organism=args.organism,
         verbose=not args.quiet,
         seq_length=args.seq_len,
+        strip_chr_names=args.strip_chr_names,
     )
 
     # Print summary

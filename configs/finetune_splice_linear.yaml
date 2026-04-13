@@ -18,7 +18,7 @@
 species:
   - name: human
     genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites_intersect.parquet
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
     usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
     train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds_100kb/FOLD_0/train.bed
     val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds_100kb/FOLD_0/valid.bed
@@ -26,7 +26,7 @@ species:
 
   - name: mouse
     genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites_intersect.parquet
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
     usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
     train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds_100kb/FOLD_0/train.bed
     val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds_100kb/FOLD_0/valid.bed
@@ -62,6 +62,10 @@ mode: linear-probe
 sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
+# Set coordinate base for usage parquet
+# 1 = Spliser default (1-based coordinates) — use this unless you explicitly converted to 0-based
+# 0 = already converted to 0-based coordinates
+usage_coord_base: 0
 
 # ---------------------------------------------------------------------------
 # Model / LoRA
@@ -101,7 +105,7 @@ use_amp: true              # set false to disable AMP
 wandb: false
 wandb_project: alphagenome-splice
 # wandb_entity: my-team
-log_every: 100
+log_every: 20
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing

@@ -74,7 +74,7 @@ def splice_usage_loss(
     usage_positions: Tensor,
     usage_values: Tensor,
     usage_mask: Tensor,
-) -> Tensor:
+) -> tuple[Tensor, dict]:
     """Masked binary cross-entropy loss for per-condition splice-site usage.
 
     Gathers model predictions at sparse splice-site positions and computes
@@ -121,7 +121,7 @@ def splice_usage_loss(
     if n_valid == 0:
         # No observations in this batch — return zero loss with gradient and empty metrics dict
         loss = (predictions * 0.0).sum()
-        metrics_dict = {"correlation": float("nan")}
+        metrics_dict = {"correlation": float("nan"), "n_valid": 0}
         return loss, metrics_dict
 
     loss = F.binary_cross_entropy_with_logits(
@@ -141,6 +141,7 @@ def splice_usage_loss(
             metrics_dict["correlation"] = corr
         else:
             metrics_dict["correlation"] = float("nan")
+        metrics_dict["n_valid"] = int(n_valid)
     return loss, metrics_dict
 
 

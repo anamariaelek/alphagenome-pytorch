@@ -237,6 +237,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Cache genome in memory (~12 GB for hg38)",
     )
+    data.add_argument(
+        "--usage-coord-base",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Coordinate base in usage parquet: 0 for 0-based (default), 1 if using 1-based Spliser format",
+    )
 
     # Model arguments
     model_grp = parser.add_argument_group("Model")
@@ -381,6 +388,7 @@ def parse_args() -> argparse.Namespace:
         "organism_index",
         "max_sites",
         "cache_genome",
+        "usage_coord_base",
         "pretrained_weights",
         "lora_rank",
         "lora_alpha",
@@ -520,7 +528,11 @@ def create_datasets(args: argparse.Namespace, rank: int):
         usage_index = None
         if spec.get("usage_parquet"):
             print_rank0(f"[{name}] Loading usage index from: {spec['usage_parquet']}", rank)
-            usage_index = SpliceSiteUsageIndex(spec["usage_parquet"])
+            usage_index = SpliceSiteUsageIndex(
+                spec["usage_parquet"],
+                usage_coord_base=args.usage_coord_base,
+            )
+            print_rank0(f"  [{name}] Using usage_coord_base={args.usage_coord_base} (1=Spliser/1-based, 0=already 0-based)", rank)
             cond = usage_index.n_conditions
             species_n_conditions[spec["organism_index"]] = cond
             print_rank0(f"  [{name}] Usage conditions: {cond}", rank)
@@ -664,52 +676,51 @@ def create_model(
     if classification_head_init is None and hasattr(args, "classification_head_init_dict"):
         classification_head_init = args.classification_head_init_dict
 
-    # Load pretrained classification head weights (if mapping is provided)
-    pretrained_head_weights = None
-    if classification_head_init is not None:
-        # Load full state dict from pretrained weights
-        import torch
-        weights_path = args.pretrained_weights
-        if weights_path.endswith('.safetensors'):
-            try:
-                from safetensors.torch import load_file as _safetensors_load
-            except ImportError:
-                raise ImportError(
-                    "safetensors is required to load .safetensors checkpoints. "
-                    "Install it with: pip install safetensors"
-                )
-            state_dict = _safetensors_load(weights_path, device='cpu')
-        else:
-            # PyTorch >=2.6: weights_only=True by default, but we want full pickle
-            state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)
-            # Unwrap nested checkpoint dicts produced by save_checkpoint
-            if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
-                state_dict = state_dict['model_state_dict']
-        # Find keys for splice_sites_classification_head
-        head_prefix = "splice_sites_classification_head.conv."
-        pretrained_head_weights = {k[len(head_prefix):]: v for k, v in state_dict.items() if k.startswith(head_prefix)}
+    # Load pretrained classification head weights.
+    # Default: identity mapping (organism i → pretrained organism i).
+    # Override via classification_head_init e.g. {0: 1} to init organism 0
+    # from pretrained organism 1 (useful for cross-species transfer).
+    if classification_head_init is None:
+        classification_head_init = {i: i for i in range(num_organisms)}
+
+    import torch
+    weights_path = args.pretrained_weights
+    if weights_path.endswith('.safetensors'):
+        try:
+            from safetensors.torch import load_file as _safetensors_load
+        except ImportError:
+            raise ImportError(
+                "safetensors is required to load .safetensors checkpoints. "
+                "Install it with: pip install safetensors"
+            )
+        state_dict = _safetensors_load(weights_path, device='cpu')
+    else:
+        state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)
+        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+            state_dict = state_dict['model_state_dict']
+    head_prefix = "splice_sites_classification_head.conv."
+    pretrained_head_weights = {k[len(head_prefix):]: v for k, v in state_dict.items() if k.startswith(head_prefix)}
 
     # Create a fresh classification head
     from alphagenome_pytorch.extensions.finetuning.heads import create_splice_classification_finetuning_head
     cls_head = create_splice_classification_finetuning_head(num_organisms=num_organisms)
 
-    # If mapping and weights are available, copy weights for each organism
-    if pretrained_head_weights is not None and classification_head_init is not None:
-        # The conv weights are (num_organisms, out_channels, in_channels) and bias (num_organisms, out_channels)
+    # Copy pretrained weights for each organism according to the mapping
+    if pretrained_head_weights:
         for new_org_idx, pretrained_org_idx in classification_head_init.items():
-            # Copy weights and bias for this organism
             try:
                 cls_head.conv.weight.data[new_org_idx] = pretrained_head_weights["weight"][pretrained_org_idx].clone()
                 cls_head.conv.bias.data[new_org_idx] = pretrained_head_weights["bias"][pretrained_org_idx].clone()
             except Exception as e:
                 print(f"[Warning] Could not copy head weights for organism {new_org_idx} from pretrained organism {pretrained_org_idx}: {e}")
-        print(f"Initialized classification head weights from pretrained mapping: {classification_head_init}")
+        print(f"Initialized classification head from pretrained weights (mapping: {classification_head_init})")
     else:
-        print(f"Created splice classification head (5-class, 1bp, {num_organisms} organism(s)), random init (no mapping)")
+        print(f"Created splice classification head (5-class, 1bp, {num_organisms} organism(s)), random init (no pretrained head found)")
 
     model.splice_sites_classification_head = cls_head
 
     # Create per-species usage heads (one per organism that has usage data)
+    # Store as ModuleDict under model.splice_sites_usage_head
     usage_heads: dict[int, nn.Module] = {}
     for org_idx, n_cond in species_n_conditions.items():
         if n_cond > 0:
@@ -719,6 +730,12 @@ def create_model(
             )
             print(f"Created splice usage head for organism {org_idx} "
                   f"({n_cond} conditions, 1bp, {num_organisms} organism(s))")
+    
+    # Store usage heads in model.splice_sites_usage_head (as ModuleDict for multi-organism)
+    if usage_heads:
+        model.splice_sites_usage_head = nn.ModuleDict({str(k): v for k, v in usage_heads.items()})
+    else:
+        model.splice_sites_usage_head = None
 
     # Configure trainable parameters based on training mode
     trainable_params: list[torch.nn.Parameter] = []
@@ -760,10 +777,13 @@ def create_model(
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
-    model.usage_heads = nn.ModuleDict({str(k): v for k, v in usage_heads.items()})
     model = model.to(device)
     model_module = model
-    usage_heads = {int(k): v for k, v in model_module.usage_heads.items()}
+    # Extract usage_heads dict from model for training loop compatibility
+    if model_module.splice_sites_usage_head is not None:
+        usage_heads = {int(k): v for k, v in model_module.splice_sites_usage_head.items()}
+    else:
+        usage_heads = {}
 
     # Optionally compile
     if args.compile:
@@ -982,6 +1002,43 @@ def main() -> None:
 
     handler = setup_preemption_handler(_save_preempt, 0, 1)
 
+    # Validate usage head setup before training (check for coordinate mismatch)
+    if usage_modules:
+        print("Validating usage head configuration...")
+        total_valid_pairs = 0
+        n_batches_checked = 0
+        max_check_batches = min(5, len(train_loader))
+        
+        for batch_idx, batch in enumerate(train_loader):
+            if batch_idx >= max_check_batches:
+                break
+            if "usage_mask" in batch:
+                n_valid = batch["usage_mask"].sum().item()
+                total_valid_pairs += n_valid
+                n_batches_checked += 1
+        
+        if n_batches_checked > 0:
+            if total_valid_pairs == 0:
+                print("\n" + "!" * 60)
+                print("⚠️  CRITICAL ERROR: NO VALID USAGE PAIRS FOUND!")
+                print("!" * 60)
+                print("\nThe usage head will NOT train (zero gradient).")
+                print("Most likely cause: COORDINATE MISMATCH")
+                print(f"\nCurrent setting: --usage-coord-base {args.usage_coord_base}")
+                print("\nTroubleshooting:")
+                print("  • Spliser data (default): use --usage-coord-base 1")
+                print("  • Already 0-based:        use --usage-coord-base 0")
+                print("  • Check chromosome naming in annotation vs usage parquet")
+                print("  • Verify genome versions match")
+                print("\nAborting training to prevent wasted computation.")
+                print("Fix the coordinate base and restart.\n")
+                sys.exit(1)
+            else:
+                print(f"Total valid (position, condition) pairs: {total_valid_pairs:,}")
+                print(f"Usage head will receive gradients during training.\n")
+        else:
+            print("Warning: No usage data found in training batches.\n")
+
     # Training loop
     print("\n" + "=" * 60)
     print(f"Starting training (epoch {start_epoch} to {args.epochs})")
@@ -1049,17 +1106,28 @@ def main() -> None:
 
             # Print epoch summary
             epoch_elapsed = time.monotonic() - epoch_start_time
+            
+            def format_time(seconds: float) -> str:
+                """Format seconds as hours:minutes or minutes:seconds."""
+                if seconds >= 3600:
+                    hours = int(seconds // 3600)
+                    mins = int((seconds % 3600) // 60)
+                    return f"{hours}h{mins}m"
+                else:
+                    mins = int(seconds // 60)
+                    secs = int(seconds % 60)
+                    return f"{mins}m{secs}s"
+            
             summary = (
-                f"Epoch {epoch} [{epoch_elapsed:.0f}s train={train_metrics.elapsed_s:.0f}s val={val_metrics.elapsed_s:.0f}s]: "
+                f"Epoch {epoch}: "
                 f"train_loss={train_loss:.4f}  "
                 f"train_cls_loss={train_metrics.cls_loss:.4f}  "
                 f"train_usage_loss={train_metrics.usage_loss:.4f}  "
-                f"train_accuracy={train_metrics.cls_accuracy:.4f}  "
                 f"val_loss={val_loss:.4f}  "
                 f"val_cls_loss={val_metrics.cls_loss:.4f}  "
                 f"val_usage_loss={val_metrics.usage_loss:.4f}  "
-                f"val_accuracy={val_metrics.cls_accuracy:.4f}  "
-                f"lr={current_lr:.2e}"
+                f"lr={current_lr:.2e}\n"
+                f"  Timing: {format_time(epoch_elapsed)} ({format_time(train_metrics.elapsed_s)} train + {format_time(val_metrics.elapsed_s)} val)"
             )
             print(summary)
 
@@ -1068,10 +1136,8 @@ def main() -> None:
             extra = {
                 "train_cls_loss": train_metrics.cls_loss,
                 "train_usage_loss": train_metrics.usage_loss,
-                "train_accuracy": train_metrics.cls_accuracy,
                 "val_cls_loss": val_metrics.cls_loss,
                 "val_usage_loss": val_metrics.usage_loss,
-                "val_accuracy": val_metrics.cls_accuracy,
             }
 
             logger.log_epoch(epoch, train_loss, val_loss, current_lr, is_best, extra)

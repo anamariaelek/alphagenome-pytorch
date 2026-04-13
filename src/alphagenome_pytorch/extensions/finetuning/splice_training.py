@@ -71,10 +71,10 @@ class SpliceTrainMetrics:
 
     loss: float = 0.0
     cls_loss: float = 0.0
-    cls_accuracy: float = 0.0
     usage_loss: float = 0.0
     usage_corr: float = 0.0
     n_batches: int = 0
+    n_usage_valid_pairs: int = 0  # total (position, condition) pairs with observed usage
     elapsed_s: float = 0.0   # wall-clock seconds for this epoch
     latency_ms: float = 0.0  # average batch latency in milliseconds
 
@@ -154,6 +154,7 @@ def train_epoch_splice(
     step_start  = time.perf_counter()
 
     batch_latencies = []
+    recent_batch_times = []  # Track recent batch times for rolling average
     for batch_idx, batch in enumerate(train_loader):
         batch_start = time.perf_counter()
         seq = batch["sequence"].to(device)
@@ -200,8 +201,6 @@ def train_epoch_splice(
                         usage_out["logits"], usage_pos, usage_vals, usage_mask
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
-
-            # Skip backward entirely if this microbatch produced NaN/Inf loss
             if not torch.isfinite(total_loss):
                 continue
 
@@ -234,22 +233,23 @@ def train_epoch_splice(
             # Accumulate metrics
             metrics.loss += total_loss.item()
             metrics.cls_loss += cls_loss_val.item()
-            metrics.cls_accuracy += cls_acc.get("accuracy", 0.0)
             metrics.usage_loss += usage_loss_val.item()
             metrics.usage_corr += usage_corr.get("correlation", 0.0)
+            metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
             metrics.n_batches += 1
 
             if log_every > 0 and step % log_every == 0:
                 avg = metrics.loss / metrics.n_batches
                 avg_cls = metrics.cls_loss / metrics.n_batches
                 avg_usg = metrics.usage_loss / metrics.n_batches
-                avg_latency = metrics.latency_ms
+                # Compute rolling average of recent batch times (in seconds)
+                avg_batch_time = sum(recent_batch_times) / len(recent_batch_times) if recent_batch_times else 0.0
                 elapsed = time.perf_counter() - step_start
                 sps = log_every / elapsed  # optimizer steps per second
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}  "
-                    f"{sps:.2f} steps/s  latency={avg_latency:.1f}ms"
+                    f"{sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
                 )
                 if logger is not None:
                     logger.log_step({
@@ -258,22 +258,54 @@ def train_epoch_splice(
                         "train_cls_loss": avg_cls,
                         "train_usage_loss": avg_usg,
                         "steps_per_sec": sps,
-                        "latency_ms": avg_latency,
+                        "avg_batch_time_s": avg_batch_time,
                     })
                 step_start = time.perf_counter()
         # Record batch latency (for each optimizer step)
         batch_end = time.perf_counter()
-        batch_latencies.append((batch_end - batch_start) * 1000.0)  # ms
+        batch_time = batch_end - batch_start
+        batch_latencies.append(batch_time * 1000.0)  # ms for metrics
+        recent_batch_times.append(batch_time)  # seconds for logging
+        # Keep only recent batch times (rolling window of 100 batches)
+        if len(recent_batch_times) > 100:
+            recent_batch_times.pop(0)
 
     # Average
     if metrics.n_batches > 0:
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
-        metrics.cls_accuracy /= metrics.n_batches
         metrics.usage_corr /= metrics.n_batches
         metrics.latency_ms = sum(batch_latencies) / len(batch_latencies)
     metrics.elapsed_s = time.perf_counter() - epoch_start
+
+    # Warn when usage head is present but received zero gradient signal.
+    # This typically means there are no matching (position, condition) pairs
+    # between the annotation and usage parquet — usually caused by a coordinate
+    # mismatch (e.g. usage parquet generated with the wrong position correction).
+    has_usage_head = (
+        (isinstance(usage_head, dict) and any(v is not None for v in usage_head.values()))
+        or (usage_head is not None and not isinstance(usage_head, dict))
+    )
+    if has_usage_head and metrics.n_usage_valid_pairs == 0 and metrics.n_batches > 0:
+        print(
+            f"\n{'='*70}\n"
+            f"  ⚠️  CRITICAL WARNING: Usage head received NO gradient!\n"
+            f"{'='*70}\n"
+            f"  No valid (position, condition) pairs were found in {metrics.n_batches} batches.\n"
+            f"  The usage head will NOT train — predictions will remain at ~0.5.\n\n"
+            f"  Most likely cause: COORDINATE MISMATCH\n"
+            f"  → If your usage parquet is from Spliser (1-based), use --usage-coord-base 1\n"
+            f"  → If already converted to 0-based, use --usage-coord-base 0\n\n"
+            f"  Check your --usage-coord-base setting and re-run training.\n"
+            f"{'='*70}\n"
+        )
+    elif has_usage_head and metrics.n_usage_valid_pairs > 0:
+        avg_pairs_per_batch = metrics.n_usage_valid_pairs / metrics.n_batches
+        print(
+            f"  ✓ Usage head: {metrics.n_usage_valid_pairs:,} valid pairs "
+            f"(avg {avg_pairs_per_batch:.1f} per batch)"
+        )
 
     return metrics
 
@@ -366,7 +398,6 @@ def validate_splice(
 
         metrics.loss += total_loss.item()
         metrics.cls_loss += cls_loss_val.item()
-        metrics.cls_accuracy += cls_acc.get("accuracy", 0.0)
         metrics.usage_loss += usage_loss_val.item()
         metrics.usage_corr += usage_corr.get("correlation", 0.0)
         metrics.n_batches += 1
@@ -377,7 +408,6 @@ def validate_splice(
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
-        metrics.cls_accuracy /= metrics.n_batches
         metrics.usage_corr /= metrics.n_batches
         metrics.latency_ms = sum(batch_latencies) / len(batch_latencies)
     metrics.elapsed_s = time.perf_counter() - val_start
@@ -400,7 +430,6 @@ def validate_splice(
             extra={
                 "val_cls_loss": metrics.cls_loss,
                 "val_usage_loss": metrics.usage_loss,
-                "val_cls_accuracy": metrics.cls_accuracy,
                 "val_usage_corr": metrics.usage_corr,
                 "val_latency_ms": metrics.latency_ms,
             }

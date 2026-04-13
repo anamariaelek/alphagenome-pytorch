@@ -40,6 +40,10 @@ mode: full
 sequence_length: 524288
 max_sites: 1024
 cache_genome: false
+# Set coordinate base for usage parquet
+# 1 = Spliser default (1-based coordinates) — use this unless you explicitly converted to 0-based
+# 0 = already converted to 0-based coordinates
+usage_coord_base: 0
 
 # ---------------------------------------------------------------------------
 # Model / LoRA

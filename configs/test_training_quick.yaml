@@ -1,0 +1,46 @@
+# Quick test config - just run a few batches to verify usage head training
+# Test with: python scripts/finetune_splice.py --config configs/test_training_quick.yaml
+
+species:
+  - name: human
+    genome: /home/elek/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
+    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/valid.bed
+    organism_index: 0
+
+classification_head_init:
+  0: 0
+
+pretrained_weights: /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+mode: linear-probe  # Simplest - just train heads
+sequence_length: 131072
+max_sites: 512  # Smaller for faster testing
+cache_genome: false
+usage_coord_base: 0  # NEW DATA IS 0-BASED
+
+dtype: float32  # Avoid bfloat16 issues  
+gradient_checkpointing: false
+
+epochs: 1
+batch_size: 2  # Small batch
+gradient_accumulation_steps: 2
+lr: 1.0e-4
+weight_decay: 0.0
+
+cls_weight: 1.0
+usage_weight: 1.0
+max_grad_norm: 1.0
+
+num_workers: 2
+use_amp: false  # Disable for debugging
+
+wandb: false
+log_every: 1  # Log every batch
+
+output_dir: /tmp/alphagenome_test
+run_name: test_usage_training
+save_every: 999  # Don't save
+
+seed: 42

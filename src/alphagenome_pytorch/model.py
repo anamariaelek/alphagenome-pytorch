@@ -596,9 +596,21 @@ class AlphaGenome(nn.Module):
                         embeddings_1bp, organism_index, channels_last=channels_last
                     )
                 if self.splice_sites_usage_head is not None:
-                    outputs['splice_sites_usage'] = self.splice_sites_usage_head(
-                        embeddings_1bp, organism_index, channels_last=channels_last
-                    )
+                    # Handle both single head and ModuleDict (multi-organism) cases
+                    if isinstance(self.splice_sites_usage_head, nn.ModuleDict):
+                        # Multi-organism: dispatch to organism-specific head
+                        # Assume all sequences in batch are from same organism (enforced by SpeciesGroupedSampler)
+                        org_idx = int(organism_index[0].item())
+                        org_key = str(org_idx)
+                        if org_key in self.splice_sites_usage_head:
+                            outputs['splice_sites_usage'] = self.splice_sites_usage_head[org_key](
+                                embeddings_1bp, organism_index, channels_last=channels_last
+                            )
+                    else:
+                        # Single head (backward compatibility)
+                        outputs['splice_sites_usage'] = self.splice_sites_usage_head(
+                            embeddings_1bp, organism_index, channels_last=channels_last
+                        )
 
                 if self.splice_sites_junction_head is not None:
                     # Use provided positions if given, otherwise generate from classification
