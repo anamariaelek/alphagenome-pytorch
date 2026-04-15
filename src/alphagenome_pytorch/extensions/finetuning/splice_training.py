@@ -290,7 +290,7 @@ def train_epoch_splice(
     if has_usage_head and metrics.n_usage_valid_pairs == 0 and metrics.n_batches > 0:
         print(
             f"\n{'='*70}\n"
-            f"  ⚠️  CRITICAL WARNING: Usage head received NO gradient!\n"
+            f" WARNING: Usage head received NO gradient!\n"
             f"{'='*70}\n"
             f"  No valid (position, condition) pairs were found in {metrics.n_batches} batches.\n"
             f"  The usage head will NOT train — predictions will remain at ~0.5.\n\n"
@@ -300,12 +300,7 @@ def train_epoch_splice(
             f"  Check your --usage-coord-base setting and re-run training.\n"
             f"{'='*70}\n"
         )
-    elif has_usage_head and metrics.n_usage_valid_pairs > 0:
-        avg_pairs_per_batch = metrics.n_usage_valid_pairs / metrics.n_batches
-        print(
-            f"  ✓ Usage head: {metrics.n_usage_valid_pairs:,} valid pairs "
-            f"(avg {avg_pairs_per_batch:.1f} per batch)"
-        )
+
 
     return metrics
 
