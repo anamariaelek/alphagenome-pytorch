@@ -147,6 +147,7 @@ class SpliceSiteUsageIndex:
         min_coverage: int = 10,
         alpha_min: int | None = None,
         usage_coord_base: int = 1,
+        observed_conditions_only: bool = False,
     ) -> None:
         import pandas as pd
 
@@ -163,6 +164,7 @@ class SpliceSiteUsageIndex:
         self._class_labels: dict[str, int] = metadata["class_labels"]
         self._condition_labels: dict[str, int] = metadata["condition_labels"]
         self.n_conditions: int = len(self._condition_labels)
+        self.observed_conditions_only = observed_conditions_only
         none_class = self._class_labels.get("None", 4)
 
         df = pd.read_parquet(usage_parquet)
@@ -210,8 +212,9 @@ class SpliceSiteUsageIndex:
             - ``values``: per-site float32 array of shape (n_conditions,) with
               SSE values (0.0 for unobserved conditions).
             - ``masks``: per-site bool array of shape (n_conditions,) with
-              True for all conditions (both observed and unobserved).
-              Unobserved conditions have value=0, representing no usage.
+                            True only for observed conditions when
+                            ``observed_conditions_only=True``; otherwise True for all
+                            conditions and unobserved conditions are treated as value=0.
         """
         site_positions: list[int] = []
         values_list: list[np.ndarray] = []
@@ -223,11 +226,14 @@ class SpliceSiteUsageIndex:
             if not entries:
                 continue
             vals = np.zeros(self.n_conditions, dtype=np.float32)
-            mask = np.ones(self.n_conditions, dtype=bool)  # Evaluate all conditions
+            mask = np.zeros(self.n_conditions, dtype=bool)
             # Fill in observed SSE values (unobserved remain 0)
             for cond_idx, sse in entries:
                 if 0 <= cond_idx < self.n_conditions:
                     vals[cond_idx] = sse
+                    mask[cond_idx] = True
+            if not self.observed_conditions_only:
+                mask[:] = True
             site_positions.append(int(pos))
             values_list.append(vals)
             masks_list.append(mask)

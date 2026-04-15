@@ -383,6 +383,10 @@ def parse_args() -> argparse.Namespace:
         "--skip-plots", action="store_true",
         help="Skip all plotting (metrics only, faster).",
     )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Overwrite existing predictions. If not set, will skip prediction generation for species with existing predictions.",
+    )
     return parser.parse_args()
 
 
@@ -806,10 +810,70 @@ def compute_usage_metrics(usage_per_cond: dict) -> dict:
     }
 
 
+def _pearson_from_sufficient_stats(
+    n: np.ndarray,
+    sum_x: np.ndarray,
+    sum_y: np.ndarray,
+    sum_x2: np.ndarray,
+    sum_y2: np.ndarray,
+    sum_xy: np.ndarray,
+) -> np.ndarray:
+    """Compute Pearson r from sufficient statistics (vectorized, exact)."""
+    n = n.astype(np.float64, copy=False)
+    mean_x = sum_x / np.maximum(n, 1.0)
+    mean_y = sum_y / np.maximum(n, 1.0)
+    var_x = sum_x2 - n * (mean_x * mean_x)
+    var_y = sum_y2 - n * (mean_y * mean_y)
+    cov_xy = sum_xy - n * (mean_x * mean_y)
+    denom = np.sqrt(np.maximum(var_x, 0.0) * np.maximum(var_y, 0.0))
+
+    r = np.full_like(denom, np.nan, dtype=np.float64)
+    valid = (n >= 2.0) & (denom > 1e-12)
+    r[valid] = cov_xy[valid] / denom[valid]
+    return r
+
+
+def compute_usage_metrics_from_stats(usage_stats: dict | None) -> dict:
+    """Compute usage metrics from cached sufficient statistics."""
+    if not usage_stats or len(usage_stats.get("n", [])) == 0:
+        return {
+            "usage_mean_pearson_r": float("nan"),
+            "usage_median_pearson_r": float("nan"),
+            "usage_n_conditions_evaluated": 0,
+            "usage_n_conditions_total": int(len(usage_stats.get("cond_ids", []))) if usage_stats else 0,
+            "usage_n_observations": 0,
+        }
+
+    n = np.asarray(usage_stats["n"], dtype=np.float64)
+    sum_pred = np.asarray(usage_stats["sum_pred"], dtype=np.float64)
+    sum_true = np.asarray(usage_stats["sum_true"], dtype=np.float64)
+    sum_pred2 = np.asarray(usage_stats["sum_pred2"], dtype=np.float64)
+    sum_true2 = np.asarray(usage_stats["sum_true2"], dtype=np.float64)
+    sum_prod = np.asarray(usage_stats["sum_prod"], dtype=np.float64)
+
+    rs = _pearson_from_sufficient_stats(n, sum_pred, sum_true, sum_pred2, sum_true2, sum_prod)
+    valid_rs = rs[np.isfinite(rs)]
+
+    if valid_rs.size == 0:
+        return {
+            "usage_mean_pearson_r": float("nan"),
+            "usage_median_pearson_r": float("nan"),
+            "usage_n_conditions_evaluated": 0,
+            "usage_n_conditions_total": int(n.size),
+            "usage_n_observations": int(n.sum()),
+        }
+
+    return {
+        "usage_mean_pearson_r": float(np.mean(valid_rs)),
+        "usage_median_pearson_r": float(np.median(valid_rs)),
+        "usage_n_conditions_evaluated": int(valid_rs.size),
+        "usage_n_conditions_total": int(n.size),
+        "usage_n_observations": int(n.sum()),
+    }
+
+
 def compute_usage_metrics_by_source(usage_by_source: dict) -> dict:
     """Compute usage metrics separately for GTF-only and usage-only sites."""
-    from scipy.stats import pearsonr
-
     results = {}
     for src_name in ("gtf_only", "usage_only"):
         if src_name not in usage_by_source:
@@ -823,8 +887,18 @@ def compute_usage_metrics_by_source(usage_by_source: dict) -> dict:
             n_obs_total += len(pred)
             if len(pred) < 2 or pred.std() < 1e-8 or true.std() < 1e-8:
                 continue
-            r, _ = pearsonr(pred, true)
-            rs.append(float(r))
+            p64 = pred.astype(np.float64, copy=False)
+            t64 = true.astype(np.float64, copy=False)
+            r = _pearson_from_sufficient_stats(
+                np.array([len(p64)], dtype=np.float64),
+                np.array([p64.sum()], dtype=np.float64),
+                np.array([t64.sum()], dtype=np.float64),
+                np.array([(p64 * p64).sum()], dtype=np.float64),
+                np.array([(t64 * t64).sum()], dtype=np.float64),
+                np.array([(p64 * t64).sum()], dtype=np.float64),
+            )[0]
+            if np.isfinite(r):
+                rs.append(float(r))
         if rs:
             results[src_name] = {
                 "usage_mean_pearson_r": float(np.mean(rs)),
@@ -841,6 +915,20 @@ def compute_usage_metrics_by_source(usage_by_source: dict) -> dict:
                 "usage_n_conditions_total": len(src_conds_dict),
                 "usage_n_observations": n_obs_total,
             }
+    return results
+
+
+def compute_usage_metrics_by_source_from_stats(usage_by_source_stats: dict | None) -> dict:
+    """Compute by-source usage metrics from cached sufficient statistics."""
+    if not usage_by_source_stats:
+        return {}
+
+    results = {}
+    for src_name in ("gtf_only", "usage_only"):
+        stats = usage_by_source_stats.get(src_name)
+        if not stats or len(stats.get("n", [])) == 0:
+            continue
+        results[src_name] = compute_usage_metrics_from_stats(stats)
     return results
 
 
@@ -1364,19 +1452,133 @@ def save_predictions(
     npz_path = out_dir / f"predictions_{org_name}.npz"
     np.savez_compressed(npz_path, **npz_kwargs)
 
-    usage_path = out_dir / f"usage_{org_name}.json"
-    import json
-    with open(usage_path, "w") as f:
-        json.dump({str(k): v for k, v in usage_per_cond.items()}, f)
-    
+    usage_path = out_dir / f"usage_{org_name}.npz"
+    cond_ids_chunks: list[np.ndarray] = []
+    pred_chunks: list[np.ndarray] = []
+    true_chunks: list[np.ndarray] = []
+    stats_cond_ids: list[int] = []
+    stats_n: list[int] = []
+    stats_sum_pred: list[float] = []
+    stats_sum_true: list[float] = []
+    stats_sum_pred2: list[float] = []
+    stats_sum_true2: list[float] = []
+    stats_sum_prod: list[float] = []
+
+    for cond_idx, data in usage_per_cond.items():
+        pred = np.asarray(data["pred"], dtype=np.float32)
+        true = np.asarray(data["true"], dtype=np.float32)
+        if pred.size == 0 or pred.size != true.size:
+            continue
+        cond_ids_chunks.append(np.full(pred.size, int(cond_idx), dtype=np.int32))
+        pred_chunks.append(pred)
+        true_chunks.append(true)
+
+        stats_cond_ids.append(int(cond_idx))
+        stats_n.append(int(pred.size))
+        p64 = pred.astype(np.float64, copy=False)
+        t64 = true.astype(np.float64, copy=False)
+        stats_sum_pred.append(float(p64.sum()))
+        stats_sum_true.append(float(t64.sum()))
+        stats_sum_pred2.append(float((p64 * p64).sum()))
+        stats_sum_true2.append(float((t64 * t64).sum()))
+        stats_sum_prod.append(float((p64 * t64).sum()))
+
+    if cond_ids_chunks:
+        cond_ids_arr = np.concatenate(cond_ids_chunks, axis=0)
+        pred_arr = np.concatenate(pred_chunks, axis=0)
+        true_arr = np.concatenate(true_chunks, axis=0)
+    else:
+        cond_ids_arr = np.array([], dtype=np.int32)
+        pred_arr = np.array([], dtype=np.float32)
+        true_arr = np.array([], dtype=np.float32)
+
+    np.savez_compressed(
+        usage_path,
+        cond_ids=cond_ids_arr,
+        pred=pred_arr,
+        true=true_arr,
+        stats_cond_ids=np.array(stats_cond_ids, dtype=np.int32),
+        stats_n=np.array(stats_n, dtype=np.int64),
+        stats_sum_pred=np.array(stats_sum_pred, dtype=np.float64),
+        stats_sum_true=np.array(stats_sum_true, dtype=np.float64),
+        stats_sum_pred2=np.array(stats_sum_pred2, dtype=np.float64),
+        stats_sum_true2=np.array(stats_sum_true2, dtype=np.float64),
+        stats_sum_prod=np.array(stats_sum_prod, dtype=np.float64),
+    )
+
     if usage_by_source:
-        usage_by_src_path = out_dir / f"usage_by_source_{org_name}.json"
-        with open(usage_by_src_path, "w") as f:
-            # Convert int keys to strings for JSON serialization
-            serializable = {}
-            for src_name, cond_dict in usage_by_source.items():
-                serializable[src_name] = {str(k): v for k, v in cond_dict.items()}
-            json.dump(serializable, f)
+        usage_by_src_path = out_dir / f"usage_by_source_{org_name}.npz"
+        src_ids_chunks: list[np.ndarray] = []
+        src_cond_ids_chunks: list[np.ndarray] = []
+        src_pred_chunks: list[np.ndarray] = []
+        src_true_chunks: list[np.ndarray] = []
+        stats_src_ids: list[int] = []
+        stats_cond_ids: list[int] = []
+        stats_n: list[int] = []
+        stats_sum_pred: list[float] = []
+        stats_sum_true: list[float] = []
+        stats_sum_pred2: list[float] = []
+        stats_sum_true2: list[float] = []
+        stats_sum_prod: list[float] = []
+        src_map = {"gtf_only": np.int8(1), "usage_only": np.int8(2)}
+
+        for src_name, cond_dict in usage_by_source.items():
+            src_id = src_map.get(src_name)
+            if src_id is None:
+                continue
+            for cond_idx, data in cond_dict.items():
+                pred = np.asarray(data["pred"], dtype=np.float32)
+                true = np.asarray(data["true"], dtype=np.float32)
+                if pred.size == 0 or pred.size != true.size:
+                    continue
+                src_ids_chunks.append(np.full(pred.size, src_id, dtype=np.int8))
+                src_cond_ids_chunks.append(np.full(pred.size, int(cond_idx), dtype=np.int32))
+                src_pred_chunks.append(pred)
+                src_true_chunks.append(true)
+
+                stats_src_ids.append(int(src_id))
+                stats_cond_ids.append(int(cond_idx))
+                stats_n.append(int(pred.size))
+                p64 = pred.astype(np.float64, copy=False)
+                t64 = true.astype(np.float64, copy=False)
+                stats_sum_pred.append(float(p64.sum()))
+                stats_sum_true.append(float(t64.sum()))
+                stats_sum_pred2.append(float((p64 * p64).sum()))
+                stats_sum_true2.append(float((t64 * t64).sum()))
+                stats_sum_prod.append(float((p64 * t64).sum()))
+
+        if src_ids_chunks:
+            np.savez_compressed(
+                usage_by_src_path,
+                src_ids=np.concatenate(src_ids_chunks, axis=0),
+                cond_ids=np.concatenate(src_cond_ids_chunks, axis=0),
+                pred=np.concatenate(src_pred_chunks, axis=0),
+                true=np.concatenate(src_true_chunks, axis=0),
+                stats_src_ids=np.array(stats_src_ids, dtype=np.int8),
+                stats_cond_ids=np.array(stats_cond_ids, dtype=np.int32),
+                stats_n=np.array(stats_n, dtype=np.int64),
+                stats_sum_pred=np.array(stats_sum_pred, dtype=np.float64),
+                stats_sum_true=np.array(stats_sum_true, dtype=np.float64),
+                stats_sum_pred2=np.array(stats_sum_pred2, dtype=np.float64),
+                stats_sum_true2=np.array(stats_sum_true2, dtype=np.float64),
+                stats_sum_prod=np.array(stats_sum_prod, dtype=np.float64),
+            )
+        else:
+            np.savez_compressed(
+                usage_by_src_path,
+                src_ids=np.array([], dtype=np.int8),
+                cond_ids=np.array([], dtype=np.int32),
+                pred=np.array([], dtype=np.float32),
+                true=np.array([], dtype=np.float32),
+                stats_src_ids=np.array([], dtype=np.int8),
+                stats_cond_ids=np.array([], dtype=np.int32),
+                stats_n=np.array([], dtype=np.int64),
+                stats_sum_pred=np.array([], dtype=np.float64),
+                stats_sum_true=np.array([], dtype=np.float64),
+                stats_sum_pred2=np.array([], dtype=np.float64),
+                stats_sum_true2=np.array([], dtype=np.float64),
+                stats_sum_prod=np.array([], dtype=np.float64),
+            )
     
     logging.getLogger("evaluate_splice").info(f"  Saved: {npz_path}  {usage_path}")
 
@@ -1384,7 +1586,9 @@ def save_predictions(
 def load_predictions(
     out_dir: Path,
     org_name: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, dict, dict]:
+    require_usage_arrays: bool = True,
+    require_usage_by_source_arrays: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, dict, dict, dict, dict]:
     """Load predictions saved by save_predictions."""
     npz_path = out_dir / f"predictions_{org_name}.npz"
     if not npz_path.exists():
@@ -1394,22 +1598,101 @@ def load_predictions(
     cls_labels = data["cls_labels"]
     src_tags   = data["src_tags"] if "src_tags" in data else None
 
-    usage_path = out_dir / f"usage_{org_name}.json"
+    usage_path_npz = out_dir / f"usage_{org_name}.npz"
+    usage_path_json = out_dir / f"usage_{org_name}.json"
     usage_per_cond: dict = {}
-    if usage_path.exists():
-        with open(usage_path) as f:
+    usage_stats: dict = {}
+    if usage_path_npz.exists():
+        u = np.load(usage_path_npz)
+        if "stats_cond_ids" in u:
+            usage_stats = {
+                "cond_ids": u["stats_cond_ids"].astype(np.int32, copy=False),
+                "n": u["stats_n"].astype(np.int64, copy=False),
+                "sum_pred": u["stats_sum_pred"].astype(np.float64, copy=False),
+                "sum_true": u["stats_sum_true"].astype(np.float64, copy=False),
+                "sum_pred2": u["stats_sum_pred2"].astype(np.float64, copy=False),
+                "sum_true2": u["stats_sum_true2"].astype(np.float64, copy=False),
+                "sum_prod": u["stats_sum_prod"].astype(np.float64, copy=False),
+            }
+        if require_usage_arrays or not usage_stats:
+            cond_ids = u["cond_ids"].astype(np.int32, copy=False)
+            pred = u["pred"].astype(np.float32, copy=False)
+            true = u["true"].astype(np.float32, copy=False)
+            if cond_ids.size > 0:
+                order = np.argsort(cond_ids, kind="stable")
+                cond_sorted = cond_ids[order]
+                pred_sorted = pred[order]
+                true_sorted = true[order]
+                uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
+                for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
+                    usage_per_cond[int(c)] = {
+                        "pred": pred_sorted[s:s + k],
+                        "true": true_sorted[s:s + k],
+                    }
+    elif usage_path_json.exists():
+        with open(usage_path_json) as f:
             usage_per_cond = {int(k): v for k, v in json.load(f).items()}
     
-    usage_by_src_path = out_dir / f"usage_by_source_{org_name}.json"
+    usage_by_src_path_npz = out_dir / f"usage_by_source_{org_name}.npz"
+    usage_by_src_path_json = out_dir / f"usage_by_source_{org_name}.json"
     usage_by_source: dict = {}
-    if usage_by_src_path.exists():
-        with open(usage_by_src_path) as f:
+    usage_by_source_stats: dict = {}
+    if usage_by_src_path_npz.exists():
+        ub = np.load(usage_by_src_path_npz)
+        if "stats_src_ids" in ub:
+            stats_src_ids = ub["stats_src_ids"].astype(np.int8, copy=False)
+            src_name_map = {np.int8(1): "gtf_only", np.int8(2): "usage_only"}
+            for sid in (np.int8(1), np.int8(2)):
+                mask = stats_src_ids == sid
+                if not np.any(mask):
+                    continue
+                src_name = src_name_map[sid]
+                usage_by_source_stats[src_name] = {
+                    "cond_ids": ub["stats_cond_ids"][mask].astype(np.int32, copy=False),
+                    "n": ub["stats_n"][mask].astype(np.int64, copy=False),
+                    "sum_pred": ub["stats_sum_pred"][mask].astype(np.float64, copy=False),
+                    "sum_true": ub["stats_sum_true"][mask].astype(np.float64, copy=False),
+                    "sum_pred2": ub["stats_sum_pred2"][mask].astype(np.float64, copy=False),
+                    "sum_true2": ub["stats_sum_true2"][mask].astype(np.float64, copy=False),
+                    "sum_prod": ub["stats_sum_prod"][mask].astype(np.float64, copy=False),
+                }
+        if require_usage_by_source_arrays or not usage_by_source_stats:
+            src_ids = ub["src_ids"].astype(np.int8, copy=False)
+            cond_ids = ub["cond_ids"].astype(np.int32, copy=False)
+            pred = ub["pred"].astype(np.float32, copy=False)
+            true = ub["true"].astype(np.float32, copy=False)
+            if src_ids.size > 0:
+                src_name_map = {np.int8(1): "gtf_only", np.int8(2): "usage_only"}
+                order = np.lexsort((cond_ids, src_ids))
+                src_sorted = src_ids[order]
+                cond_sorted = cond_ids[order]
+                pred_sorted = pred[order]
+                true_sorted = true[order]
+
+                starts = [0]
+                for j in range(1, len(src_sorted)):
+                    if src_sorted[j] != src_sorted[j - 1] or cond_sorted[j] != cond_sorted[j - 1]:
+                        starts.append(j)
+                starts.append(len(src_sorted))
+
+                for a, b in zip(starts[:-1], starts[1:]):
+                    src_name = src_name_map.get(np.int8(src_sorted[a]))
+                    if src_name is None:
+                        continue
+                    c = int(cond_sorted[a])
+                    src_entry = usage_by_source.setdefault(src_name, {})
+                    src_entry[c] = {
+                        "pred": pred_sorted[a:b],
+                        "true": true_sorted[a:b],
+                    }
+    elif usage_by_src_path_json.exists():
+        with open(usage_by_src_path_json) as f:
             data_by_src = json.load(f)
             for src_name, cond_dict in data_by_src.items():
                 usage_by_source[src_name] = {int(k): v for k, v in cond_dict.items()}
     
     logging.getLogger("evaluate_splice").info(f"  Loaded predictions from {npz_path}")
-    return cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source
+    return cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats
 
 
 # ---------------------------------------------------------------------------
@@ -1604,7 +1887,7 @@ def main() -> None:
     # -- Resolve organisms / BED files ---------------------------------------
     species_specs = sorted(cfg["species_specs"], key=lambda s: s["organism_index"])
 
-    if args.bed is not None and not args.skip_predictions:
+    if args.bed is not None:
         if len(args.bed) != len(species_specs):
             sys.exit(
                 f"--bed: expected {len(species_specs)} file(s) "
@@ -1644,6 +1927,14 @@ def main() -> None:
         )
 
     all_results: dict[str, dict] = {}
+    
+    # Store predictions for later processing (allows GPU memory release after inference)
+    all_predictions: dict[str, tuple] = {}
+    need_usage_arrays = not args.skip_plots
+    need_usage_by_source_arrays = (not args.skip_plots) and args.per_source
+    if args.skip_predictions and args.skip_plots:
+        logger.info("Using stats-first loading mode: raw usage arrays are skipped for faster exact metrics.")
+
 
     for i, (spec, bed_file) in enumerate(zip(species_specs, bed_files)):
         org_idx: int = spec["organism_index"]
@@ -1653,9 +1944,29 @@ def main() -> None:
         logger.info(f"  {org_name.upper()}")
         logger.info(f"{'='*62}")
 
+        # Check if predictions already exist
+        pred_npz = out_dir / f"predictions_{org_name}.npz"
+        usage_json = out_dir / f"usage_{org_name}.json"
+        usage_npz = out_dir / f"usage_{org_name}.npz"
+        if (not args.overwrite and pred_npz.exists() and (usage_json.exists() or usage_npz.exists())):
+            logger.info(f"[{org_name}] Predictions already exist. Skipping generation (use --overwrite to force).")
+            cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats = load_predictions(
+                out_dir,
+                org_name,
+                require_usage_arrays=need_usage_arrays,
+                require_usage_by_source_arrays=need_usage_by_source_arrays,
+            )
+            all_predictions[org_name] = (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_file)
+            continue
+
         if args.skip_predictions:
             logger.info(f"[{org_name}] Loading saved predictions …")
-            cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source = load_predictions(out_dir, org_name)
+            cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats = load_predictions(
+                out_dir,
+                org_name,
+                require_usage_arrays=need_usage_arrays,
+                require_usage_by_source_arrays=need_usage_by_source_arrays,
+            )
             seq_len = cfg.get("sequence_length", 131_072)
         else:
             # -- Optionally build per-source annotation index ----------------
@@ -1712,6 +2023,7 @@ def main() -> None:
                     spec["usage_parquet"],
                     min_coverage=args.min_coverage,
                     usage_coord_base=0,
+                    observed_conditions_only=True,
                 )
 
             logger.info(f"[{org_name}] Building dataset from {bed_file} …")
@@ -1762,10 +2074,70 @@ def main() -> None:
             )
 
             save_predictions(out_dir, org_name, cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source)
+            usage_stats = {}
+            usage_by_source_stats = {}
+        
+        # Store predictions for post-inference processing
+        all_predictions[org_name] = (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_file)
+
+    # -- Release GPU memory after all inference is complete ------------------
+    if not args.skip_predictions:
+        logger.info("="*62)
+        logger.info("Inference complete. Releasing GPU memory...")
+        logger.info("="*62)
+        
+        # Move model to CPU and delete references
+        if 'model' in locals():
+            model.cpu()
+            del model
+        if 'usage_heads' in locals():
+            for h in usage_heads.values():
+                h.cpu()
+            del usage_heads
+        
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        logger.info("GPU memory released. Proceeding with metrics and plotting on CPU...")
+    
+    # -- Process predictions (metrics and plots) -----------------------------
+    if not args.skip_predictions:
+        items = all_predictions.items()
+    else:
+        items = []
+        for i, spec in enumerate(species_specs):
+            org_name = spec.get("name", ORGANISM_NAMES.get(spec["organism_index"], f"organism_{spec['organism_index']}"))
+            try:
+                preds = load_predictions(
+                    out_dir,
+                    org_name,
+                    require_usage_arrays=need_usage_arrays,
+                    require_usage_by_source_arrays=need_usage_by_source_arrays,
+                )
+            except Exception as e:
+                logger.warning(f"Skipping {org_name}: could not load predictions ({e})")
+                continue
+            cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats = preds
+            items.append((org_name, (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_files[i])))
+
+    species_idx_by_name = {
+        spec.get("name", ORGANISM_NAMES.get(spec["organism_index"], f"organism_{spec['organism_index']}")): idx
+        for idx, spec in enumerate(species_specs)
+    }
+
+    for org_name, (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_file) in items:
+        seq_len = cfg.get("sequence_length", 131_072)
+        species_idx = species_idx_by_name.get(org_name, 0)
+
+        logger.info(f"{'='*62}")
+        logger.info(f"  {org_name.upper()} - Metrics & Plotting")
+        logger.info(f"{'='*62}")
 
         # -- Filter positions to gene-overlapping sites ----------------------
         if args.gene_annotation is not None:
-            gene_intervals = build_gene_intervals(args.gene_annotation[i])
+            gene_intervals = build_gene_intervals(args.gene_annotation[species_idx])
 
             # Determine which BED was used for predictions
             filtered_bed_path = out_dir / f"filtered_bed_{org_name}.bed"
@@ -1792,8 +2164,17 @@ def main() -> None:
         # -- Metrics ---------------------------------------------------------
         logger.info(f"[{org_name}] Computing metrics …")
         cls_m = compute_classification_metrics(cls_probs, cls_labels)
-        usage_m = compute_usage_metrics(usage_per_cond) if usage_per_cond else None
-        usage_by_source_m = compute_usage_metrics_by_source(usage_by_source) if (args.per_source and usage_by_source) else {}
+        usage_m = None
+        if usage_stats:
+            usage_m = compute_usage_metrics_from_stats(usage_stats)
+        elif usage_per_cond:
+            usage_m = compute_usage_metrics(usage_per_cond)
+        usage_by_source_m = {}
+        if args.per_source:
+            if usage_by_source_stats:
+                usage_by_source_m = compute_usage_metrics_by_source_from_stats(usage_by_source_stats)
+            elif usage_by_source:
+                usage_by_source_m = compute_usage_metrics_by_source(usage_by_source)
         source_m = compute_source_metrics(cls_probs, cls_labels, src_tags) if (args.per_source and src_tags is not None) else {}
         print_metrics(org_name, cls_m, usage_m, logger=logger)
         if source_m:
