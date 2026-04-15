@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=ft-lora
+#SBATCH --job-name=ft-human
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
-#SBATCH --mem=160gb
+#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
+#SBATCH --mem=80gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -47,11 +47,12 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
     exit 1
 }
 
+
 # Work directory
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_splice_lora_helix.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_human_splice_lora_helix.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then
@@ -68,6 +69,7 @@ if [ -z "$RUN_NAME" ]; then
     RUN_NAME=$(date +%Y%m%d_%H%M%S)
 fi
 
+
 LOG_DIR="${OUTPUT_DIR}/${RUN_NAME}"
 mkdir -p "${LOG_DIR}"
 LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -82,10 +84,20 @@ echo "Config: ${CONFIG}"
 echo "Log file: ${LOG_FILE}"
 echo "---"
 
+# Resume if checkpoint exists
+RESUME="${OUTPUT_DIR}/${RUN_NAME}/best_model.pth"
+if [ -f "${RESUME}" ]; then
+    echo "Resuming from checkpoint: ${RESUME}"
+else
+    echo "No checkpoint found at ${RESUME}. Starting fresh training."
+    RESUME="auto"
+fi
+
 # Run training — no tee needed; exec already redirects everything to LOG_FILE.
 python ${WORK_DIR}/scripts/finetune_splice.py \
     --config ${CONFIG} \
-    --resume "auto"
+    --compile \
+    --resume ${RESUME}
 
 echo "---"
 echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}"

@@ -8,7 +8,7 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Multi-species data (use this block OR the flat genome/annotation/bed keys)
+# Multi-species data
 # ---------------------------------------------------------------------------
 # When 'species' is present, per-species datasets are created and combined.
 # Each species may have a different usage_parquet (or none at all).
@@ -35,16 +35,6 @@ species:
 classification_head_init:
   0: 0   # new organism 0 from pretrained organism 0
   1: 1   # new organism 1 from pretrained organism 1
-
-# ---------------------------------------------------------------------------
-# Single-species alternative (comment out 'species' block above and use these)
-# ---------------------------------------------------------------------------
-# genome: /data/genomes/hg38.fa
-# annotation_parquet: /data/splice/human_splice_sites.parquet
-# usage_parquet: /data/splice/human_usage.parquet   # optional
-# train_bed: /data/beds/human_train.bed
-# val_bed: /data/beds/human_val.bed
-# organism_index: 0
 
 # ---------------------------------------------------------------------------
 # Pretrained weights

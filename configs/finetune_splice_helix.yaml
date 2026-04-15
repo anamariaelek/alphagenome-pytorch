@@ -8,7 +8,7 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Multi-species data (use this block OR the flat genome/annotation/bed keys)
+# Multi-species data
 # ---------------------------------------------------------------------------
 # When 'species' is present, per-species datasets are created and combined.
 # Each species may have a different usage_parquet (or none at all).
@@ -17,30 +17,24 @@
 
 species:
   - name: human
-    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
-    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
-    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
-    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/train.bed
-    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds/FOLD_0/valid.bed
+    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 0
 
   - name: mouse
     genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
-    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
-    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/train.bed
-    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds/FOLD_0/valid.bed
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 1
 
-# ---------------------------------------------------------------------------
-# Single-species alternative (comment out 'species' block above and use these)
-# ---------------------------------------------------------------------------
-# genome: /data/genomes/hg38.fa
-# annotation_parquet: /data/splice/human_splice_sites.parquet
-# usage_parquet: /data/splice/human_usage.parquet   # optional
-# train_bed: /data/beds/human_train.bed
-# val_bed: /data/beds/human_val.bed
-# organism_index: 0
+classification_head_init:
+  0: 0   # new organism 0 from pretrained organism 0
+  1: 1   # new organism 1 from pretrained organism 1
 
 # ---------------------------------------------------------------------------
 # Pretrained weights
@@ -61,7 +55,7 @@ cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Set coordinate base for usage parquet
 # 1 = Spliser default (1-based coordinates) — use this unless you explicitly converted to 0-based
 # 0 = already converted to 0-based coordinates
-usage_coord_base: o
+usage_coord_base: 0
 
 # ---------------------------------------------------------------------------
 # Model / LoRA
@@ -78,7 +72,7 @@ lora_targets: q_proj,v_proj
 # ---------------------------------------------------------------------------
 epochs: 20
 batch_size: 1
-gradient_accumulation_steps: 32   # effective batch = batch_size * accum * gpus
+gradient_accumulation_steps: 128   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
