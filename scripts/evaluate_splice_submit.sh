@@ -60,11 +60,16 @@ mkdir -p ${DIR}/${RUN}/predictions/
 
 python scripts/evaluate_splice.py \
     --checkpoint "${DIR}/${RUN}" \
-    --bed "${DIR}/Homo_sapiens/folds_100kb/FOLD_0/test.bed" "${DIR}/Mus_musculus/folds_100kb/FOLD_0/test.bed" \
-    --batch-size 8 \
+    --config "${DIR}/${RUN}/config.json" \
+    --bed "${DIR}/data/Homo_sapiens/folds_100kb/FOLD_0/test.bed" "${DIR}/data/Mus_musculus/folds_100kb/FOLD_0/test.bed" \
+    --gtf-sites "${DIR}/Homo_sapiens/splice_sites_gtf.parquet" "${DIR}/Mus_musculus/splice_sites_gtf.parquet" \
+    --batch-size 4 \
     --device cuda \
-    --per-tissue --per-source \
+    --per-tissue \
     --output-dir "${DIR}/${RUN}/predictions"
 
+# evaluate by annotation source (gtf vs usage)
+# --gtf-sites "${DIR}/Homo_sapiens/splice_sites_gtf.parquet" "${DIR}/Mus_musculus/splice_sites_gtf.parquet"
+
 # Filter only gene-body overlapping sites:
-# --gene-annotation "${DIR}/Homo_sapiens/gene_annotation.parquet" "${DIR}/Mus_musculus/gene_annotation.parquet"
+# --gene-overlap-annotation "${DIR}/Homo_sapiens/gene_annotation.parquet" "${DIR}/Mus_musculus/gene_annotation.parquet"

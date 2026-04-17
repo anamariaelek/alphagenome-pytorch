@@ -335,8 +335,14 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint",
         required=True,
         help="Path to checkpoint directory (contains best_model.pth + config.json) "
-             "or directly to the .pth file. The companion config.json must be in the "
+             "or directly to the .pth file. The companion config.json should be in the "
              "same directory.",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional config.json path. If not specified, config.json in the --checkpoint " 
+        "directory will be used.",
     )
     parser.add_argument(
         "--bed",
@@ -357,15 +363,15 @@ def parse_args() -> argparse.Namespace:
         help="Skip inference; load saved predictions from --output-dir instead.",
     )
     parser.add_argument(
-        "--annotated-sites", nargs="*", default=None,
+        "--gtf-sites", nargs="*", default=None,
         help="GTF-only splice-site parquets, one per organism (same order as "
              "species_specs). Enables per-source evaluation.",
     )
     parser.add_argument(
-        "--gene-annotation", nargs="*", default=None,
-        help="Gene annotation parquets (with Chromosome/Start/End/Feature columns), "
-             "one per organism. When provided, only BED windows overlapping gene "
-             "regions are evaluated (intergenic windows are skipped).",
+        "--gene-overlap-annotation", nargs="*", default=None,
+        help="Gene annotation parquets used only for gene-overlap filtering "
+             "(Chromosome/Start/End/Feature), one per organism. When provided, "
+             "only BED windows/positions overlapping gene regions are evaluated.",
     )
     parser.add_argument(
         "--per-condition", action="store_true",
@@ -374,10 +380,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--per-tissue", action="store_true",
         help="Evaluate and plot usage separately per tissue (from usage metadata).",
-    )
-    parser.add_argument(
-        "--per-source", action="store_true",
-        help="Evaluate and plot separately for GTF-only vs usage-only sites.",
     )
     parser.add_argument(
         "--skip-plots", action="store_true",
@@ -1765,7 +1767,7 @@ def compute_source_metrics(
 def print_metrics(org_name: str, cls_m: dict, usage_m: dict | None, logger: logging.Logger | None = None) -> None:
     sep = "=" * 62
     log_func = logger.info if logger else print
-    log_func(f"\n{sep}")
+    log_func(sep)
     log_func(f"  {org_name.upper()} RESULTS")
     log_func(sep)
     log_func(f"  Positions evaluated : {cls_m['n_positions']:>12,}")
@@ -1879,7 +1881,10 @@ def main() -> None:
     logger.info(f"Log: {log_path}")
 
     # -- Resolve checkpoint and config ---------------------------------------
-    pth_path, cfg_path = resolve_checkpoint(args.checkpoint)
+    pth_path, default_cfg_path = resolve_checkpoint(args.checkpoint)
+    cfg_path = Path(args.config) if args.config is not None else default_cfg_path
+    if not cfg_path.exists():
+        sys.exit(f"config.json not found: {cfg_path}")
     cfg = load_config(cfg_path)
     logger.info(f"Checkpoint : {pth_path}")
     logger.info(f"Config     : {cfg_path}")
@@ -1899,16 +1904,16 @@ def main() -> None:
         bed_files = [s["val_bed"] for s in species_specs]
         logger.info(f"BED files  : {bed_files}  (val_bed from config)")
 
-    if args.annotated_sites is not None and len(args.annotated_sites) != len(species_specs):
+    if args.gtf_sites is not None and len(args.gtf_sites) != len(species_specs):
         sys.exit(
-            f"--annotated-sites: expected {len(species_specs)} file(s), "
-            f"got {len(args.annotated_sites)}"
+            f"--gtf-sites: expected {len(species_specs)} file(s), "
+            f"got {len(args.gtf_sites)}"
         )
 
-    if args.gene_annotation is not None and len(args.gene_annotation) != len(species_specs):
+    if args.gene_overlap_annotation is not None and len(args.gene_overlap_annotation) != len(species_specs):
         sys.exit(
-            f"--gene-annotation: expected {len(species_specs)} file(s), "
-            f"got {len(args.gene_annotation)}"
+            f"--gene-overlap-annotation: expected {len(species_specs)} file(s), "
+            f"got {len(args.gene_overlap_annotation)}"
         )
 
     device = torch.device(args.device)
@@ -1927,11 +1932,10 @@ def main() -> None:
         )
 
     all_results: dict[str, dict] = {}
-    
-    # Store predictions for later processing (allows GPU memory release after inference)
-    all_predictions: dict[str, tuple] = {}
+
     need_usage_arrays = not args.skip_plots
-    need_usage_by_source_arrays = (not args.skip_plots) and args.per_source
+    auto_per_source = args.gtf_sites is not None
+    need_usage_by_source_arrays = (not args.skip_plots) and auto_per_source
     if args.skip_predictions and args.skip_plots:
         logger.info("Using stats-first loading mode: raw usage arrays are skipped for faster exact metrics.")
 
@@ -1940,7 +1944,7 @@ def main() -> None:
         org_idx: int = spec["organism_index"]
         org_name: str = spec.get("name", ORGANISM_NAMES.get(org_idx, f"organism_{org_idx}"))
 
-        logger.info(f"\n{'='*62}")
+        logger.info(f"{'='*62}")
         logger.info(f"  {org_name.upper()}")
         logger.info(f"{'='*62}")
 
@@ -1956,10 +1960,9 @@ def main() -> None:
                 require_usage_arrays=need_usage_arrays,
                 require_usage_by_source_arrays=need_usage_by_source_arrays,
             )
-            all_predictions[org_name] = (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_file)
-            continue
+            seq_len = cfg.get("sequence_length", 131_072)
 
-        if args.skip_predictions:
+        elif args.skip_predictions:
             logger.info(f"[{org_name}] Loading saved predictions …")
             cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats = load_predictions(
                 out_dir,
@@ -1971,8 +1974,8 @@ def main() -> None:
         else:
             # -- Optionally build per-source annotation index ----------------
             source_arrays = None
-            if args.annotated_sites is not None:
-                gtf_path   = args.annotated_sites[i]
+            if args.gtf_sites is not None:
+                gtf_path   = args.gtf_sites[i]
                 usage_path = spec.get("usage_parquet")
                 if usage_path:
                     logger.info(f"[{org_name}] Building source annotation …")
@@ -1993,8 +1996,8 @@ def main() -> None:
 
             # -- Optionally filter BED to gene-overlapping windows -----------
             seq_len = cfg.get("sequence_length", 131_072)
-            if args.gene_annotation is not None:
-                gene_intervals = build_gene_intervals(args.gene_annotation[i])
+            if args.gene_overlap_annotation is not None:
+                gene_intervals = build_gene_intervals(args.gene_overlap_annotation[i])
                 n_genes = sum(len(iv) for iv in gene_intervals.values())
                 logger.info(
                     f"[{org_name}] Loaded {n_genes:,} merged gene intervals "
@@ -2018,12 +2021,13 @@ def main() -> None:
             if spec.get("usage_parquet"):
                 logger.info(f"[{org_name}] Loading usage index from {spec['usage_parquet']} …")
                 # usage.parquet is already in 0-based coordinates (verified by direct overlap with annotations)
-                # Use usage_coord_base=0 to prevent incorrect -1 conversion
+                # Use usage_coord_base=0 to prevent incorrect -1 conversion.
+                # Keep all conditions per observed site so unobserved site-condition pairs are treated as 0 usage.
                 usage_index = SpliceSiteUsageIndex(
                     spec["usage_parquet"],
                     min_coverage=args.min_coverage,
                     usage_coord_base=0,
-                    observed_conditions_only=True,
+                    observed_conditions_only=False,
                 )
 
             logger.info(f"[{org_name}] Building dataset from {bed_file} …")
@@ -2076,68 +2080,14 @@ def main() -> None:
             save_predictions(out_dir, org_name, cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source)
             usage_stats = {}
             usage_by_source_stats = {}
-        
-        # Store predictions for post-inference processing
-        all_predictions[org_name] = (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_file)
-
-    # -- Release GPU memory after all inference is complete ------------------
-    if not args.skip_predictions:
-        logger.info("="*62)
-        logger.info("Inference complete. Releasing GPU memory...")
-        logger.info("="*62)
-        
-        # Move model to CPU and delete references
-        if 'model' in locals():
-            model.cpu()
-            del model
-        if 'usage_heads' in locals():
-            for h in usage_heads.values():
-                h.cpu()
-            del usage_heads
-        
-        # Clear CUDA cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        
-        logger.info("GPU memory released. Proceeding with metrics and plotting on CPU...")
-    
-    # -- Process predictions (metrics and plots) -----------------------------
-    if not args.skip_predictions:
-        items = all_predictions.items()
-    else:
-        items = []
-        for i, spec in enumerate(species_specs):
-            org_name = spec.get("name", ORGANISM_NAMES.get(spec["organism_index"], f"organism_{spec['organism_index']}"))
-            try:
-                preds = load_predictions(
-                    out_dir,
-                    org_name,
-                    require_usage_arrays=need_usage_arrays,
-                    require_usage_by_source_arrays=need_usage_by_source_arrays,
-                )
-            except Exception as e:
-                logger.warning(f"Skipping {org_name}: could not load predictions ({e})")
-                continue
-            cls_probs, cls_labels, src_tags, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats = preds
-            items.append((org_name, (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_files[i])))
-
-    species_idx_by_name = {
-        spec.get("name", ORGANISM_NAMES.get(spec["organism_index"], f"organism_{spec['organism_index']}")): idx
-        for idx, spec in enumerate(species_specs)
-    }
-
-    for org_name, (cls_probs, cls_labels, usage_per_cond, src_tags, usage_by_source, usage_stats, usage_by_source_stats, spec, bed_file) in items:
-        seq_len = cfg.get("sequence_length", 131_072)
-        species_idx = species_idx_by_name.get(org_name, 0)
 
         logger.info(f"{'='*62}")
         logger.info(f"  {org_name.upper()} - Metrics & Plotting")
         logger.info(f"{'='*62}")
 
         # -- Filter positions to gene-overlapping sites ----------------------
-        if args.gene_annotation is not None:
-            gene_intervals = build_gene_intervals(args.gene_annotation[species_idx])
+        if args.gene_overlap_annotation is not None:
+            gene_intervals = build_gene_intervals(args.gene_overlap_annotation[i])
 
             # Determine which BED was used for predictions
             filtered_bed_path = out_dir / f"filtered_bed_{org_name}.bed"
@@ -2170,12 +2120,12 @@ def main() -> None:
         elif usage_per_cond:
             usage_m = compute_usage_metrics(usage_per_cond)
         usage_by_source_m = {}
-        if args.per_source:
+        if auto_per_source:
             if usage_by_source_stats:
                 usage_by_source_m = compute_usage_metrics_by_source_from_stats(usage_by_source_stats)
             elif usage_by_source:
                 usage_by_source_m = compute_usage_metrics_by_source(usage_by_source)
-        source_m = compute_source_metrics(cls_probs, cls_labels, src_tags) if (args.per_source and src_tags is not None) else {}
+        source_m = compute_source_metrics(cls_probs, cls_labels, src_tags) if (auto_per_source and src_tags is not None) else {}
         print_metrics(org_name, cls_m, usage_m, logger=logger)
         if source_m:
             print_source_metrics(org_name, source_m, logger=logger)
@@ -2194,7 +2144,7 @@ def main() -> None:
                     plot_usage_correlation_by_tissue(
                         usage_per_cond, usage_metadata_path, out_dir, org_name
                     )
-            if args.per_source and src_tags is not None:
+            if auto_per_source and src_tags is not None:
                 plot_pr_curves_by_source(cls_probs, cls_labels, src_tags, org_name, out_dir)
 
         all_results[org_name] = {
@@ -2204,13 +2154,40 @@ def main() -> None:
             **(({"usage_by_source": usage_by_source_m}) if usage_by_source_m else {}),
         }
 
+        del cls_probs, cls_labels, usage_per_cond, usage_by_source, usage_stats, usage_by_source_stats
+        if src_tags is not None:
+            del src_tags
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # -- Release GPU memory after all species are processed ------------------
+    if not args.skip_predictions:
+        logger.info("="*62)
+        logger.info("Species-by-species evaluation complete. Releasing GPU memory...")
+        logger.info("="*62)
+
+        if 'model' in locals():
+            model.cpu()
+            del model
+        if 'usage_heads' in locals():
+            for h in usage_heads.values():
+                h.cpu()
+            del usage_heads
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        logger.info("GPU memory released.")
+
     # -- Multi-species macro-average -----------------------------------------
     if len(species_specs) > 1:
         keys_to_avg = [
             "binary_auprc", "mean_splice_class_auprc",
             "usage_mean_pearson_r", "usage_median_pearson_r",
         ]
-        logger.info(f"\n{'='*62}")
+        logger.info(f"{'='*62}")
         logger.info("  MACRO-AVERAGE ACROSS SPECIES")
         logger.info(f"{'='*62}")
         for k in keys_to_avg:

@@ -1,13 +1,17 @@
 ```bash
 species=Homo_sapiens
-gtf_dir=/home/elek/sds/sd17d003/Anamaria/genomes/ensembl115/gtf/
-fa_dir=/home/elek/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/
+gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/gtf/
+fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/
 
 species=Mus_musculus
-gtf_dir=/home/elek/sds/sd17d003/Anamaria/genomes/mazin/gtf/
-fa_dir=/home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/
+gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
+fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
 
-out_dir=/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+species=Rattus_norvegicus
+gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
+fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
+
+out_dir=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
 data_dir=${out_dir}/data
 mkdir -p ${data_dir}/${species}
 ```
@@ -24,15 +28,26 @@ python scripts/convert_gtf_to_parquet.py \
 
 ```bash
 python scripts/convert_splice_usage_to_parquet.py \
-    --input-dir /home/elek/sds/sd17d003/Anamaria/spliser/${species} \
-    --output ${data_dir}/${species}/usage.parquet \
+    --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/${species} \
+    --output ${data_dir}/${species}/usage_old.parquet \
     --min-alpha 5 \
-    --strip-chr-names > logs/usage_to_parquet_${species}.log
+    --strip-chr-names > logs/usage_to_parquet_${species}_old.log
 ```
 
 # Prepare splice site annotation for training
 
-Save parquet file with splice site annotations for all sies found in either gtf file or in usage file: `--usage-mode union`.
+Save parquet file with splice site annotations. 
+
+To save only those sies found in gtf file:
+
+```bash
+python scripts/convert_splice_sites_to_parquet.py \
+    --gtf ${data_dir}/${species}/gene_annotation.parquet \
+    --output ${data_dir}/${species}/splice_sites_gtf.parquet > logs/splice_sites_to_parquet_${species}_gtf.log
+```
+
+
+To save all sites found in either gtf file or in usage file: `--usage-mode union`.
 
 ```bash
 python scripts/convert_splice_sites_to_parquet.py \
@@ -43,7 +58,7 @@ python scripts/convert_splice_sites_to_parquet.py \
     --output ${data_dir}/${species}/splice_sites_union.parquet > logs/splice_sites_to_parquet_${species}_union.log
 ```
 
-Alternativelly, save parquet file with splice site annotations for only those sies found in both gtf file and in usage file: `--usage-mode intersect`.
+Alternativelly, to save annotations for only those sies found in both gtf file and in usage file: `--usage-mode intersect`.
 
 ```bash
 python scripts/convert_splice_sites_to_parquet.py \
@@ -69,10 +84,10 @@ python scripts/convert_splice_sites_to_parquet.py \
 
 ```bash
 if [[ $species == 'Homo_sapiens' ]]; then
-  folds=/home/elek/projects/splicing/data/folds/sequences_human_hg19_sorted.bed
-  folds=/home/elek/projects/splicing/data/folds/sequences_human.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/splicing/data/folds/sequences_human_hg19_sorted.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/splicing/data/folds/sequences_human.bed
 elif [[ $species == 'Mus_musculus' ]]; then
-  folds=/home/elek/projects/splicing/data/folds/sequences_mouse.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/splicing/data/folds/sequences_mouse.bed
 fi
 
 python scripts/convert_borzoi_folds.py \
@@ -93,7 +108,7 @@ python scripts/finetune_splice.py --mode linear-probe \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --train-bed ${data_dir}/${species}/folds/FOLD_0/train.bed \
     --val-bed ${data_dir}/${species}/folds/FOLD_0/valid.bed \
-    --pretrained-weights /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+    --pretrained-weights ${HOME}/sds/sd17d003/Anamaria/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
 ```
 
 Finetune model for multiple species
@@ -102,17 +117,14 @@ Finetune model for multiple species
 python scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
 ```
 
-# Predict
+# Evaluate
 
 ```bash
-pred_dir=${out_dir}/predict/
-mkdir -p ${pred_dir}
-
-python scripts/predict_splice_site.py \
-    --coords "1:121030623-121225633" \
-    --genome ${fa_dir}/${species}.fa \
-    --annotation ${out_dir}/${species}/gene_annotation.parquet \
-    --organism 0 \
-    --checkpoint /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors \
-    --output ${pred_dir}/splice_predictions.tsv
+python scripts/evaluate_splice.py \
+    --checkpoint "${out_dir}" \
+    --bed "${data_dir}/${species}/folds/FOLD_0/test.bed" "${data_dir}/${species}/folds/FOLD_0/test.bed" \
+    --gtf-sites "${data_dir}/${species}/splice_sites_gtf.parquet" "${data_dir}/${species}/splice_sites_gtf.parquet" \
+    --batch-size 4 \
+    --device cuda \
+    --output-dir "${out_dir}/predictions"
 ```

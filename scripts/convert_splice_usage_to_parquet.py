@@ -234,7 +234,7 @@ def convert_usage_to_parquet(
     df = pd.concat([df[~both_mask], df_donor, df_acceptor], ignore_index=True)
 
     # ── Full class label = type + strand (e.g. "Donor+", "Acceptor-") ───────
-    df["Splice_Site_Type"] = df["Splice_Site_Type"] + df["Strand"]
+    df["Splice_Site_Type"] = df["Splice_Site_Type"].astype(str) + df["Strand"].astype(str)
     # "None+" / "None-" → "None"
     none_mask = df["Splice_Site_Type"].str.startswith("None")
     df.loc[none_mask, "Splice_Site_Type"] = "None"
@@ -392,40 +392,102 @@ def convert_spliser_dir_to_usage_parquet(
         min_coverage: Optional minimum Alpha+Beta count filter.
     """
     print(f"\n{'─'*60}")
-    print(f"Step 1/4  Loading {len(tsv_files)} TSV file(s)")
+    print(f"Step 1/4  Processing {len(tsv_files)} TSV file(s) sequentially (low memory mode)")
     print(f"{'─'*60}")
-    df = build_combined_dataframe(tsv_files, tissue_index, timepoint_index)
-    print(f"  Total rows loaded: {len(df):,}")
-
+    import pandas as pd
+    import gc
+    import tempfile
     print(f"\n{'─'*60}")
-    print("Step 2/4  Annotating splice site types")
+    print(f"Step 1/4  Processing {len(tsv_files)} TSV file(s) one at a time (low memory mode)")
     print(f"{'─'*60}")
-    t0 = time.perf_counter()
-    df = annotate_splice_site_type(df)
-    print(f"  Done in {time.perf_counter()-t0:.1f}s")
-    type_counts = df["Splice_Site_Type"].value_counts()
-    for t, n in type_counts.items():
-        print(f"  {t:10s}: {n:,}")
+    temp_dir = tempfile.TemporaryDirectory(prefix="splice_usage_tmp_")
+    temp_files = []
+    all_condition_keys = set()
+    all_tissues = set()
+    all_timepoints = set()
+    for idx, p in enumerate(tsv_files):
+        tissue, timepoint = _parse_tissue_timepoint(p.name, tissue_index, timepoint_index)
+        print(f"  Loading {p.name} (tissue={tissue}, timepoint={timepoint}) …", end=" ")
+        t0 = time.perf_counter()
+        df = pd.read_csv(p, sep="\t", dtype={"Region": str})
+        n_before = len(df)
+        df = df.drop_duplicates()
+        n_dup = n_before - len(df)
+        if n_dup:
+            print(f"removed {n_dup:,} duplicates; ", end="")
+        df["Tissue"] = tissue
+        df["Timepoint"] = timepoint
+        print(f"{len(df):,} rows ({time.perf_counter()-t0:.1f}s)")
 
-    print(f"\n{'─'*60}")
-    print("Step 3/4  Adjusting splice site positions")
-    print(f"{'─'*60}")
-    df = adjust_splice_site_position(df)
-    print("  Done.")
+        # Step 2: Annotate
+        print(f"    Annotating splice site types …", end=" ")
+        t1 = time.perf_counter()
+        df = annotate_splice_site_type(df)
+        print(f"done in {time.perf_counter()-t1:.1f}s", end="; ")
+        type_counts = df["Splice_Site_Type"].value_counts()
+        for t, n in type_counts.items():
+            print(f"{t}: {n:,}", end="; ")
+        print()
 
+        # Step 3: Adjust
+        print(f"    Adjusting splice site positions …", end=" ")
+        df = adjust_splice_site_position(df)
+        print("done.")
+
+        # Step 4: Convert to usage-parquet format (in-memory, no file write)
+        df_out = convert_usage_to_parquet(
+            df,
+            class_labels=class_labels,
+            condition_labels=None,  # We'll assign at the end
+            output_path=None,
+            compression=compression,
+            strip_chr=strip_chr,
+            min_alpha=min_alpha,
+            min_coverage=min_coverage,
+        )
+        # Collect condition keys for metadata
+        all_condition_keys.update(df["Tissue"].astype(str) + "_" + df["Timepoint"].astype(str))
+        all_tissues.add(tissue)
+        all_timepoints.add(timepoint)
+
+        # Write to a temporary Parquet file
+        temp_file = Path(temp_dir.name) / f"chunk_{idx}.parquet"
+        df_out.to_parquet(temp_file, index=False, compression=None if compression=="none" else compression)
+        temp_files.append(temp_file)
+        del df, df_out
+        gc.collect()
+
+    # Now, concatenate all temp Parquet files into the final output
     print(f"\n{'─'*60}")
-    print("Step 4/4  Converting to parquet")
-    print(f"{'─'*60}")
-    convert_usage_to_parquet(
-        df,
-        class_labels=class_labels,
-        condition_labels=condition_labels,
-        output_path=output_path,
-        compression=compression,
-        strip_chr=strip_chr,
-        min_alpha=min_alpha,
-        min_coverage=min_coverage,
-    )
+    print("Finalizing output and writing metadata …")
+    dfs = [pd.read_parquet(f) for f in temp_files]
+    df_final = pd.concat(dfs, ignore_index=True)
+    # Rebuild condition_labels
+    all_condition_keys = sorted(all_condition_keys)
+    condition_labels = {cond: idx for idx, cond in enumerate(all_condition_keys)}
+    # Write final Parquet and JSON
+    parquet_path = Path(output_path)
+    df_final.to_parquet(parquet_path, index=False, compression=None if compression=="none" else compression)
+    # Write metadata JSON
+    if class_labels is None:
+        class_labels = {
+            "Donor+": 0,
+            "Acceptor+": 1,
+            "Donor-": 2,
+            "Acceptor-": 3,
+            "None": 4,
+        }
+    metadata = {
+        "class_labels": class_labels,
+        "condition_labels": condition_labels,
+    }
+    json_path = parquet_path.with_suffix(".json")
+    with open(json_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Wrote {len(df_final):,} rows → {parquet_path}")
+    print(f"Wrote metadata → {json_path}")
+    # Clean up temp files
+    temp_dir.cleanup()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
