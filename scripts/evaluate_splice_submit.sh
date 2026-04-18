@@ -55,21 +55,17 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=132kb_lora
+RUN=132kb_mouse_lora
 mkdir -p ${DIR}/${RUN}/predictions/
 
 python scripts/evaluate_splice.py \
     --checkpoint "${DIR}/${RUN}" \
-    --config "${DIR}/${RUN}/config.json" \
+    --config "${DIR}/${RUN}/config_eval_human_mouse.json" \
     --bed "${DIR}/data/Homo_sapiens/folds_100kb/FOLD_0/test.bed" "${DIR}/data/Mus_musculus/folds_100kb/FOLD_0/test.bed" \
-    --gtf-sites "${DIR}/Homo_sapiens/splice_sites_gtf.parquet" "${DIR}/Mus_musculus/splice_sites_gtf.parquet" \
     --batch-size 4 \
     --device cuda \
     --per-tissue \
     --output-dir "${DIR}/${RUN}/predictions"
-
-# evaluate by annotation source (gtf vs usage)
-# --gtf-sites "${DIR}/Homo_sapiens/splice_sites_gtf.parquet" "${DIR}/Mus_musculus/splice_sites_gtf.parquet"
 
 # Filter only gene-body overlapping sites:
 # --gene-overlap-annotation "${DIR}/Homo_sapiens/gene_annotation.parquet" "${DIR}/Mus_musculus/gene_annotation.parquet"

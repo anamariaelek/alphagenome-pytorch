@@ -11,7 +11,7 @@
 # Single-species data
 # ---------------------------------------------------------------------------
 
-genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
+genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
 annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
 usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
 train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
