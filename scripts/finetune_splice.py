@@ -129,6 +129,7 @@ from alphagenome_pytorch.extensions.finetuning.splice_training import (
     train_epoch_splice,
     validate_splice,
 )
+from alphagenome_pytorch.utils.paths import expand_path, expand_paths_in_dict
 
 
 # =============================================================================
@@ -365,6 +366,14 @@ def parse_args() -> argparse.Namespace:
             return {}
         if not isinstance(data, dict):
             parser.error("YAML config root must be a mapping/dictionary")
+        
+        # Expand paths in config
+        path_keys = {
+            "genome", "annotation_parquet", "usage_parquet",
+            "train_bed", "val_bed", "test_bed", "pretrained_weights"
+        }
+        data = expand_paths_in_dict(data, path_keys)
+        
         return data
 
     def _apply_config_scalar(attr: str, config: dict[str, Any], key: str | None = None) -> None:
@@ -449,6 +458,7 @@ def parse_args() -> argparse.Namespace:
             for field in ("genome", "annotation_parquet", "train_bed", "val_bed"):
                 if not s.get(field):
                     parser.error(f"Species entry #{i} is missing required field '{field}'")
+            # Paths are already expanded by _load_yaml_config
             species_specs.append({
                 "name": s.get("name", f"species_{i}"),
                 "genome": s["genome"],
@@ -476,15 +486,19 @@ def parse_args() -> argparse.Namespace:
             if not value:
                 parser.error(f"{flag} is required (or provide it in --config)")
         # Build a unified single-species spec for downstream code
+        # Expand paths from CLI args
         species_specs = [{
             "name": "species_0",
-            "genome": args.genome,
-            "annotation_parquet": args.annotation_parquet,
-            "usage_parquet": args.usage_parquet,
-            "train_bed": args.train_bed,
-            "val_bed": args.val_bed,
+            "genome": expand_path(args.genome),
+            "annotation_parquet": expand_path(args.annotation_parquet),
+            "usage_parquet": expand_path(args.usage_parquet),
+            "train_bed": expand_path(args.train_bed),
+            "val_bed": expand_path(args.val_bed),
             "organism_index": args.organism_index,
         }]
+        # Also expand pretrained_weights from CLI
+        if args.pretrained_weights:
+            args.pretrained_weights = expand_path(args.pretrained_weights)
 
     args.species_specs = species_specs
     return args

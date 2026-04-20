@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ft-human
+#SBATCH --job-name=ft-rat
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
@@ -52,7 +52,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_human_splice_lora_helix.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_r_lora.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

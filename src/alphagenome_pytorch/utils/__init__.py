@@ -1,5 +1,9 @@
 """Utility modules for AlphaGenome PyTorch."""
 
+from alphagenome_pytorch.utils.paths import (
+    expand_path,
+    expand_paths_in_dict,
+)
 from alphagenome_pytorch.utils.sequence import (
     onehot_to_sequence,
     onehot_tensor_to_sequence,
@@ -8,6 +12,8 @@ from alphagenome_pytorch.utils.sequence import (
 )
 
 __all__ = [
+    "expand_path",
+    "expand_paths_in_dict",
     "onehot_to_sequence",
     "onehot_tensor_to_sequence",
     "sequence_to_onehot",

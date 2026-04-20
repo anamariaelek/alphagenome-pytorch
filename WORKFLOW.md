@@ -27,11 +27,11 @@ python scripts/convert_gtf_to_parquet.py \
 # Prepare splice usage for training
 
 ```bash
-python scripts/convert_splice_usage_to_parquet.py \
+python -u scripts/convert_splice_usage_to_parquet.py \
     --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/${species} \
-    --output ${data_dir}/${species}/usage_old.parquet \
+    --output ${data_dir}/${species}/usage.parquet \
     --min-alpha 5 \
-    --strip-chr-names > logs/usage_to_parquet_${species}_old.log
+    --strip-chr-names > logs/usage_to_parquet_${species}.log
 ```
 
 # Prepare splice site annotation for training
@@ -41,7 +41,7 @@ Save parquet file with splice site annotations.
 To save only those sies found in gtf file:
 
 ```bash
-python scripts/convert_splice_sites_to_parquet.py \
+python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --output ${data_dir}/${species}/splice_sites_gtf.parquet > logs/splice_sites_to_parquet_${species}_gtf.log
 ```
@@ -50,7 +50,7 @@ python scripts/convert_splice_sites_to_parquet.py \
 To save all sites found in either gtf file or in usage file: `--usage-mode union`.
 
 ```bash
-python scripts/convert_splice_sites_to_parquet.py \
+python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --min-alpha 100 \
@@ -61,7 +61,7 @@ python scripts/convert_splice_sites_to_parquet.py \
 Alternativelly, to save annotations for only those sies found in both gtf file and in usage file: `--usage-mode intersect`.
 
 ```bash
-python scripts/convert_splice_sites_to_parquet.py \
+python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --min-alpha 100 \
@@ -72,7 +72,7 @@ python scripts/convert_splice_sites_to_parquet.py \
 I settle for a version where all usage sites are kept, in addiition to the sites that are present both in the gtf and usage.
 
 ```bash
-python scripts/convert_splice_sites_to_parquet.py \
+python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --min-alpha 50 \
@@ -84,17 +84,24 @@ python scripts/convert_splice_sites_to_parquet.py \
 
 ```bash
 if [[ $species == 'Homo_sapiens' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/splicing/data/folds/sequences_human_hg19_sorted.bed
-  folds=${HOME}/sds/sd17d003/Anamaria/splicing/data/folds/sequences_human.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/sequences_human_hg19_sorted.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/sequences_human.bed.gz
+  organism="human"
 elif [[ $species == 'Mus_musculus' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/splicing/data/folds/sequences_mouse.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/sequences_mouse.bed.gz
+  organism="mouse"
+elif [[ $species == 'Rattus_norvegicus' ]]; then
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/fold_assignments/rn5_folds.bed
+  organism="rat"
 fi
 
-python scripts/convert_borzoi_folds.py \
+python -u scripts/convert_borzoi_folds.py \
     --seq-len 131072 \
     --input ${folds} \
-    --strip-chr-names \
-    --output-dir ${out_dir}/${species}/folds_100kb > logs/convert_borzoi_folds_100kb_${species}.log
+    --organism ${organism} \
+    --output-dir ${out_dir}/${species}/folds_100kb_ \
+    --resolve-overlap-conflicts \
+    --strip-chr-names > logs/convert_borzoi_folds_100kb_${species}_.log
 ```
 
 # Finetune
@@ -102,7 +109,7 @@ python scripts/convert_borzoi_folds.py \
 Finetune heads only, single species
 
 ```bash
-python scripts/finetune_splice.py --mode linear-probe \
+python -u scripts/finetune_splice.py --mode linear-probe \
     --genome ${fa_dir}/${species}.fa \
     --annotation-parquet ${data_dir}/${species}/splice_sites.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
@@ -114,13 +121,13 @@ python scripts/finetune_splice.py --mode linear-probe \
 Finetune model for multiple species
 
 ```bash
-python scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
+python -u scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
 ```
 
 # Evaluate
 
 ```bash
-python scripts/evaluate_splice.py \
+python -u scripts/evaluate_splice.py \
     --checkpoint "${out_dir}" \
     --bed "${data_dir}/${species}/folds/FOLD_0/test.bed" "${data_dir}/${species}/folds/FOLD_0/test.bed" \
     --gtf-sites "${data_dir}/${species}/splice_sites_gtf.parquet" "${data_dir}/${species}/splice_sites_gtf.parquet" \

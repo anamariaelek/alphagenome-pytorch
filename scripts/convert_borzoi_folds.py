@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+from collections import Counter
 from collections import defaultdict
 from pathlib import Path
 from typing import NamedTuple
@@ -127,6 +128,31 @@ MM10_CHROMOSOME_LENGTHS = {
     "chrY": 91744698,
     "chr18": 90702639,
     "chr19": 61431566,
+}
+
+# from https://hgdownload.cse.ucsc.edu/goldenPath/rn5/bigZips/rn5.chrom.sizes
+RN5_CHROMOSOME_LENGTHS = {
+    "chr1": 290094216,
+    "chr2": 285068071,
+    "chr3": 183740530,
+    "chr4": 248343840,
+    "chr5": 177180328,
+    "chr6": 156897508,
+    "chr7": 143501887,
+    "chr8": 132457389,
+    "chr9": 121549591,
+    "chr10": 112200500,
+    "chr11": 93518069,
+    "chr12": 54450796,
+    "chr13": 118718031,
+    "chr14": 115151701,
+    "chr15": 114627140,
+    "chr16": 90051983,
+    "chr17": 92503511,
+    "chr18": 87229863,
+    "chr19": 72914587,
+    "chr20": 57791882,
+    "chrX": 154597545
 }
 
 # AlphaGenome fold configurations (from datasets.py)
@@ -234,6 +260,85 @@ def strip_chr_prefix(chrom: str, strip_chr_names: bool) -> str:
     return chrom
 
 
+def _fold_sort_key(fold: str) -> tuple[int, str]:
+    """Sort fold labels deterministically (fold0, fold1, ...)."""
+    suffix = fold[4:] if fold.startswith("fold") else fold
+    try:
+        return (int(suffix), fold)
+    except ValueError:
+        return (10_000, fold)
+
+
+def resolve_cross_fold_overlaps(
+    regions: list[Region],
+) -> tuple[list[Region], dict[str, int]]:
+    """Resolve overlapping windows that carry conflicting fold labels.
+
+    Regions are clustered by overlapping genomic windows on each chromosome.
+    If a cluster contains multiple fold labels, all regions in that cluster are
+    reassigned to one fold (majority vote, deterministic tie-break by fold id).
+
+    This lowers train/eval leakage removals for orthology-projected folds where
+    nearby loci can inherit different fold labels after mapping.
+    """
+    by_chrom: dict[str, list[Region]] = defaultdict(list)
+    for r in regions:
+        by_chrom[r.chrom].append(r)
+
+    reassigned: list[Region] = []
+    stats = {
+        "clusters_total": 0,
+        "clusters_conflicting": 0,
+        "regions_reassigned": 0,
+    }
+
+    for chrom, chrom_regions in by_chrom.items():
+        chrom_regions.sort(key=lambda r: (r.start, r.end))
+
+        cluster: list[Region] = []
+        cluster_end = -1
+
+        def flush_cluster(cluster_regions: list[Region]) -> None:
+            if not cluster_regions:
+                return
+
+            stats["clusters_total"] += 1
+            fold_counts = Counter(r.fold for r in cluster_regions)
+
+            winner = sorted(
+                fold_counts.items(),
+                key=lambda kv: (-kv[1], _fold_sort_key(kv[0])),
+            )[0][0]
+
+            if len(fold_counts) > 1:
+                stats["clusters_conflicting"] += 1
+
+            for r in cluster_regions:
+                if r.fold != winner:
+                    stats["regions_reassigned"] += 1
+                reassigned.append(
+                    Region(chrom=r.chrom, start=r.start, end=r.end, fold=winner)
+                )
+
+        for r in chrom_regions:
+            if not cluster:
+                cluster = [r]
+                cluster_end = r.end
+                continue
+
+            if r.start < cluster_end:
+                cluster.append(r)
+                cluster_end = max(cluster_end, r.end)
+            else:
+                flush_cluster(cluster)
+                cluster = [r]
+                cluster_end = r.end
+
+        flush_cluster(cluster)
+
+    return reassigned, stats
+
+
 def build_interval_index(
     regions: list[Region],
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
@@ -338,13 +443,14 @@ def convert_borzoi_to_alphagenome(
     verbose: bool = True,
     seq_length: int = None,
     strip_chr_names: bool = False,
+    resolve_overlap_conflicts: bool = False,
 ) -> dict[str, dict[str, int]]:
     """Convert Borzoi folds to AlphaGenome format.
 
     Args:
         input_path: Path to Borzoi sequences BED file.
         output_dir: Output directory for fold files.
-        organism: Organism name ('human' or 'mouse').
+        organism: Organism name ('human', 'mouse', or 'rat').
         verbose: Print progress information.
         strip_chr_names: If True, remove leading 'chr' from chromosome names.
 
@@ -356,6 +462,8 @@ def convert_borzoi_to_alphagenome(
         chrom_lengths = HG19_CHROMOSOME_LENGTHS
     elif organism.lower() == "mouse":
         chrom_lengths = MM10_CHROMOSOME_LENGTHS
+    elif organism.lower() == "rat":
+        chrom_lengths = RN5_CHROMOSOME_LENGTHS
     else:
         raise ValueError(f"Unknown organism: {organism}")
 
@@ -394,6 +502,23 @@ def convert_borzoi_to_alphagenome(
                 )
                 ag_regions.append(ag_r)
         alphagenome_regions_by_fold[fold] = ag_regions
+
+    if resolve_overlap_conflicts:
+        all_regions = [r for rs in alphagenome_regions_by_fold.values() for r in rs]
+        resolved_regions, resolve_stats = resolve_cross_fold_overlaps(all_regions)
+
+        alphagenome_regions_by_fold = defaultdict(list)
+        for r in resolved_regions:
+            alphagenome_regions_by_fold[r.fold].append(r)
+
+        if verbose:
+            print("\nResolved cross-fold overlap conflicts before splitting:")
+            print(f"  Clusters total: {resolve_stats['clusters_total']}")
+            print(f"  Conflicting clusters: {resolve_stats['clusters_conflicting']}")
+            print(f"  Regions reassigned: {resolve_stats['regions_reassigned']}")
+            print("  Regions per fold after resolution:")
+            for fold in sorted(alphagenome_regions_by_fold.keys(), key=_fold_sort_key):
+                print(f"    {fold}: {len(alphagenome_regions_by_fold[fold])}")
 
     # Process each model fold
     for model_fold, config in ALPHAGENOME_FOLDS.items():
@@ -491,7 +616,7 @@ def main():
     parser.add_argument(
         "--organism",
         "-r",
-        choices=["human", "mouse"],
+        choices=["human", "mouse", "rat"],
         default="human",
         help="Organism name (default: human)",
     )
@@ -506,6 +631,14 @@ def main():
         action="store_true",
         help="Remove 'chr' prefix from chromosome names in output BED files",
     )
+    parser.add_argument(
+        "--resolve-overlap-conflicts",
+        action="store_true",
+        help=(
+            "Reassign overlapping windows that have different fold labels to a "
+            "single fold before train/valid/test splitting"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -518,6 +651,7 @@ def main():
         verbose=not args.quiet,
         seq_length=args.seq_len,
         strip_chr_names=args.strip_chr_names,
+        resolve_overlap_conflicts=args.resolve_overlap_conflicts,
     )
 
     # Print summary

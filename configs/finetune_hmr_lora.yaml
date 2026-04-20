@@ -17,29 +17,38 @@
 
 species:
   - name: human
-    genome: /home/elek/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
-    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
-    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
-    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/valid.bed
+    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 0
 
   - name: mouse
-    genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
-    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
-    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/train.bed
-    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/valid.bed
+    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 1
+
+  - name: rat
+    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
+    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites.parquet
+    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
+    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/folds_100kb/FOLD_0_subset/valid.bed
+    organism_index: 2
 
 classification_head_init:
   0: 0   # new organism 0 from pretrained organism 0
   1: 1   # new organism 1 from pretrained organism 1
+  2: 1   # new organism 2 from pretrained organism 1
 
 # ---------------------------------------------------------------------------
 # Pretrained weights
 # ---------------------------------------------------------------------------
-pretrained_weights: /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+pretrained_weights: /home/hd/hd_hd/hd_mf354/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
 
 # ---------------------------------------------------------------------------
 # Training mode: linear-probe | lora | full
@@ -72,7 +81,7 @@ lora_targets: q_proj,v_proj
 # ---------------------------------------------------------------------------
 epochs: 20
 batch_size: 4
-gradient_accumulation_steps: 64  # effective batch = batch_size * accum * gpus
+gradient_accumulation_steps: 64   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -88,6 +97,7 @@ max_grad_norm: 1.0             # gradient clipping (0 to disable)
 # ---------------------------------------------------------------------------
 num_workers: 6
 use_amp: true              # set false to disable AMP
+compile: true              # torch.compile for fused kernels
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -100,8 +110,8 @@ log_every: 10
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
-output_dir: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-run_name: 132kb_lora
+output_dir: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+run_name: 132kb_lora           # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

@@ -18,6 +18,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from alphagenome_pytorch.extensions.finetuning.distributed import is_main_process
+from alphagenome_pytorch.utils.paths import expand_path
 
 
 def atomic_torch_save(obj: Any, path: Path | str) -> None:
@@ -188,6 +189,8 @@ def load_checkpoint(
     Returns:
         Checkpoint dict with metadata (epoch, val_loss, best_val_loss, wandb_run_id, etc.).
     """
+    # Expand ~ and environment variables in path
+    path = expand_path(str(path))
     checkpoint = torch.load(path, map_location=device, weights_only=False)
 
     # Load entire model state (trunk + heads).

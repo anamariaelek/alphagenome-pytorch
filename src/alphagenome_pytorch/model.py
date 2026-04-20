@@ -9,6 +9,7 @@ from torch.utils.checkpoint import checkpoint
 from . import layers, convolutions, attention, embeddings, heads
 from .config import DtypePolicy
 from alphagenome_pytorch.utils.splicing import generate_splice_site_positions
+from alphagenome_pytorch.utils.paths import expand_path
 
 class SequenceEncoder(nn.Module):
     """Encodes DNA sequence to trunk representation. Outputs NCL format (B, C, S)."""
@@ -346,6 +347,9 @@ class AlphaGenome(nn.Module):
         """
         if dtype_policy is None:
             dtype_policy = DtypePolicy.default()
+
+        # Expand ~ and environment variables in path
+        path = expand_path(str(path))
 
         # Create model and move to target device first for efficient weight loading.
         # This allows loading state_dict directly to the target device, avoiding

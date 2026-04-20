@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import torch
 
+from alphagenome_pytorch.utils.paths import expand_path, expand_paths_in_dict
+
 
 def _normalize_species_n_conditions(species_n_conditions):
     """Normalize species_n_conditions to dict[int, int].
@@ -40,10 +42,18 @@ def load_model_for_inference(checkpoint_path, device, strict=True):
     Loads an AlphaGenome model for inference from either:
       - a fine-tuned checkpoint directory (with best_model.pth + config.json)
       - a single .pth file (pretrained or fine-tuned)
+    
+    Supports path expansion for:
+      - ~ (home directory)
+      - $VAR and ${VAR} (environment variables)
+    
     Returns (model, config_dict or None)
     """
     from alphagenome_pytorch import AlphaGenome
     import yaml
+    
+    # Expand checkpoint path for ~ and environment variables
+    checkpoint_path = expand_path(checkpoint_path)
     p = Path(checkpoint_path)
 
     # If a directory is given, look for best_model.pth and config.json/yaml
@@ -80,6 +90,14 @@ def load_model_for_inference(checkpoint_path, device, strict=True):
         elif cfg_path.suffix in (".yaml", ".yml"):
             with open(cfg_path) as f:
                 cfg = yaml.safe_load(f)
+        
+        # Expand paths in loaded config
+        if cfg is not None:
+            path_keys = {
+                "genome", "annotation_parquet", "usage_parquet",
+                "train_bed", "val_bed", "test_bed", "pretrained_weights"
+            }
+            cfg = expand_paths_in_dict(cfg, path_keys)
 
     # Load checkpoint
     ckpt = None
@@ -96,6 +114,14 @@ def load_model_for_inference(checkpoint_path, device, strict=True):
             if key in ckpt:
                 cfg = ckpt[key]
                 break
+        
+        # Expand paths in config from checkpoint
+        if cfg is not None:
+            path_keys = {
+                "genome", "annotation_parquet", "usage_parquet",
+                "train_bed", "val_bed", "test_bed", "pretrained_weights"
+            }
+            cfg = expand_paths_in_dict(cfg, path_keys)
 
     # If still no config, try to infer if this is a fine-tuned checkpoint
     is_finetuned = False

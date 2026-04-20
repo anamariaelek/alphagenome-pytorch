@@ -434,6 +434,12 @@ def convert_spliser_dir_to_usage_parquet(
         df = adjust_splice_site_position(df)
         print("done.")
 
+        # Build condition key from tissue/timepoint before transformation
+        condition_key = f"{tissue}_{timepoint}"
+        all_condition_keys.add(condition_key)
+        all_tissues.add(tissue)
+        all_timepoints.add(timepoint)
+
         # Step 4: Convert to usage-parquet format (in-memory, no file write)
         df_out = convert_usage_to_parquet(
             df,
@@ -445,10 +451,10 @@ def convert_spliser_dir_to_usage_parquet(
             min_alpha=min_alpha,
             min_coverage=min_coverage,
         )
-        # Collect condition keys for metadata
-        all_condition_keys.update(df["Tissue"].astype(str) + "_" + df["Timepoint"].astype(str))
-        all_tissues.add(tissue)
-        all_timepoints.add(timepoint)
+
+        # Keep the Condition_Key column for later remapping (drop the incorrect Condition index)
+        df_out = df_out.drop(columns=["Condition"])
+        df_out["Condition_Key"] = condition_key
 
         # Write to a temporary Parquet file
         temp_file = Path(temp_dir.name) / f"chunk_{idx}.parquet"
@@ -465,6 +471,11 @@ def convert_spliser_dir_to_usage_parquet(
     # Rebuild condition_labels
     all_condition_keys = sorted(all_condition_keys)
     condition_labels = {cond: idx for idx, cond in enumerate(all_condition_keys)}
+    # Map Condition_Key to proper Condition index
+    df_final["Condition"] = df_final["Condition_Key"].map(condition_labels)
+    df_final = df_final.drop(columns=["Condition_Key"])
+    # Reorder columns to canonical order
+    df_final = df_final[["Chromosome", "Position", "SSE", "Alpha", "Beta", "Label", "Condition"]]
     # Write final Parquet and JSON
     parquet_path = Path(output_path)
     df_final.to_parquet(parquet_path, index=False, compression=None if compression=="none" else compression)

@@ -44,6 +44,7 @@ from alphagenome_pytorch.extensions.finetuning.adapters import (
     unfreeze_norm_layers,
 )
 from alphagenome_pytorch.extensions.finetuning.heads import create_finetuning_head
+from alphagenome_pytorch.utils.paths import expand_path
 
 
 @dataclass
@@ -151,7 +152,8 @@ def load_trunk(
         >>> model = AlphaGenome()
         >>> model = load_trunk(model, 'alphagenome_pretrained.pt')
     """
-    weights_path = str(weights_path)
+    # Expand ~ and environment variables in path
+    weights_path = expand_path(str(weights_path))
     if weights_path.endswith('.safetensors'):
         try:
             from safetensors.torch import load_file as _safetensors_load
@@ -306,7 +308,7 @@ def prepare_for_transfer(
         # Handle track_means: can be None, tensor, or path
         track_means = head_config.get('track_means')
         if isinstance(track_means, (str, Path)):
-            track_means = torch.load(track_means, weights_only=True)
+            track_means = torch.load(expand_path(str(track_means)), weights_only=True)
 
         head = create_finetuning_head(
             assay_type=head_config['modality'],
