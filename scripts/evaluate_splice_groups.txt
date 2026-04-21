@@ -1,0 +1,12 @@
+132kb_mouse_lora	human
+132kb_mouse_lora	mouse
+132kb_mouse_lora	rat
+132kb_human_lora	human
+132kb_human_lora	mouse
+132kb_human_lora	rat
+132kb_lora	human
+132kb_lora	mouse
+132kb_lora	rat
+524kb_lora	human
+524kb_lora	mouse
+524kb_lora	rat

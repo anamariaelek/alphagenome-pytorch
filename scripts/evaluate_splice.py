@@ -898,6 +898,13 @@ def collect_predictions(
 
     # Usage head for this organism (may be None if not available)
     usage_head = usage_heads.get(organism_index)
+    
+    # For usage head inference, we need the organism index of the usage head, not the data
+    # Create a tensor with the usage head's organism index for all samples in batch
+    usage_org_idx_t = None
+    if usage_head is not None:
+        # Will be broadcast to batch size when needed
+        usage_org_idx_template = torch.tensor([organism_index], dtype=torch.long, device=device)
 
     for batch in tqdm(loader, desc="  Inference", unit="batch"):
         seq = batch["sequence"].to(device)
@@ -919,9 +926,14 @@ def collect_predictions(
                 )
                 emb_1bp = out["embeddings_1bp"]  # (B, C, S) NCL format
 
+                # Create organism index tensor for usage head (use usage head's organism index, not data's)
+                batch_size = emb_1bp.shape[0]
+                usage_org_idx_t = usage_org_idx_template.expand(batch_size)
+
                 # Usage head expects channels_last=True even with NCL input
+                # IMPORTANT: Pass the usage head's organism index, not the data's organism index
                 usage_preds = usage_head(
-                    emb_1bp, org_idx_t, channels_last=True
+                    emb_1bp, usage_org_idx_t, channels_last=True
                 )["predictions"].float()  # (B, S, n_cond)
             else:
                 usage_preds = None
@@ -1044,17 +1056,31 @@ def compute_usage_metrics(usage_per_cond: dict) -> dict:
 
     n_obs_total = sum(len(data["pred"]) for data in usage_per_cond.values())
 
+    all_pred: list[np.ndarray] = []
+    all_true: list[np.ndarray] = []
     rs: list[float] = []
     for data in usage_per_cond.values():
         pred = np.array(data["pred"], dtype=np.float32)
         true = np.array(data["true"], dtype=np.float32)
+        all_pred.append(pred)
+        all_true.append(true)
         if len(pred) < 2 or pred.std() < 1e-8 or true.std() < 1e-8:
             continue
         r, _ = pearsonr(pred, true)
         rs.append(float(r))
 
+    # Pooled (global) Pearson r across all observations
+    pooled_r = float("nan")
+    if all_pred:
+        pool_pred = np.concatenate(all_pred)
+        pool_true = np.concatenate(all_true)
+        if len(pool_pred) >= 2 and pool_pred.std() > 1e-8 and pool_true.std() > 1e-8:
+            pooled_r, _ = pearsonr(pool_pred, pool_true)
+            pooled_r = float(pooled_r)
+
     if not rs:
         return {
+            "usage_pearson_r": pooled_r,
             "usage_mean_pearson_r": float("nan"),
             "usage_median_pearson_r": float("nan"),
             "usage_n_conditions_evaluated": 0,
@@ -1063,6 +1089,7 @@ def compute_usage_metrics(usage_per_cond: dict) -> dict:
         }
 
     return {
+        "usage_pearson_r": pooled_r,
         "usage_mean_pearson_r": float(np.mean(rs)),
         "usage_median_pearson_r": float(np.median(rs)),
         "usage_n_conditions_evaluated": len(rs),
@@ -1098,6 +1125,7 @@ def compute_usage_metrics_from_stats(usage_stats: dict | None) -> dict:
     """Compute usage metrics from cached sufficient statistics."""
     if not usage_stats or len(usage_stats.get("n", [])) == 0:
         return {
+            "usage_pearson_r": float("nan"),
             "usage_mean_pearson_r": float("nan"),
             "usage_median_pearson_r": float("nan"),
             "usage_n_conditions_evaluated": 0,
@@ -1115,8 +1143,20 @@ def compute_usage_metrics_from_stats(usage_stats: dict | None) -> dict:
     rs = _pearson_from_sufficient_stats(n, sum_pred, sum_true, sum_pred2, sum_true2, sum_prod)
     valid_rs = rs[np.isfinite(rs)]
 
+    # Pooled (global) Pearson r: sum sufficient statistics across all conditions
+    pooled_r_arr = _pearson_from_sufficient_stats(
+        np.array([n.sum()]),
+        np.array([sum_pred.sum()]),
+        np.array([sum_true.sum()]),
+        np.array([sum_pred2.sum()]),
+        np.array([sum_true2.sum()]),
+        np.array([sum_prod.sum()]),
+    )
+    pooled_r = float(pooled_r_arr[0]) if np.isfinite(pooled_r_arr[0]) else float("nan")
+
     if valid_rs.size == 0:
         return {
+            "usage_pearson_r": pooled_r,
             "usage_mean_pearson_r": float("nan"),
             "usage_median_pearson_r": float("nan"),
             "usage_n_conditions_evaluated": 0,
@@ -1125,6 +1165,7 @@ def compute_usage_metrics_from_stats(usage_stats: dict | None) -> dict:
         }
 
     return {
+        "usage_pearson_r": pooled_r,
         "usage_mean_pearson_r": float(np.mean(valid_rs)),
         "usage_median_pearson_r": float(np.median(valid_rs)),
         "usage_n_conditions_evaluated": int(valid_rs.size),
@@ -1722,20 +1763,25 @@ def print_metrics(org_name: str, cls_m: dict, usage_m: dict | None, logger: logg
     log_func(sep)
     log_func(f"  {org_name.upper()} RESULTS")
     log_func(sep)
-    log_func(f"  Positions evaluated : {cls_m['n_positions']:>12,}")
-    log_func(f"  Positive rate       : {cls_m['positive_rate']:>12.4%}  (splice / all)")
-    log_func(f"\n  Classification AUPRC")
-    log_func(f"  {'Binary (splice vs background)':<38s} {cls_m['binary_auprc']:.4f}")
-    log_func(f"  {'Mean per-class AUPRC':<38s} {cls_m['mean_splice_class_auprc']:.4f}")
-    for name in SPLICE_CLASS_NAMES:
-        if name in cls_m["per_class_auprc"]:
-            auprc = cls_m["per_class_auprc"][name]
-            n = cls_m["per_class_n_positives"][name]
-            log_func(f"    {name:<36s} {auprc:.4f}  (n={n:,})")
+    
+    # Only print classification metrics if cls_m is not empty
+    if cls_m:
+        log_func(f"  Positions evaluated : {cls_m['n_positions']:>12,}")
+        log_func(f"  Positive rate       : {cls_m['positive_rate']:>12.4%}  (splice / all)")
+        log_func(f"\n  Classification AUPRC")
+        log_func(f"  {'Binary (splice vs background)':<38s} {cls_m['binary_auprc']:.4f}")
+        log_func(f"  {'Mean per-class AUPRC':<38s} {cls_m['mean_splice_class_auprc']:.4f}")
+        for name in SPLICE_CLASS_NAMES:
+            if name in cls_m["per_class_auprc"]:
+                auprc = cls_m["per_class_auprc"][name]
+                n = cls_m["per_class_n_positives"][name]
+                log_func(f"    {name:<36s} {auprc:.4f}  (n={n:,})")
 
     if usage_m and usage_m.get("usage_n_conditions_evaluated", 0) > 0:
+        # Add newline before usage section only if we printed classification metrics
+        prefix = "\n  " if cls_m else "  "
         log_func(
-            f"\n  Usage Pearson r  (evaluated on "
+            f"{prefix}Usage Pearson r  (evaluated on "
             f"{usage_m['usage_n_conditions_evaluated']} / "
             f"{usage_m['usage_n_conditions_total']} conditions, "
             f"{usage_m['usage_n_observations']:,} observations)"
@@ -1743,7 +1789,8 @@ def print_metrics(org_name: str, cls_m: dict, usage_m: dict | None, logger: logg
         log_func(f"  {'Mean r':<38s} {usage_m['usage_mean_pearson_r']:.4f}")
         log_func(f"  {'Median r':<38s} {usage_m['usage_median_pearson_r']:.4f}")
     elif usage_m:
-        log_func("\n  Usage: no valid conditions found (too few observations per condition)")
+        prefix = "\n  " if cls_m else "  "
+        log_func(f"{prefix}Usage: no valid conditions found (too few observations per condition)")
 
 
 
@@ -1910,6 +1957,38 @@ def main() -> None:
                 require_usage_arrays=need_usage_arrays,
             )
             seq_len = model_cfg.get("sequence_length", 131_072)
+            
+            # Reconstruct usage_results from saved files
+            usage_results: dict[str, tuple[dict, str]] = {}
+            # Check for cross-species usage files (usage_{org_name}_from_*.npz)
+            for usage_file in out_dir.glob(f"usage_{org_name}_from_*.npz"):
+                suffix = usage_file.stem.replace(f"usage_{org_name}_", "")
+                source_name = suffix.replace("from_", "")
+                
+                # Load usage data directly from NPZ file
+                u = np.load(usage_file)
+                loaded_usage_per_cond: dict = {}
+                if "cond_ids" in u:
+                    cond_ids = u["cond_ids"].astype(np.int32, copy=False)
+                    pred = u["pred"].astype(np.float32, copy=False)
+                    true = u["true"].astype(np.float32, copy=False)
+                    if cond_ids.size > 0:
+                        order = np.argsort(cond_ids, kind="stable")
+                        cond_sorted = cond_ids[order]
+                        pred_sorted = pred[order]
+                        true_sorted = true[order]
+                        uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
+                        for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
+                            loaded_usage_per_cond[int(c)] = {
+                                "pred": pred_sorted[s:s + k],
+                                "true": true_sorted[s:s + k],
+                            }
+                
+                usage_results[suffix] = (loaded_usage_per_cond, source_name)
+            
+            # If no cross-species files, use the standard usage file
+            if not usage_results and usage_per_cond:
+                usage_results[""] = (usage_per_cond, org_name)
 
         elif args.skip_predictions:
             logger.info(f"[{org_name}] Loading saved predictions …")
@@ -1919,6 +1998,38 @@ def main() -> None:
                 require_usage_arrays=need_usage_arrays,
             )
             seq_len = model_cfg.get("sequence_length", 131_072)
+            
+            # Reconstruct usage_results from saved files
+            usage_results: dict[str, tuple[dict, str]] = {}
+            # Check for cross-species usage files (usage_{org_name}_from_*.npz)
+            for usage_file in out_dir.glob(f"usage_{org_name}_from_*.npz"):
+                suffix = usage_file.stem.replace(f"usage_{org_name}_", "")
+                source_name = suffix.replace("from_", "")
+                
+                # Load usage data directly from NPZ file
+                u = np.load(usage_file)
+                loaded_usage_per_cond: dict = {}
+                if "cond_ids" in u:
+                    cond_ids = u["cond_ids"].astype(np.int32, copy=False)
+                    pred = u["pred"].astype(np.float32, copy=False)
+                    true = u["true"].astype(np.float32, copy=False)
+                    if cond_ids.size > 0:
+                        order = np.argsort(cond_ids, kind="stable")
+                        cond_sorted = cond_ids[order]
+                        pred_sorted = pred[order]
+                        true_sorted = true[order]
+                        uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
+                        for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
+                            loaded_usage_per_cond[int(c)] = {
+                                "pred": pred_sorted[s:s + k],
+                                "true": true_sorted[s:s + k],
+                            }
+                
+                usage_results[suffix] = (loaded_usage_per_cond, source_name)
+            
+            # If no cross-species files, use the standard usage file
+            if not usage_results and usage_per_cond:
+                usage_results[""] = (usage_per_cond, org_name)
         else:
             # -- Load annotation (for gene filtering if provided) ----------------
             seq_len = model_cfg.get("sequence_length", 131_072)
@@ -2105,7 +2216,7 @@ def main() -> None:
                     usage_path = out_dir / f"usage_{result_name}.npz"
                     
                     # Use save_predictions to create usage file, extract just the usage part
-                    with tempfile.TemporaryDirectory() as tmpdir:
+                    with tempfile.TemporaryDirectory(dir=out_dir) as tmpdir:
                         tmpdir_path = Path(tmpdir)
                         save_predictions(tmpdir_path, "temp", cls_probs, cls_labels, usage_per_cond)
                         # Move only usage file
@@ -2113,6 +2224,7 @@ def main() -> None:
                         if temp_usage.exists():
                             shutil.move(str(temp_usage), str(usage_path))
                             logger.info(f"  Saved: {usage_path}")
+                            
             
             usage_stats = {}
 
@@ -2267,7 +2379,7 @@ def main() -> None:
     if len(species_specs) > 1:
         keys_to_avg = [
             "binary_auprc", "mean_splice_class_auprc",
-            "usage_mean_pearson_r", "usage_median_pearson_r",
+            "usage_pearson_r", "usage_mean_pearson_r", "usage_median_pearson_r",
         ]
         logger.info(f"{'='*62}")
         logger.info("  MACRO-AVERAGE ACROSS SPECIES")

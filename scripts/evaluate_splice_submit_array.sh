@@ -1,21 +1,22 @@
 #!/bin/bash
-#SBATCH --job-name=eval-524-human
+#SBATCH --job-name=eval-splice
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
-#SBATCH --mem=120gb
-#SBATCH --time=5:00:00
-#SBATCH --output=slurm_%j.log
-#SBATCH --error=slurm_%j.err
+#SBATCH --mem=90gb
+#SBATCH --time=24:00:00
+#SBATCH --array=1-12
+#SBATCH --output=slurm_%j_%A_%a.log
+#SBATCH --error=slurm_%j%A_%a.err
 # 
 # Helix GPU options:
 # - A40 (48 GB):   --gres=gpu:A40:1
 # - A100 (40 GB):  --gres=gpu:A100:1
 # - A100 (80 GB):  --gres=gpu:A100:1
 # - H200 (141 GB): --gres=gpu:H200:1
-# 
+#
 # 132kb models:
 #  - inference: 25GB for batch 4
 # 524kb models:
@@ -60,10 +61,14 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=524kb_lora
+
+# Get the model and eval species for this array task
+# (first column=model, second column=eval species)
+GROUP=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "${WORK_DIR}/scripts/evaluate_splice_groups.txt")
+RUN=$(echo "$GROUP" | cut -f1)
+EVAL_SPECIES=$(echo "$GROUP" | cut -f2)
 
 # Evaluation settings
-EVAL_SPECIES="human"
 DATA_CONFIG="${DIR}/data/data_config.json"
 OUT_DIR=${DIR}/${RUN}/preds_${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
@@ -74,9 +79,9 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --eval-species ${EVAL_SPECIES} \
     --per-tissue \
     --overwrite \
-    --batch-size 2 \
+    --batch-size 4 \
     --device cuda \
-    --max-windows 1000 \
+    --max-windows 5000 \
     --seed 1950 \
     --output-dir ${OUT_DIR}
 
