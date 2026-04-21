@@ -60,7 +60,7 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=524kb_lora
+RUN=524kb_human_mouse
 
 # Evaluation settings
 EVAL_SPECIES="human"

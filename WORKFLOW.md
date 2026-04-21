@@ -95,13 +95,23 @@ elif [[ $species == 'Rattus_norvegicus' ]]; then
   organism="rat"
 fi
 
+# Prepare folds
 python -u scripts/convert_borzoi_folds.py \
     --seq-len 131072 \
     --input ${folds} \
     --organism ${organism} \
-    --output-dir ${out_dir}/${species}/folds_100kb_ \
+    --output-dir ${out_dir}/data/${species}/folds_100kb \
     --resolve-overlap-conflicts \
-    --strip-chr-names > logs/convert_borzoi_folds_100kb_${species}_.log
+    --strip-chr-names > logs/convert_borzoi_folds_100kb_${species}.log
+
+# Subset folds with 50% overlap
+mkdir -p ${out_dir}/data/${species}/folds_100kb/FOLD_0_subset
+for fn in train test valid
+do
+    IN_BED=${out_dir}/data/${species}/folds_100kb/FOLD_0/${fn}.bed
+    OUT_BED=${out_dir}/data/${species}/folds_100kb/FOLD_0_subset/${fn}.bed
+    python scripts/subset_nonoverlapping_bed.py $IN_BED 50 > $OUT_BED
+done
 ```
 
 # Finetune

@@ -280,10 +280,16 @@ class AlphaGenome(nn.Module):
             splice_usage_tracks_per_organism = (734, 180)
             splice_junction_tracks_per_organism = (367, 90)
         else:
+            # For num_organisms > 2, extend with mouse (organism 1) defaults.
+            # These placeholder heads are typically removed during finetuning.
             warnings.warn(
-                "AlphaGenome currently only supports num_organisms in {1, 2}. "
-                "For now, splicing heads use hardcoded human/mouse track configs."
+                f"AlphaGenome with num_organisms={num_organisms} > 2 is not officially supported. "
+                "Splice heads will use extended defaults (last organism = mouse config). "
+                "For finetuning, these heads are typically removed and replaced."
             )
+            # Extend: human (734, 367), mouse (180, 90), then repeat mouse for additional organisms
+            splice_usage_tracks_per_organism = (734, 180) + (180,) * (num_organisms - 2)
+            splice_junction_tracks_per_organism = (367, 90) + (90,) * (num_organisms - 2)
 
         self.splice_sites_classification_head = heads.SpliceSitesClassificationHead(
             in_channels=TRUNK_DIM, num_organisms=num_organisms

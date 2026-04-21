@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_hm_lora.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_hmr_lora.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

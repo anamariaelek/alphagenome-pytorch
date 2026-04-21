@@ -17,27 +17,27 @@
 
 species:
   - name: human
-    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
-    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
-    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
-    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
-    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/valid.bed
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 0
 
   - name: mouse
-    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
-    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
-    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/train.bed
-    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/valid.bed
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 1
 
   - name: rat
-    genome: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
-    annotation_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites.parquet
-    usage_parquet: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
-    train_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/folds_100kb/FOLD_0_subset/train.bed
-    val_bed: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/folds_100kb/FOLD_0_subset/valid.bed
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/folds_100kb/FOLD_0_subset/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/folds_100kb/FOLD_0_subset/valid.bed
     organism_index: 2
 
 classification_head_init:
@@ -48,7 +48,7 @@ classification_head_init:
 # ---------------------------------------------------------------------------
 # Pretrained weights
 # ---------------------------------------------------------------------------
-pretrained_weights: /home/hd/hd_hd/hd_mf354/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+pretrained_weights: $HOME/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
 
 # ---------------------------------------------------------------------------
 # Training mode: linear-probe | lora | full
@@ -110,8 +110,8 @@ log_every: 10
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
-output_dir: /home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 132kb_lora           # defaults to timestamp
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+run_name: 132kb_human_mouse_rat        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

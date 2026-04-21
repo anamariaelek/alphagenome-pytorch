@@ -666,37 +666,34 @@ def create_model(
     )
     print(f"Dtype policy: {dtype_policy}")
 
-    model = AlphaGenome(
-        gradient_checkpointing=args.gradient_checkpointing,
-        dtype_policy=dtype_policy,
-    )
-
-    # Load trunk weights (exclude heads so we replace them below)
-    model = load_trunk(model, args.pretrained_weights, exclude_heads=True)
-
-    # Freeze backbone first for non-full modes
-    if args.mode != "full":
-        for param in model.parameters():
-            param.requires_grad = False
-
-
-    # Remove all existing heads (including splice_sites_classification_head)
-    model = remove_all_heads(model)
-
-    # --- Classification head initialization mapping logic ---
+    # --- Calculate num_organisms and initialization mapping BEFORE creating model ---
     num_organisms = max(s["organism_index"] for s in args.species_specs) + 1
     # Parse mapping from config/args (dict: new_org_idx -> pretrained_org_idx)
     classification_head_init = getattr(args, "classification_head_init", None)
     if classification_head_init is None and hasattr(args, "classification_head_init_dict"):
         classification_head_init = args.classification_head_init_dict
 
-    # Load pretrained classification head weights.
     # Default: identity mapping (organism i → pretrained organism i).
     # Override via classification_head_init e.g. {0: 1} to init organism 0
     # from pretrained organism 1 (useful for cross-species transfer).
     if classification_head_init is None:
         classification_head_init = {i: i for i in range(num_organisms)}
 
+    print(f"Creating model with {num_organisms} organism(s)")
+    print(f"Organism initialization mapping: {classification_head_init}")
+
+    model = AlphaGenome(
+        num_organisms=num_organisms,
+        gradient_checkpointing=args.gradient_checkpointing,
+        dtype_policy=dtype_policy,
+    )
+
+    # Load trunk weights (exclude heads so we replace them below)
+    # Note: This will have missing keys for organism embeddings beyond pretrained num_organisms
+    model = load_trunk(model, args.pretrained_weights, exclude_heads=True)
+
+    # Initialize organism embeddings for new organisms from pretrained organisms
+    # This handles the case where we're adding rat (organism 2) from mouse (organism 1)
     import torch
     weights_path = args.pretrained_weights
     if weights_path.endswith('.safetensors'):
@@ -712,6 +709,46 @@ def create_model(
         state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)
         if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
             state_dict = state_dict['model_state_dict']
+    
+    # Get pretrained organism embeddings count
+    pretrained_organism_embed = state_dict.get('organism_embed.weight')
+    if pretrained_organism_embed is not None:
+        pretrained_num_organisms = pretrained_organism_embed.shape[0]
+        print(f"Pretrained model has {pretrained_num_organisms} organism(s)")
+        
+        # Initialize new organism embeddings from specified pretrained organisms
+        organism_embed_modules = [
+            ('organism_embed', model.organism_embed),
+            ('embedder_128bp.organism_embed', model.embedder_128bp.organism_embed),
+            ('embedder_1bp.organism_embed', model.embedder_1bp.organism_embed),
+            ('embedder_pair.organism_embed', model.embedder_pair.organism_embed),
+        ]
+        
+        for new_org_idx, pretrained_org_idx in classification_head_init.items():
+            if new_org_idx >= pretrained_num_organisms:
+                # This is a new organism that wasn't in the pretrained model
+                if pretrained_org_idx >= pretrained_num_organisms:
+                    print(f"[Warning] Cannot initialize organism {new_org_idx} from pretrained organism {pretrained_org_idx} "
+                          f"(pretrained model only has {pretrained_num_organisms} organisms)")
+                    continue
+                
+                print(f"Initializing organism {new_org_idx} embeddings from pretrained organism {pretrained_org_idx}")
+                for name, module in organism_embed_modules:
+                    pretrained_key = f'{name}.weight'
+                    if pretrained_key in state_dict:
+                        # Copy pretrained organism embedding to new organism
+                        module.weight.data[new_org_idx] = state_dict[pretrained_key][pretrained_org_idx].clone()
+
+    # Freeze backbone first for non-full modes
+    if args.mode != "full":
+        for param in model.parameters():
+            param.requires_grad = False
+
+
+    # Remove all existing heads (including splice_sites_classification_head)
+    model = remove_all_heads(model)
+
+    # Load pretrained classification head weights (state_dict already loaded above)
     head_prefix = "splice_sites_classification_head.conv."
     pretrained_head_weights = {k[len(head_prefix):]: v for k, v in state_dict.items() if k.startswith(head_prefix)}
 
@@ -719,7 +756,7 @@ def create_model(
     from alphagenome_pytorch.extensions.finetuning.heads import create_splice_classification_finetuning_head
     cls_head = create_splice_classification_finetuning_head(num_organisms=num_organisms)
 
-    # Copy pretrained weights for each organism according to the mapping
+    # Copy pretrained classification head weights for each organism according to the mapping
     if pretrained_head_weights:
         for new_org_idx, pretrained_org_idx in classification_head_init.items():
             try:

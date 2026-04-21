@@ -17,19 +17,19 @@
 
 species:
   - name: human
-    genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
-    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
-    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds_100kb/FOLD_0/train.bed
-    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds_100kb/FOLD_0/valid.bed
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds_100kb/FOLD_0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Homo_sapiens/folds_100kb/FOLD_0/valid.bed
     organism_index: 0
 
   - name: mouse
-    genome: /home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
-    usage_parquet: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
-    train_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds_100kb/FOLD_0/train.bed
-    val_bed: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds_100kb/FOLD_0/valid.bed
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds_100kb/FOLD_0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/Mus_musculus/folds_100kb/FOLD_0/valid.bed
     organism_index: 1
 
 classification_head_init:
@@ -39,7 +39,7 @@ classification_head_init:
 # ---------------------------------------------------------------------------
 # Pretrained weights
 # ---------------------------------------------------------------------------
-pretrained_weights: /home/elek/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+pretrained_weights: $HOME/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
 
 # ---------------------------------------------------------------------------
 # Training mode: linear-probe | lora | full
@@ -100,7 +100,7 @@ log_every: 20
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
-output_dir: /home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
 run_name: 132kb_linear
 save_every: 1
 

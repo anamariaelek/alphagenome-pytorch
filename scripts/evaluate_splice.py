@@ -2104,7 +2104,7 @@ def main() -> None:
                     else:
                         logger.info(f"[{org_name}] No overlapping usage conditions found with any trained species")
                 else:
-                    # Same-species or usage conditions from same organism_index
+                    # Same-species: first add the matching head
                     data_condition_indices, model_to_data_map = match_usage_conditions(
                         model_cfg, spec, logger=logger
                     )
@@ -2117,6 +2117,32 @@ def main() -> None:
                             f"[{org_name}] Using condition mapping: "
                             f"{len(condition_mapping)} matched conditions"
                         )
+
+                    # Also evaluate with all OTHER trained usage heads that have overlapping conditions
+                    all_cross_mappings = match_cross_species_usage_conditions(
+                        model_cfg, spec, logger=logger
+                    )
+                    for other_org_idx, other_cond_mapping in all_cross_mappings.items():
+                        if other_org_idx == org_idx:
+                            continue  # Already handled above
+                        source_spec = next(
+                            (s for s in model_cfg.get("species_specs", [])
+                             if s["organism_index"] == other_org_idx),
+                            None,
+                        )
+                        if source_spec:
+                            source_species = extract_species_from_path(
+                                source_spec.get("annotation_parquet", "")
+                            )
+                            source_name = next(
+                                (k for k, v in SPECIES_NAME_MAP.items() if v == source_species),
+                                f"org{other_org_idx}",
+                            )
+                            usage_head_configs[other_org_idx] = (other_cond_mapping, source_name)
+                            logger.info(
+                                f"[{org_name}] Will also evaluate with {source_name} usage head "
+                                f"(organism_index {other_org_idx}, {len(other_cond_mapping)} conditions)"
+                            )
 
             logger.info(f"[{org_name}] Building dataset from {bed_file} …")
             dataset = SpliceSiteDataset(
@@ -2188,8 +2214,10 @@ def main() -> None:
                         condition_mapping=condition_mapping,
                     )
                     
-                    # Create suffix for filenames
-                    if spec.get("cross_species", False):
+                    # Create suffix for filenames:
+                    # Use "from_{source_name}" whenever the head's organism_index differs
+                    # from the eval species (including additional heads in same-species evals).
+                    if usage_org_idx != org_idx or spec.get("cross_species", False):
                         suffix = f"from_{source_name}"
                     else:
                         suffix = ""

@@ -191,6 +191,26 @@ def load_trunk(
             filtered[k] = v
         state_dict = filtered
     
+    # Filter out parameters with shape mismatches (e.g., organism embeddings when num_organisms differs)
+    # This prevents RuntimeError when loading models with different num_organisms
+    model_state = model.state_dict()
+    filtered = {}
+    shape_mismatches = []
+    for k, v in state_dict.items():
+        if k in model_state:
+            if v.shape != model_state[k].shape:
+                shape_mismatches.append((k, v.shape, model_state[k].shape))
+                continue
+        filtered[k] = v
+    state_dict = filtered
+    
+    if shape_mismatches:
+        print(f"Skipped {len(shape_mismatches)} parameter(s) with shape mismatches:")
+        for name, ckpt_shape, model_shape in shape_mismatches[:5]:
+            print(f"  {name}: checkpoint {ckpt_shape} vs model {model_shape}")
+        if len(shape_mismatches) > 5:
+            print(f"  ... and {len(shape_mismatches) - 5} more")
+    
     # Load with strict=False to handle mismatches
     missing, unexpected = model.load_state_dict(state_dict, strict=strict)
     
