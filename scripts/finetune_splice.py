@@ -367,10 +367,11 @@ def parse_args() -> argparse.Namespace:
         if not isinstance(data, dict):
             parser.error("YAML config root must be a mapping/dictionary")
         
-        # Expand paths in config
+        # Expand paths in config (handle ~, $HOME, $VAR, etc.)
         path_keys = {
             "genome", "annotation_parquet", "usage_parquet",
-            "train_bed", "val_bed", "test_bed", "pretrained_weights"
+            "train_bed", "val_bed", "test_bed", "pretrained_weights",
+            "output_dir", "log_file"
         }
         data = expand_paths_in_dict(data, path_keys)
         

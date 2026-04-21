@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hm-132k-lora
+#SBATCH --job-name=ft-hmr-524k-lora
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
+#SBATCH --gres=gpu:1,gpumem_per_gpu:140GB
 #SBATCH --mem=140gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
@@ -60,14 +60,14 @@ if [ ! -f "${CONFIG}" ]; then
 fi
 
 # Read output_dir and run_name from config YAML
-OUTPUT_DIR=$(python -c "import yaml; c=yaml.safe_load(open('${CONFIG}')); print(c.get('output_dir','').rstrip('/'))")
+# Use Python to read and expand environment variables in paths
+OUTPUT_DIR=$(python -c "import yaml; import os; c=yaml.safe_load(open('${CONFIG}')); od=c.get('output_dir','').rstrip('/'); print(os.path.expandvars(os.path.expanduser(od)) if od else '')")
 RUN_NAME=$(python -c "import yaml; c=yaml.safe_load(open('${CONFIG}')); print(c.get('run_name',''))")
 
 # Fallback to timestamp if run_name is empty
 if [ -z "$RUN_NAME" ]; then
     RUN_NAME=$(date +%Y%m%d_%H%M%S)
 fi
-
 
 LOG_DIR="${OUTPUT_DIR}/${RUN_NAME}"
 mkdir -p "${LOG_DIR}"
