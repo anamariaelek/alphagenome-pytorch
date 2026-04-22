@@ -763,7 +763,7 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Log
     else:
         print(msg)
 
-    model = AlphaGenome(dtype_policy=dtype_policy)
+    model = AlphaGenome(num_organisms=num_organisms, dtype_policy=dtype_policy)
 
     # Load pretrained trunk weights (base model, no heads)
     model = load_trunk(model, cfg["pretrained_weights"], exclude_heads=True)
