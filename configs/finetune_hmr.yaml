@@ -20,24 +20,24 @@ species:
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/human/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/human/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/human/fold0_subset/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/human/fold0_subset/valid.bed
     organism_index: 0
 
   - name: mouse
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/mouse/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/mouse/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/mouse/fold0_subset/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/mouse/fold0_subset/valid.bed
     organism_index: 1
 
   - name: rat
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/rat/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/rat/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/rat/fold0_subset/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/rat/fold0_subset/valid.bed
     organism_index: 2
 
 classification_head_init:
@@ -80,8 +80,8 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 4
-gradient_accumulation_steps: 64   # effective batch = batch_size * accum * gpus
+batch_size: 2
+gradient_accumulation_steps: 128   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000

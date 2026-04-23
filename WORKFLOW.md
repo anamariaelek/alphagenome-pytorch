@@ -84,14 +84,14 @@ python -u scripts/convert_splice_sites_to_parquet.py \
 
 ```bash
 if [[ $species == 'Homo_sapiens' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/sequences_human_hg19_sorted.bed
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/sequences_human.bed.gz
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/data/sequences_human_hg19_sorted.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/data/sequences_human.bed.gz
   organism="human"
 elif [[ $species == 'Mus_musculus' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/sequences_mouse.bed.gz
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/data/sequences_mouse.bed.gz
   organism="mouse"
 elif [[ $species == 'Rattus_norvegicus' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/fold_assignments/rn5_folds.bed
+  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/results_genes/fold_assignments/rat_folds.bed
   organism="rat"
 fi
 

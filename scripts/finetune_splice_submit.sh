@@ -74,10 +74,6 @@ mkdir -p "${LOG_DIR}"
 LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/train_${LOG_TIMESTAMP}.log"
 
-# Redirect all stdout + stderr for the rest of this script to LOG_FILE.
-# Everything — shell echos, Python output from all ranks — ends up in one file.
-exec >> "${LOG_FILE}" 2>&1
-
 echo "Starting finetuning at $(date)"
 echo "Config: ${CONFIG}"
 echo "Log file: ${LOG_FILE}"
@@ -92,11 +88,13 @@ else
     RESUME="auto"
 fi
 
-# Run training — no tee needed; exec already redirects everything to LOG_FILE.
-python ${WORK_DIR}/scripts/finetune_splice.py \
+# Run training with timestamped log file
+# Python's setup_output_logging will handle the tee to LOG_FILE
+python -u ${WORK_DIR}/scripts/finetune_splice.py \
     --config ${CONFIG} \
     --compile \
-    --resume ${RESUME}
+    --resume ${RESUME} \
+    --log-file ${LOG_FILE}
 
 echo "---"
 echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}"

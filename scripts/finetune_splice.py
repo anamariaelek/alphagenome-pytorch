@@ -367,7 +367,7 @@ def parse_args() -> argparse.Namespace:
         if not isinstance(data, dict):
             parser.error("YAML config root must be a mapping/dictionary")
         
-        # Expand paths in config (handle ~, $HOME, $VAR, etc.)
+        # Expand paths in config
         path_keys = {
             "genome", "annotation_parquet", "usage_parquet",
             "train_bed", "val_bed", "test_bed", "pretrained_weights",
@@ -942,9 +942,11 @@ def main() -> None:
     total_steps = (args.epochs * len(train_loader)) // args.gradient_accumulation_steps
     scheduler = create_lr_scheduler(optimizer, args.warmup_steps, total_steps, schedule=args.lr_schedule)
     effective_batch_size = args.batch_size * args.gradient_accumulation_steps
+    steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
     print(f"Batch size: {args.batch_size}")
     print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
     print(f"Effective batch size: {effective_batch_size}")
+    print(f"Steps per epoch: {steps_per_epoch:,}")
     print(f"Total optimizer steps: {total_steps:,}")
     print(f"LR schedule: {args.lr_schedule} (warmup: {args.warmup_steps} steps)")
 
