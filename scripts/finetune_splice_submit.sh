@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hmr-524k-lora
+#SBATCH --job-name=ft-hmr
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:140GB
+#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
 #SBATCH --mem=140gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_hmr_lora.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_hmr.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

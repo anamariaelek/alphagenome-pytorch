@@ -44,12 +44,12 @@ pretrained_weights: $HOME/projects/alphagenome_ft_pytorch/checkpoints/model_fold
 # ---------------------------------------------------------------------------
 # Training mode: linear-probe | lora | full
 # ---------------------------------------------------------------------------
-mode: full
+mode: lora
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 524288
+sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Set coordinate base for usage parquet
@@ -61,7 +61,7 @@ usage_coord_base: 0
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16            # bfloat16 | float32
-gradient_checkpointing: false
+gradient_checkpointing: true
 
 lora_rank: 8
 lora_alpha: 16
@@ -71,8 +71,8 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 1
-gradient_accumulation_steps: 128   # effective batch = batch_size * accum * gpus
+batch_size: 4
+gradient_accumulation_steps: 64   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -86,21 +86,23 @@ max_grad_norm: 1.0             # gradient clipping (0 to disable)
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
-num_workers: 4
+num_workers: 6
 use_amp: true              # set false to disable AMP
+compile: true              # torch.compile for fused kernels
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 wandb: false
 wandb_project: alphagenome-splice
-log_every: 100
+# wandb_entity: my-team
+log_every: 10
 
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 524kb_full           # defaults to timestamp
+run_name: 132kb_human_mouse         # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir
