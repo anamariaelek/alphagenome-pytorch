@@ -63,9 +63,9 @@ DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 RUN=132kb_human_mouse_rat
 
 # Evaluation settings
-EVAL_SPECIES="human"
+EVAL_SPECIES="mouse"
 
-for EVAL_SPECIES in human mouse rat; do
+for EVAL_SPECIES in mouse rat; do
 DATA_CONFIG="${DIR}/data/data_config.json"
 OUT_DIR=${DIR}/${RUN}/preds_${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
@@ -78,7 +78,7 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --overwrite \
     --batch-size 2 \
     --device cuda \
-    --max-windows 1000 \
+    --max-windows 5000 \
     --seed 1950 \
     --output-dir ${OUT_DIR}
 

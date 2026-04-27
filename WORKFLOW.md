@@ -11,6 +11,10 @@ species=Rattus_norvegicus
 gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
 fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
 
+species=Oryctolagus_cuniculus
+gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
+fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
+
 out_dir=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
 data_dir=${out_dir}/data
 mkdir -p ${data_dir}/${species}
@@ -80,39 +84,11 @@ python -u scripts/convert_splice_sites_to_parquet.py \
     --output ${data_dir}/${species}/splice_sites.parquet > logs/splice_sites_to_parquet_${species}.log
 ```
 
-# Prepare folds
+# Prepare orthology-based folds
 
-```bash
-if [[ $species == 'Homo_sapiens' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/data/sequences_human_hg19_sorted.bed
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/data/sequences_human.bed.gz
-  organism="human"
-elif [[ $species == 'Mus_musculus' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/data/sequences_mouse.bed.gz
-  organism="mouse"
-elif [[ $species == 'Rattus_norvegicus' ]]; then
-  folds=${HOME}/sds/sd17d003/Anamaria/borzoi_folds/results_genes/fold_assignments/rat_folds.bed
-  organism="rat"
-fi
+For eah new species, download orthologs from Ensembl and run the code in: `/home/elek/projects/alphagenome_ft_pytorch/examples/notebooks/splice_eval_compara.ipynb`
+This will make splits for each species that reflect initial Borzoi splits of human and mouse data.
 
-# Prepare folds
-python -u scripts/convert_borzoi_folds.py \
-    --seq-len 131072 \
-    --input ${folds} \
-    --organism ${organism} \
-    --output-dir ${out_dir}/data/${species}/folds_100kb \
-    --resolve-overlap-conflicts \
-    --strip-chr-names > logs/convert_borzoi_folds_100kb_${species}.log
-
-# Subset folds with 50% overlap
-mkdir -p ${out_dir}/data/${species}/folds_100kb/FOLD_0_subset
-for fn in train test valid
-do
-    IN_BED=${out_dir}/data/${species}/folds_100kb/FOLD_0/${fn}.bed
-    OUT_BED=${out_dir}/data/${species}/folds_100kb/FOLD_0_subset/${fn}.bed
-    python scripts/subset_nonoverlapping_bed.py $IN_BED 50 > $OUT_BED
-done
-```
 
 # Finetune
 

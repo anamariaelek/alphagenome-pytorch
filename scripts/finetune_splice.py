@@ -1219,6 +1219,21 @@ def main() -> None:
                     wandb_run_id=logger.wandb_run_id,
                     **usage_extra,
                 )
+                # Also save numbered checkpoint for this best epoch
+                save_checkpoint(
+                    path=output_dir / f"best_epoch_{epoch:03d}.pth",
+                    epoch=epoch,
+                    model=model_module,
+                    optimizer=optimizer,
+                    val_loss=val_loss,
+                    track_names=[],
+                    modality="splice",
+                    resolutions=(1,),
+                    scheduler=scheduler,
+                    best_val_loss=best_val_loss,
+                    wandb_run_id=logger.wandb_run_id,
+                    **usage_extra,
+                )
                 print(f"  Saved best model (val_loss={val_loss:.4f})")
 
     except KeyboardInterrupt:

@@ -42,6 +42,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -765,8 +766,26 @@ def build_model(cfg: dict, ckpt: dict, device: torch.device, logger: logging.Log
 
     model = AlphaGenome(num_organisms=num_organisms, dtype_policy=dtype_policy)
 
-    # Load pretrained trunk weights (base model, no heads)
-    model = load_trunk(model, cfg["pretrained_weights"], exclude_heads=True)
+    # Load pretrained trunk weights (base model, no heads).
+    # The stored path may be from a different machine/user; resolve with $HOME expansion
+    # and fall back to the local checkpoints/ directory if the stored path doesn't exist.
+    _pretrained = Path(os.path.expandvars(os.path.expanduser(cfg["pretrained_weights"])))
+    if not _pretrained.exists():
+        _fallback = Path(__file__).parent.parent / "checkpoints" / _pretrained.name
+        if _fallback.exists():
+            msg = (
+                f"  Pretrained weights not found at {_pretrained}; "
+                f"using local fallback {_fallback}"
+            )
+            (logger.warning if logger else print)(msg)
+            _pretrained = _fallback
+        else:
+            raise FileNotFoundError(
+                f"Pretrained weights not found: {_pretrained}\n"
+                f"Also checked local fallback: {_fallback}\n"
+                f"Set 'pretrained_weights' in your config or place the file in checkpoints/."
+            )
+    model = load_trunk(model, str(_pretrained), exclude_heads=True)
 
     # Remove all heads so we can attach fresh fine-tuned ones
     model = remove_all_heads(model)

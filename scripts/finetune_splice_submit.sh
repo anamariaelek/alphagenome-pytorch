@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hmr
+#SBATCH --job-name=ft-hmrr-132kb
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_hmr.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_hmrr_132kb.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then
