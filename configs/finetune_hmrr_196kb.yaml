@@ -46,7 +46,7 @@ species:
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_196kb/rabbit/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_196kb/rabbit/fold0/valid.bed
-    organism_index: 2
+    organism_index: 3
 
 classification_head_init:
   0: 0   # new organism 0 from pretrained organism 0

@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
 #SBATCH --mem=120gb
-#SBATCH --time=5:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -66,7 +66,7 @@ RUN=132kb_human_mouse_rat
 EVAL_SPECIES="mouse"
 
 for EVAL_SPECIES in mouse rat; do
-DATA_CONFIG="${DIR}/data/data_config.json"
+DATA_CONFIG="${DIR}/data/data_config_orthologs.json"
 OUT_DIR=${DIR}/${RUN}/preds_${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 
@@ -76,7 +76,7 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --eval-species ${EVAL_SPECIES} \
     --per-tissue \
     --overwrite \
-    --batch-size 2 \
+    --batch-size 4 \
     --device cuda \
     --max-windows 5000 \
     --seed 1950 \

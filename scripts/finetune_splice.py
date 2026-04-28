@@ -680,6 +680,15 @@ def create_model(
     if classification_head_init is None:
         classification_head_init = {i: i for i in range(num_organisms)}
 
+    # Validate that all keys in classification_head_init are valid organism indices
+    invalid_keys = [k for k in classification_head_init.keys() if k >= num_organisms or k < 0]
+    if invalid_keys:
+        raise ValueError(
+            f"Invalid organism indices in classification_head_init: {invalid_keys}. "
+            f"Model has {num_organisms} organism(s) with valid indices 0-{num_organisms-1}. "
+            f"Check your config's classification_head_init and species organism_index values."
+        )
+
     print(f"Creating model with {num_organisms} organism(s)")
     print(f"Organism initialization mapping: {classification_head_init}")
 
