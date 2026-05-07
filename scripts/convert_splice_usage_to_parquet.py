@@ -67,6 +67,7 @@ import ast
 import json
 import os
 import time
+import numpy as np
 from pathlib import Path
 
 
@@ -375,6 +376,7 @@ def convert_spliser_dir_to_usage_parquet(
     strip_chr: bool = False,
     min_alpha: int | None = None,
     min_coverage: int | None = None,
+    min_reproducibility: float | None = None,
 ) -> None:
     """Full pipeline: load → annotate → adjust → export.
 
@@ -390,15 +392,14 @@ def convert_spliser_dir_to_usage_parquet(
         strip_chr: Remove ``chr`` prefix from chromosome names.
         min_alpha: Optional minimum Alpha count filter.
         min_coverage: Optional minimum Alpha+Beta count filter.
+        min_reproducibility: Optional minimum reproducibility filter given as 
+            minimum fraction of samples in which the site is observed.
     """
-    print(f"\n{'─'*60}")
-    print(f"Step 1/4  Processing {len(tsv_files)} TSV file(s) sequentially (low memory mode)")
-    print(f"{'─'*60}")
     import pandas as pd
     import gc
     import tempfile
     print(f"\n{'─'*60}")
-    print(f"Step 1/4  Processing {len(tsv_files)} TSV file(s) one at a time (low memory mode)")
+    print(f"Processing {len(tsv_files)} TSV file(s) one at a time (low memory mode)")
     print(f"{'─'*60}")
     temp_dir = tempfile.TemporaryDirectory(prefix="splice_usage_tmp_")
     temp_files = []
@@ -406,18 +407,95 @@ def convert_spliser_dir_to_usage_parquet(
     all_tissues = set()
     all_timepoints = set()
     for idx, p in enumerate(tsv_files):
+        # Step 1: Load TSV, drop duplicates, and keep only reproducible sites
         tissue, timepoint = _parse_tissue_timepoint(p.name, tissue_index, timepoint_index)
-        print(f"  Loading {p.name} (tissue={tissue}, timepoint={timepoint}) …", end=" ")
+        print(f"  Loading {p.name} (tissue={tissue}, timepoint={timepoint})", end="\n")
         t0 = time.perf_counter()
-        df = pd.read_csv(p, sep="\t", dtype={"Region": str})
-        n_before = len(df)
+        df = pd.read_csv(p, sep="\t", dtype={
+            "Sample": str,
+            "Region": str,
+            "Site": "Int64",  # Nullable integer type to handle NA values
+            "Strand": str,
+            "Gene": str,
+            "SSE": float,
+            "alpha_count": "Int64",
+            "beta1_count": "Int64",
+            "beta2_count": "Int64",
+            "MultiGeneFlag": str,
+            "Others": str,
+            "Partners": str,
+            "Competitors": str,
+        })
+        n_original = len(df)
+        if n_original == 0:
+            continue
+        # Drop rows with NA values in critical columns
+        df = df.dropna(subset=["Region", "Site", "Strand"])
+        n_after_na_drop = len(df)
+        if n_after_na_drop < n_original:
+            print(f"    Dropped {n_original - n_after_na_drop:,} rows with NA in critical columns")
+        if n_after_na_drop == 0:
+            continue
+        # Count unique sites before filtering 
+        n_sites = df[['Region', 'Site', 'Strand']].drop_duplicates().shape[0]
+        print(f"    Original rows: {n_original:,}", end="\n")
+        print(f"    Unique sites: {n_sites:,}", end="\n")
+        # Drop gene column if it exists
+        if "Gene" in df.columns:
+            df = df.drop(columns=["Gene"])
+        # Remove duplicate rows stemming from the same site mapping to multiple genes
+        print(f"    Removing duplicate rows …", end=" ")
         df = df.drop_duplicates()
-        n_dup = n_before - len(df)
-        if n_dup:
-            print(f"removed {n_dup:,} duplicates; ", end="")
+        n_dedup = len(df)
+        n_dup = n_original - n_dedup
+        print(f"removed {n_dup:,} duplicate rows; ", end="\n")
+        # Remove rows where alpha_count is < min_alpha
+        print(f"    Removing empty rows …", end=" ")
+        if min_alpha is not None:
+            df = df[df['alpha_count'] > min_alpha]
+        else:
+            df = df[(df['alpha_count'] > 0) | (df['beta1_count'] > 0) | (df['beta2_count'] > 0)]
+        n_clear = len(df)
+        n_empty = n_dedup - n_clear
+        if n_empty:
+            print(f"removed {n_empty:,} rows with no counts; ", end="\n")
+        # Add ocurrences of each site to dataframe
+        df['samples_count'] = df.groupby(['Region', 'Site', 'Strand'])['Region'].transform('count')
+        # Remove sites with reproducibility < threshold
+        if min_reproducibility is not None:
+            # Make sure min_reproducibility is a fraction between 0 and 1
+            min_reproducibility = max(0, min(1, min_reproducibility))
+            # Infer number of samples for min_reproducibility
+            n_samples = df['Sample'].nunique()
+            if n_samples > 1:
+                min_smaples = np.round(min_reproducibility * n_samples).astype(int)
+                min_smaples = max(0, min(min_smaples, n_samples))  # Ensure at least 1 sample and at most n_samples
+                if min_smaples > 0:    
+                    print(f"    Removing sites with reproducibility < {min_reproducibility} ({min_smaples}/{n_samples} samples) …", end=" ")
+                    df = df[df['samples_count'] >= min_smaples]
+                    n_reproducible = len(df)
+                    n_removed = n_clear - n_reproducible
+                    print(f"removed {n_removed:,} rows; ", end="\n")
+                else:
+                    print(f"used min_reproducibility={min_reproducibility} but it corresponds to 0/{n_samples} samples, so no sites are removed based on reproducibility; ", end="\n")
+            else:
+                print(f"only one sample found, skipping reproducibility filter; ", end="\n")
+        
+        ## Sum alpha, beta1 and beta2 counts for each site across samples
+        #df['alpha_count'] = df.groupby(['Region', 'Site', 'Strand'])['alpha_count'].transform('sum')
+        #df['beta1_count'] = df.groupby(['Region', 'Site', 'Strand'])['beta1_count'].transform('sum')
+        #df['beta2_count'] = df.groupby(['Region', 'Site', 'Strand'])['beta2_count'].transform('sum')
+        ##Re-calculate SSE as alpha_count / (alpha_count + beta1_count + beta2_count)
+        #df['SSE'] = df['alpha_count'] / (df['alpha_count'] + df['beta1_count'] + df['beta2_count'])
+
+        # Add Tissue and Timepoint columns for later use in condition key
         df["Tissue"] = tissue
         df["Timepoint"] = timepoint
-        print(f"{len(df):,} rows ({time.perf_counter()-t0:.1f}s)")
+        n_final = len(df)
+        n_sites_final = df[['Region', 'Site', 'Strand']].drop_duplicates().shape[0]
+        print(f"    Final rows: {n_final:,} ({n_final/n_original:.1%})")
+        print(f"    Unique sites: {n_sites_final:,} ({n_sites_final/n_sites:.1%})", end="\n")
+        print(f"    Processed in {time.perf_counter()-t0:.1f}s", end="\n")
 
         # Step 2: Annotate
         print(f"    Annotating splice site types …", end=" ")
@@ -433,7 +511,6 @@ def convert_spliser_dir_to_usage_parquet(
         print(f"    Adjusting splice site positions …", end=" ")
         df = adjust_splice_site_position(df)
         print("done.")
-
         # Build condition key from tissue/timepoint before transformation
         condition_key = f"{tissue}_{timepoint}"
         all_condition_keys.add(condition_key)
@@ -451,11 +528,9 @@ def convert_spliser_dir_to_usage_parquet(
             min_alpha=min_alpha,
             min_coverage=min_coverage,
         )
-
-        # Keep the Condition_Key column for later remapping (drop the incorrect Condition index)
+        # Keep the Condition_Key column for later remapping
         df_out = df_out.drop(columns=["Condition"])
         df_out["Condition_Key"] = condition_key
-
         # Write to a temporary Parquet file
         temp_file = Path(temp_dir.name) / f"chunk_{idx}.parquet"
         df_out.to_parquet(temp_file, index=False, compression=None if compression=="none" else compression)
@@ -468,6 +543,30 @@ def convert_spliser_dir_to_usage_parquet(
     print("Finalizing output and writing metadata …")
     dfs = [pd.read_parquet(f) for f in temp_files]
     df_final = pd.concat(dfs, ignore_index=True)
+
+    # ── Cross-files (per-site, across-conditions) filtering ───────────────
+    # If min_coverage or min_alpha is set, filter out all sites (Chromosome, Position)
+    # that do not meet the threshold across all conditions (sum over all conditions)
+    if min_coverage is not None or min_alpha is not None:
+        # Group by Chromosome, Position and sum Alpha and Beta
+        site_agg = df_final.groupby(["Chromosome", "Position"], as_index=False).agg({
+            "Alpha": "sum",
+            "Beta": "sum"
+        })
+        site_agg["total_coverage"] = site_agg["Alpha"] + site_agg["Beta"]
+        # Build mask for sites to keep
+        mask = pd.Series(True, index=site_agg.index)
+        if min_coverage is not None:
+            mask &= site_agg["total_coverage"] >= min_coverage
+        if min_alpha is not None:
+            mask &= site_agg["Alpha"] >= min_alpha
+        # Get set of (Chromosome, Position) to keep
+        keep_sites = set(zip(site_agg.loc[mask, "Chromosome"], site_agg.loc[mask, "Position"]))
+        before_rows = len(df_final)
+        df_final = df_final[df_final.apply(lambda row: (row["Chromosome"], row["Position"]) in keep_sites, axis=1)]
+        after_rows = len(df_final)
+        print(f"Filtered sites by cross-condition min_coverage/min_alpha: {before_rows:,} → {after_rows:,} rows")
+
     # Rebuild condition_labels
     all_condition_keys = sorted(all_condition_keys)
     condition_labels = {cond: idx for idx, cond in enumerate(all_condition_keys)}
@@ -590,6 +689,13 @@ Examples:
         metavar="N",
         help="Optional minimum Alpha+Beta count; rows below this are dropped.",
     )
+    parser.add_argument(
+        "--min-reproducibility",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Optional minimum reproducibility filter given as minimum fraction of samples in which the site is observed (e.g. 0.5 to keep sites observed in at least 50% of samples).",
+    )
     args = parser.parse_args()
 
     # ── Resolve input files ───────────────────────────────────────────────────
@@ -616,6 +722,7 @@ Examples:
         strip_chr=args.strip_chr_names,
         min_alpha=args.min_alpha,
         min_coverage=args.min_coverage,
+        min_reproducibility=args.min_reproducibility,
     )
 
 

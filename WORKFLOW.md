@@ -1,19 +1,19 @@
 ```bash
 species=Homo_sapiens
-gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/gtf/
-fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/
-
 species=Mus_musculus
-gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
-fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
-
 species=Rattus_norvegicus
-gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
-fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
-
 species=Oryctolagus_cuniculus
-gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
-fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
+species=Monodelphis_domestica
+species=Macaca_mulatta
+species=Gallus_gallus
+
+if [[ "$species" == "Homo_sapiens" ]]; then
+    gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/gtf/
+    fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/
+else
+    gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/gtf/
+    fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/fasta/
+fi
 
 out_dir=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
 data_dir=${out_dir}/data
@@ -34,7 +34,8 @@ python scripts/convert_gtf_to_parquet.py \
 python -u scripts/convert_splice_usage_to_parquet.py \
     --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/${species} \
     --output ${data_dir}/${species}/usage.parquet \
-    --min-alpha 5 \
+    --min-alpha 50 \
+    --min-reproducibility 0.5 \
     --strip-chr-names > logs/usage_to_parquet_${species}.log
 ```
 
@@ -50,44 +51,36 @@ python -u scripts/convert_splice_sites_to_parquet.py \
     --output ${data_dir}/${species}/splice_sites_gtf.parquet > logs/splice_sites_to_parquet_${species}_gtf.log
 ```
 
-
 To save all sites found in either gtf file or in usage file: `--usage-mode union`.
 
 ```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
-    --min-alpha 100 \
     --usage-mode union \
     --output ${data_dir}/${species}/splice_sites_union.parquet > logs/splice_sites_to_parquet_${species}_union.log
-```
 
-Alternativelly, to save annotations for only those sies found in both gtf file and in usage file: `--usage-mode intersect`.
+# Alternativelly, to save annotations for only those sies found in both gtf file and in usage file: `--usage-mode intersect`.
 
-```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
-    --min-alpha 100 \
     --usage-mode intersect \
     --output ${data_dir}/${species}/splice_sites_intersect.parquet > logs/splice_sites_to_parquet_${species}_intersect.log
-```
 
-I settle for a version where all usage sites are kept, in addiition to the sites that are present both in the gtf and usage.
+# I settle for a version where all usage sites are kept, in addition to the sites that are present both in the gtf and usage.
 
-```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
-    --min-alpha 50 \
     --usage-mode 'intersect+usage' \
     --output ${data_dir}/${species}/splice_sites.parquet > logs/splice_sites_to_parquet_${species}.log
 ```
 
 # Prepare orthology-based folds
 
-For eah new species, download orthologs from Ensembl and run the code in: `/home/elek/projects/alphagenome_ft_pytorch/examples/notebooks/splice_eval_compara.ipynb`
-This will make splits for each species that reflect initial Borzoi splits of human and mouse data.
+For all species, download orthologs from Ensembl and run the code in `~/sds/sd17d003/Anamaria/borzoi_folds/orthologs.ipynb` to make orthogroup-aware splits for each species.  
+For a given target input sequence length `INPUT_SEQ_LEN`, results for each `SPECIES` are saved in: `/home/elek/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_{INPUT_SEQ_LEN}/{SPECIES}/fold{FOLD}/`.
 
 
 # Finetune

@@ -137,7 +137,7 @@ def _extract_from_gtf(gtf_path: Path) -> "pd.DataFrame":
 
 def _extract_from_usage(
     usage_parquet: Path,
-    min_coverage: int,
+    min_coverage: int | None,
     min_alpha: int | None,
     usage_coord_base: int,
 ) -> "pd.DataFrame":
@@ -168,7 +168,8 @@ def _extract_from_usage(
     df = df[df["Label"] != none_class].copy()
 
     # Filter by total coverage
-    df = df[df["Alpha"] + df["Beta"] >= min_coverage]
+    if min_coverage is not None:
+        df = df[df["Alpha"] + df["Beta"] >= min_coverage]
 
     # Filter by alpha if requested
     if min_alpha is not None:
@@ -208,7 +209,7 @@ def convert_splice_sites_to_parquet(
     gtf_path: str | Path | None,
     output_path: str | Path,
     usage_parquet: str | Path | None = None,
-    min_coverage: int = 10,
+    min_coverage: int | None = None,
     min_alpha: int | None = None,
     compression: str = "snappy",
     usage_coord_base: int = 0,
@@ -371,8 +372,8 @@ Examples:
                              "A sibling _usage.json must exist in the same directory.")
     parser.add_argument("--output", "-o", type=Path, required=True,
                         help="Output Parquet path.")
-    parser.add_argument("--min-coverage", type=int, default=10,
-                        help="Minimum Alpha+Beta for usage sites (default: 10).")
+    parser.add_argument("--min-coverage", type=int, default=None,
+                        help="Minimum Alpha+Beta for usage sites.")
     parser.add_argument("--min-alpha", type=int, default=None,
                         help="Optional minimum Alpha count for usage sites.")
     parser.add_argument("--compression", default="snappy",
