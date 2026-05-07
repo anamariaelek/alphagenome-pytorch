@@ -184,8 +184,12 @@ def train_epoch_splice(
                 cls_out = model.splice_sites_classification_head(
                     emb_1bp, org_idx, channels_last=True
                 )
+                # Apply loss mask if present in batch
+                loss_mask = batch.get("loss_mask")
+                if loss_mask is not None:
+                    loss_mask = loss_mask.to(device)
                 cls_loss_val, cls_acc = splice_classification_loss(
-                    cls_out["logits"], cls_labels, class_weights=class_weights
+                    cls_out["logits"], cls_labels, class_weights=class_weights, loss_mask=loss_mask
                 )
                 total_loss = cls_weight * cls_loss_val
 
@@ -374,8 +378,12 @@ def validate_splice(
             cls_out = model.splice_sites_classification_head(
                 emb_1bp, org_idx, channels_last=True
             )
+            # Apply loss mask if present in batch
+            loss_mask = batch.get("loss_mask")
+            if loss_mask is not None:
+                loss_mask = loss_mask.to(device)
             cls_loss_val, cls_acc = splice_classification_loss(
-                cls_out["logits"], cls_labels, class_weights=class_weights
+                cls_out["logits"], cls_labels, class_weights=class_weights, loss_mask=loss_mask
             )
             total_loss = cls_weight * cls_loss_val
 

@@ -34,7 +34,7 @@ python scripts/convert_gtf_to_parquet.py \
 python -u scripts/convert_splice_usage_to_parquet.py \
     --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/${species} \
     --output ${data_dir}/${species}/usage.parquet \
-    --min-alpha 50 \
+    --min-coverage 50 \
     --min-reproducibility 0.5 \
     --strip-chr-names > logs/usage_to_parquet_${species}.log
 ```
@@ -43,7 +43,7 @@ python -u scripts/convert_splice_usage_to_parquet.py \
 
 Save parquet file with splice site annotations. 
 
-To save only those sies found in gtf file:
+To save only those sites found in gtf file:
 
 ```bash
 python -u scripts/convert_splice_sites_to_parquet.py \

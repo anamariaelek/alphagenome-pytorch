@@ -243,9 +243,16 @@ class SpliceSiteUsageIndex:
 
 def _load_intervals_from_bed(
     bed_path: str,
-) -> tuple[list[tuple[str, int, int]], set[str]]:
-    """Load genomic intervals from a BED file (0-based half-open)."""
-    intervals: list[tuple[str, int, int]] = []
+) -> tuple[list[tuple[str, int, int, int, int]], set[str]]:
+    """Load genomic intervals from a BED file (0-based half-open).
+    
+    Expects BED format with optional mask columns:
+    chr, start, end, [gene], [gene_mask_start], [gene_mask_end]
+    
+    Returns intervals as (chrom, start, end, mask_start, mask_end) tuples.
+    If mask columns are missing, mask_start=start and mask_end=end (full interval).
+    """
+    intervals: list[tuple[str, int, int, int, int]] = []
     chromosomes: set[str] = set()
 
     with open(bed_path) as f:
@@ -259,7 +266,17 @@ def _load_intervals_from_bed(
             chrom = parts[0]
             start = int(parts[1])
             end = int(parts[2])
-            intervals.append((chrom, start, end))
+            
+            # Parse optional mask columns (columns 4 and 5, after gene name in column 3)
+            if len(parts) >= 6:
+                mask_start = int(parts[4])
+                mask_end = int(parts[5])
+            else:
+                # No mask columns: use full interval
+                mask_start = start
+                mask_end = end
+            
+            intervals.append((chrom, start, end, mask_start, mask_end))
             chromosomes.add(chrom)
 
     return intervals, chromosomes
@@ -331,9 +348,10 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         half = sequence_length // 2
         chrom_sizes = self._cached_genome.chrom_sizes
         self._positions: list[tuple[str, int, int]] = []
+        self._loss_masks: list[tuple[int, int]] = []  # Store (mask_start_rel, mask_end_rel) per position
         n_skipped = n_truncated = 0
 
-        for chrom, start, end in all_intervals:
+        for chrom, start, end, mask_start, mask_end in all_intervals:
             if chrom not in chrom_sizes:
                 n_skipped += 1
                 continue
@@ -345,7 +363,13 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
                 continue
             if end - start > sequence_length:
                 n_truncated += 1
+            
+            # Convert mask coordinates to window-relative positions
+            mask_start_rel = max(0, mask_start - win_start)
+            mask_end_rel = min(sequence_length, mask_end - win_start)
+            
             self._positions.append((chrom, win_start, win_end))
+            self._loss_masks.append((mask_start_rel, mask_end_rel))
 
         if n_skipped:
             warnings.warn(
@@ -362,6 +386,7 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         chrom, win_start, win_end = self._positions[idx]
+        mask_start_rel, mask_end_rel = self._loss_masks[idx]
 
         # ── Sequence ─────────────────────────────────────────────────────────
         seq_np = self._cached_genome.fetch(chrom, win_start, win_end)  # (S,4) uint8
@@ -376,10 +401,18 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
             labels[rel_pos[valid]] = site_cls[valid]
         classification_labels = torch.from_numpy(labels)   # (S,) int64
 
+        # ── Loss mask ─────────────────────────────────────────────────────────
+        # Create boolean mask: True for positions within [mask_start_rel, mask_end_rel)
+        loss_mask = np.zeros(self.sequence_length, dtype=bool)
+        if mask_end_rel > mask_start_rel:
+            loss_mask[mask_start_rel:mask_end_rel] = True
+        loss_mask = torch.from_numpy(loss_mask)  # (S,) bool
+
         item: dict[str, Any] = {
             "sequence": sequence,
             "organism_index": torch.tensor(self.organism_index, dtype=torch.long),
             "classification_labels": classification_labels,
+            "loss_mask": loss_mask,
         }
 
         # ── Usage targets (sparse) ────────────────────────────────────────────
@@ -446,13 +479,14 @@ def collate_splice(
 
     Returns:
         Dict with keys ``sequence``, ``organism_index``,
-        ``classification_labels``, and optionally ``usage_positions``,
+        ``classification_labels``, ``loss_mask``, and optionally ``usage_positions``,
         ``usage_values``, ``usage_mask``.
     """
     result: dict[str, Any] = {
         "sequence": torch.stack([b["sequence"] for b in batch]),
         "organism_index": torch.stack([b["organism_index"] for b in batch]),
         "classification_labels": torch.stack([b["classification_labels"] for b in batch]),
+        "loss_mask": torch.stack([b["loss_mask"] for b in batch]),
     }
     if "usage_positions" in batch[0]:
         result["usage_positions"] = torch.stack([b["usage_positions"] for b in batch])

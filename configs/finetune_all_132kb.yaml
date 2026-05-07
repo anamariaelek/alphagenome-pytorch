@@ -20,39 +20,66 @@ species:
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/human/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/human/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/human/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/human/fold0/valid.bed
     organism_index: 0
 
   - name: mouse
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/mouse/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/mouse/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/mouse/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/mouse/fold0/valid.bed
     organism_index: 1
 
   - name: rat
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/rat/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/rat/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rat/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rat/fold0/valid.bed
     organism_index: 2
   
   - name: rabbit
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Oryctolagus_cuniculus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/rabbit/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb/rabbit/fold0/valid.bed
-    organism_index: 2
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rabbit/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rabbit/fold0/valid.bed
+    organism_index: 3
+
+  - name: opossum
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Monodelphis_domestica.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/opossum/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/opossum/fold0/valid.bed
+    organism_index: 4
+  
+  - name: macaque
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Macaca_mulatta.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/macaque/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/macaque/fold0/valid.bed
+    organism_index: 5
+
+  - name: chicken
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Gallus_gallus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/splice_sites.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/chicken/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/chicken/fold0/valid.bed
+    organism_index: 6
 
 classification_head_init:
   0: 0   # new organism 0 from pretrained organism 0
   1: 1   # new organism 1 from pretrained organism 1
   2: 1   # new organism 2 from pretrained organism 1
   3: 1   # new organism 3 from pretrained organism 1
+  4: 1   # new organism 4 from pretrained organism 1
+  5: 1   # new organism 5 from pretrained organism 1
+  6: 1   # new organism 6 from pretrained organism 1
 
 # ---------------------------------------------------------------------------
 # Pretrained weights
@@ -67,7 +94,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 524288    # used lengths: 131072 196608 524288
+sequence_length: 131072    # used lengths: 131072 196608 524288
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Set coordinate base for usage parquet
@@ -89,8 +116,8 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 2
-gradient_accumulation_steps: 128   # effective batch = batch_size * accum * gpus
+batch_size: 4
+gradient_accumulation_steps: 64   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -120,7 +147,7 @@ log_every: 10
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 196kb_human_mouse_rat_rabbit        # defaults to timestamp
+run_name: 132kb_all        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

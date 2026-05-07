@@ -20,24 +20,24 @@ species:
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/human/fold0_subset/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/human/fold0_subset/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/human/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/human/fold0/valid.bed
     organism_index: 0
 
   - name: mouse
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/mouse/fold0_subset/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/mouse/fold0_subset/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/mouse/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/mouse/fold0/valid.bed
     organism_index: 1
 
   - name: rat
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/rat/fold0_subset/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs/rat/fold0_subset/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rat/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rat/fold0/valid.bed
     organism_index: 2
 
 classification_head_init:
@@ -58,7 +58,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-sequence_length: 196608
+sequence_length: 131072
 max_sites: 1024
 cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # Set coordinate base for usage parquet

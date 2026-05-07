@@ -29,6 +29,7 @@ def splice_classification_loss(
     logits: Tensor,
     labels: Tensor,
     class_weights: Tensor | None = None,
+    loss_mask: Tensor | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Compute cross-entropy loss for splice-site classification.
 
@@ -40,6 +41,9 @@ def splice_classification_loss(
             argument.  If ``None``, all classes are equally weighted (which will
             under-train non-background classes; see
             :func:`compute_splice_class_weights`).
+        loss_mask: Optional boolean mask, shape ``(B, S)``. When provided,
+            only positions where mask is True contribute to the loss.
+            Useful for masking loss to specific gene regions.
 
     Returns:
         Tuple of:
@@ -53,6 +57,17 @@ def splice_classification_loss(
 
     if class_weights is not None:
         class_weights = class_weights.to(logits.device)
+
+    # Apply loss mask if provided
+    if loss_mask is not None:
+        mask_flat = loss_mask.reshape(B * S)
+        # Only compute loss on masked positions
+        if mask_flat.any():
+            logits_flat = logits_flat[mask_flat]
+            labels_flat = labels_flat[mask_flat]
+        else:
+            # No valid positions in mask: return zero loss
+            return torch.tensor(0.0, device=logits.device), {"accuracy": 0.0}
 
     loss = F.cross_entropy(logits_flat, labels_flat, weight=class_weights, reduction="mean")
 

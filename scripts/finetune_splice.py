@@ -1230,7 +1230,7 @@ def main() -> None:
                 )
                 # Also save numbered checkpoint for this best epoch
                 save_checkpoint(
-                    path=output_dir / f"best_epoch_{epoch:03d}.pth",
+                    path=output_dir / f"epoch_{epoch:02d}.pth",
                     epoch=epoch,
                     model=model_module,
                     optimizer=optimizer,
