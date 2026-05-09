@@ -428,9 +428,20 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         if self.usage_index is not None:
             # Query annotation positions that are within the window
             all_site_pos, _ = self.annotation.query(chrom, win_start, win_end)
+            
+            # Filter positions to only include those within the loss_mask region
             if len(all_site_pos) > 0:
+                # Convert to window-relative positions for mask filtering
+                rel_pos = all_site_pos - win_start
+                # Keep only positions within [mask_start_rel, mask_end_rel)
+                mask_filter = (rel_pos >= mask_start_rel) & (rel_pos < mask_end_rel)
+                masked_site_pos = all_site_pos[mask_filter]
+            else:
+                masked_site_pos = all_site_pos
+            
+            if len(masked_site_pos) > 0:
                 used_pos, val_arrays, mask_arrays = self.usage_index.query(
-                    chrom, all_site_pos
+                    chrom, masked_site_pos
                 )
             else:
                 used_pos = []
