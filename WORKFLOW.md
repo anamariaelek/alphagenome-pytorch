@@ -33,10 +33,9 @@ python scripts/convert_gtf_to_parquet.py \
 ```bash
 python -u scripts/convert_splice_usage_to_parquet.py \
     --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/${species} \
-    --output ${data_dir}/${species}/usage.parquet \
-    --min-coverage 50 \
+    --output ${data_dir}/${species}/usage_all.parquet \
     --min-reproducibility 0.5 \
-    --strip-chr-names > logs/usage_to_parquet_${species}.log
+    --strip-chr-names > logs/usage_to_parquet_${species}_all.log
 ```
 
 # Prepare splice site annotation for training

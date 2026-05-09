@@ -60,14 +60,14 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Model directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=132kb_human_mouse_rat
+RUN=132kb_human_mouse_rat_rabbit_opossum
 
 # Evaluation settings
 EVAL_SPECIES="mouse"
 
-for EVAL_SPECIES in mouse rat; do
-DATA_CONFIG="${DIR}/data/data_config_orthologs.json"
-OUT_DIR=${DIR}/${RUN}/preds_${EVAL_SPECIES}/
+for EVAL_SPECIES in human mouse rat rabbit opossum; do
+DATA_CONFIG="${DIR}/data/data_config.json"
+OUT_DIR=${DIR}/${RUN}/preds_epoch_04/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 
 python ${WORK_DIR}/scripts/evaluate_splice.py \
