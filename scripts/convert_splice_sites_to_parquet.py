@@ -340,6 +340,11 @@ def convert_splice_sites_to_parquet(
 
 
 def main() -> None:
+    # Log the command for reproducibility
+    print(f"{'='*60}")
+    print(f"Command: {' '.join(sys.argv)}")
+    print(f"{'='*60}\n")
+
     parser = argparse.ArgumentParser(
         description="Build splice site annotation Parquet from GTF/usage data.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

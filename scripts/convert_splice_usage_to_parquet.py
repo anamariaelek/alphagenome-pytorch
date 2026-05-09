@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import sys
 import os
 import time
 import numpy as np
@@ -606,6 +607,11 @@ def convert_spliser_dir_to_usage_parquet(
 
 
 def main() -> None:
+    # Log the command for reproducibility
+    print(f"{'='*60}")
+    print(f"Command: {' '.join(sys.argv)}")
+    print(f"{'='*60}\n")
+
     parser = argparse.ArgumentParser(
         description="Convert Spliser .combined.tsv files to _usage.parquet + _usage.json.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

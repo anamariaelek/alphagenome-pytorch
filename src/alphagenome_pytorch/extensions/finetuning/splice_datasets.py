@@ -247,10 +247,11 @@ def _load_intervals_from_bed(
     """Load genomic intervals from a BED file (0-based half-open).
     
     Expects BED format with optional mask columns:
-    chr, start, end, [gene], [gene_mask_start], [gene_mask_end]
+    chr, start, end, [gene], [mask_start_rel], [mask_end_rel]
     
-    Returns intervals as (chrom, start, end, mask_start, mask_end) tuples.
-    If mask columns are missing, mask_start=start and mask_end=end (full interval).
+    Returns intervals as (chrom, start, end, mask_start_rel, mask_end_rel) tuples.
+    Columns 4-5 are RELATIVE coordinates (offset from window start, not absolute genomic coords).
+    If mask columns are missing, mask_start_rel=0 and mask_end_rel=sequence_length (full window).
     """
     intervals: list[tuple[str, int, int, int, int]] = []
     chromosomes: set[str] = set()
@@ -267,16 +268,17 @@ def _load_intervals_from_bed(
             start = int(parts[1])
             end = int(parts[2])
             
-            # Parse optional mask columns (columns 4 and 5, after gene name in column 3)
+            # Parse optional mask columns (columns 4 and 5 are RELATIVE coordinates)
+            # These are already offsets from window start, NOT absolute genomic positions
             if len(parts) >= 6:
-                mask_start = int(parts[4])
-                mask_end = int(parts[5])
+                mask_start_rel = int(parts[4])
+                mask_end_rel = int(parts[5])
             else:
-                # No mask columns: use full interval
-                mask_start = start
-                mask_end = end
+                # No mask columns: will use full window (set to None and handle in __init__)
+                mask_start_rel = -1  # Sentinel value
+                mask_end_rel = -1
             
-            intervals.append((chrom, start, end, mask_start, mask_end))
+            intervals.append((chrom, start, end, mask_start_rel, mask_end_rel))
             chromosomes.add(chrom)
 
     return intervals, chromosomes
@@ -351,7 +353,7 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         self._loss_masks: list[tuple[int, int]] = []  # Store (mask_start_rel, mask_end_rel) per position
         n_skipped = n_truncated = 0
 
-        for chrom, start, end, mask_start, mask_end in all_intervals:
+        for chrom, start, end, mask_start_rel, mask_end_rel in all_intervals:
             if chrom not in chrom_sizes:
                 n_skipped += 1
                 continue
@@ -364,9 +366,16 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
             if end - start > sequence_length:
                 n_truncated += 1
             
-            # Convert mask coordinates to window-relative positions
-            mask_start_rel = max(0, mask_start - win_start)
-            mask_end_rel = min(sequence_length, mask_end - win_start)
+            # Mask coordinates are already window-relative (or -1 if missing)
+            # Clamp to valid range [0, sequence_length]
+            if mask_start_rel < 0 or mask_end_rel < 0:
+                # No mask columns in BED: use full window
+                mask_start_rel = 0
+                mask_end_rel = sequence_length
+            else:
+                # Clamp to sequence bounds
+                mask_start_rel = max(0, min(mask_start_rel, sequence_length))
+                mask_end_rel = max(0, min(mask_end_rel, sequence_length))
             
             self._positions.append((chrom, win_start, win_end))
             self._loss_masks.append((mask_start_rel, mask_end_rel))

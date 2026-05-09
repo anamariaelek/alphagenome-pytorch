@@ -88,7 +88,7 @@ def setup_logging(log_path: Path) -> logging.Logger:
 # Splice class labels (must match SpliceSiteAnnotation)
 SPLICE_CLASS_NAMES = ["Donor+", "Acceptor+", "Donor-", "Acceptor-"]
 BACKGROUND_CLASS = 4
-ORGANISM_NAMES = {0: "human", 1: "mouse"}
+ORGANISM_NAMES = {0: "human", 1: "mouse", 2: "rat", 3: "rabbit", 4: "opossum", 5: "macaque", 6: "chicken"}
 
 # Visual labels and colors matching predict_splicing_windows.py
 CLASS_LABELS = {0: 'donor +', 1: 'acceptor +', 2: 'donor -', 3: 'acceptor -', 4: 'no splice site'}
@@ -461,6 +461,10 @@ SPECIES_NAME_MAP = {
     "human": "Homo_sapiens",
     "mouse": "Mus_musculus",
     "rat": "Rattus_norvegicus",
+    "rabbit": "Oryctolagus_cuniculus",
+    "opossum": "Monodelphis_domestica",
+    "macaque": "Macaca_mulatta",
+    "chicken": "Gallus_gallus"
 }
 
 
@@ -695,36 +699,6 @@ def match_cross_species_usage_conditions(
     
     return cross_species_mappings
     
-    # Find intersection: conditions present in both model and data
-    model_cond_names = set(model_condition_labels.keys())
-    data_cond_names = set(data_condition_labels.keys())
-    common_cond_names = model_cond_names & data_cond_names
-    
-    if not common_cond_names:
-        if logger:
-            logger.warning(
-                f"No overlapping condition names between model and data; "
-                f"skipping usage evaluation"
-            )
-        return None, None
-    
-    # Build mapping: model condition index -> data condition index
-    model_to_data = {}
-    data_condition_indices = []
-    
-    for cond_name in sorted(common_cond_names):
-        model_idx = model_condition_labels[cond_name]
-        data_idx = data_condition_labels[cond_name]
-        model_to_data[model_idx] = data_idx
-        data_condition_indices.append(data_idx)
-    
-    if logger:
-        logger.info(
-            f"Matched {len(common_cond_names)} conditions between model and data "
-            f"(model has {len(model_cond_names)}, data has {len(data_cond_names)})"
-        )
-    
-    return data_condition_indices, model_to_data
 
 
 # ---------------------------------------------------------------------------
@@ -907,12 +881,17 @@ def collect_predictions(
 
     Returns
     -------
-    cls_probs               : (N_positions, 5)  float32
-    cls_labels              : (N_positions,)    int64
+    cls_probs               : (N_masked_positions, 5)  float32 - only positions where loss_mask=True
+    cls_labels              : (N_masked_positions,)    int64 - only positions where loss_mask=True
     usage_per_cond          : dict  condition_idx -> {'pred': list[float], 'true': list[float]}
+    
+    Note:
+        If loss_mask is present in batches, only predictions for masked positions
+        (gene body regions) are returned. If loss_mask is absent, all positions are returned.
     """
     all_cls_probs: list[np.ndarray] = []
     all_cls_labels: list[np.ndarray] = []
+    all_loss_masks: list[np.ndarray] = []
     usage_per_cond: dict[int, dict[str, list[float]]] = {}
 
     # Usage head for this organism (may be None if not available)
@@ -959,6 +938,10 @@ def collect_predictions(
 
         all_cls_probs.append(cls_probs.cpu().numpy().reshape(-1, 5))
         all_cls_labels.append(batch["classification_labels"].numpy().reshape(-1))
+        
+        # Collect loss_mask if present (for gene body filtering)
+        if "loss_mask" in batch:
+            all_loss_masks.append(batch["loss_mask"].numpy().reshape(-1))
 
         if usage_preds is not None and "usage_positions" in batch and not skip_usage:
             _accumulate_usage(
@@ -970,9 +953,18 @@ def collect_predictions(
                 condition_mapping=condition_mapping,
             )
 
+    cls_probs = np.concatenate(all_cls_probs, axis=0)
+    cls_labels = np.concatenate(all_cls_labels, axis=0)
+    
+    # Filter by loss_mask if present (only evaluate gene body regions)
+    if all_loss_masks:
+        loss_mask = np.concatenate(all_loss_masks, axis=0)
+        cls_probs = cls_probs[loss_mask]
+        cls_labels = cls_labels[loss_mask]
+    
     return (
-        np.concatenate(all_cls_probs, axis=0),
-        np.concatenate(all_cls_labels, axis=0),
+        cls_probs,
+        cls_labels,
         usage_per_cond,
     )
 
@@ -1542,11 +1534,11 @@ def plot_usage_correlation_by_tissue(
     # Tissue colors (matching notebook)
     TISSUE_COLORS = {
         'Brain': '#3399cc',
+        'Midbrain': '#34b3e6',
         'Cerebellum': '#34ccff',
         'Heart': '#cc0100',
         'Kidney': '#cc9900',
         'Liver': '#339900',
-        'Midbrain': '#6699cc',
         'Ovary': '#cc329a',
         'Testis': '#ff6600'
     }
