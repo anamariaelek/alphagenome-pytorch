@@ -341,6 +341,10 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         # Load BED intervals first so we know which chromosomes are needed
         all_intervals, chromosomes = _load_intervals_from_bed(bed_file)
 
+        # Build a stable chromosome → integer index mapping for coordinate tracking
+        self.chrom_names: list[str] = sorted(chromosomes)
+        self._chrom_to_idx: dict[str, int] = {c: i for i, c in enumerate(self.chrom_names)}
+
         # Genome backend – pass chromosome set to avoid loading the full genome
         if isinstance(genome, str) or isinstance(genome, Path):
             self._cached_genome = CachedGenome(str(genome), chromosomes=chromosomes)
@@ -422,6 +426,8 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
             "organism_index": torch.tensor(self.organism_index, dtype=torch.long),
             "classification_labels": classification_labels,
             "loss_mask": loss_mask,
+            "window_start": torch.tensor(win_start, dtype=torch.int64),
+            "chrom_idx": torch.tensor(self._chrom_to_idx.get(chrom, -1), dtype=torch.int32),
         }
 
         # ── Usage targets (sparse) ────────────────────────────────────────────
@@ -507,6 +513,8 @@ def collate_splice(
         "organism_index": torch.stack([b["organism_index"] for b in batch]),
         "classification_labels": torch.stack([b["classification_labels"] for b in batch]),
         "loss_mask": torch.stack([b["loss_mask"] for b in batch]),
+        "window_start": torch.stack([b["window_start"] for b in batch]),
+        "chrom_idx": torch.stack([b["chrom_idx"] for b in batch]),
     }
     if "usage_positions" in batch[0]:
         result["usage_positions"] = torch.stack([b["usage_positions"] for b in batch])

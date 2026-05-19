@@ -54,32 +54,45 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 
 # Create a timestamp for unique log file names
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+TIMESTAMP="intersect" # gtf usage union intersect intersect_usage
 
 # Work directory
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
-# Model directory
+# Models directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
-RUN=132kb_human_mouse_rat_rabbit_opossum
+
+# Pretrained model for sanity check
+CHECKPOINT_PATH=${WORK_DIR}/checkpoints/pretrained.pth
+PRED_DIR=preds_pretrained_${TIMESTAMP}
+
+# Finetuned model
+for RUN in 132kb_intersect_human_mouse_rat_rabbit_opossum 132kb_union_human_mouse_rat_rabbit_opossum 132kb_human_mouse_rat_rabbit_opossum 132kb_human_mouse_rat_rabbit 132kb_human_mouse_rat; do
+# RUN=132kb_intersect_human_mouse_rat_rabbit_opossum
+CHECKPOINT_PATH="${DIR}/${RUN}"
+PRED_DIR=preds_${TIMESTAMP}
+
+# Data configuration
+DATA_CONFIG="${DIR}/data/data_config_${TIMESTAMP}.json"
 
 # Evaluation settings
-EVAL_SPECIES="mouse"
-
 for EVAL_SPECIES in human mouse rat rabbit opossum; do
-DATA_CONFIG="${DIR}/data/data_config.json"
-OUT_DIR=${DIR}/${RUN}/preds_epoch_04/${EVAL_SPECIES}/
+OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 
 python ${WORK_DIR}/scripts/evaluate_splice.py \
-    --checkpoint "${DIR}/${RUN}" \
+    --checkpoint "${CHECKPOINT_PATH}" \
     --data-config "${DATA_CONFIG}" \
-    --eval-species ${EVAL_SPECIES} \
+    --eval-species "${EVAL_SPECIES}" \
     --per-tissue \
-    --overwrite \
-    --batch-size 4 \
+    --batch-size 2 \
     --device cuda \
-    --max-windows 5000 \
     --seed 1950 \
-    --output-dir ${OUT_DIR}
+    --output-dir "${OUT_DIR}" \
+    --overwrite
+
+#   --max-windows 1000 \
+
+done
 
 done

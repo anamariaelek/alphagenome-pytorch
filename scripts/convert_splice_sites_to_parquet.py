@@ -23,8 +23,8 @@ Spliser _usage.parquet file (after applying Alpha+Beta and Alpha filters).
 Use --usage-mode to control how they are combined:
   union     (default) adds usage sites on top of GTF sites
   intersect restricts output to GTF sites that also appear in the usage parquet
-    intersect+gtf aliases intersect (keeps overlapping GTF sites)
-        intersect+usage keeps all filtered usage sites (overlap + usage-only)
+  intersect+gtf aliases intersect (keeps overlapping GTF sites)
+  intersect+usage keeps all filtered usage sites (overlap + usage-only)
 The companion _usage.json must reside in the same directory.
 
 Usage
@@ -243,7 +243,7 @@ def convert_splice_sites_to_parquet(
             provided. ``'union'`` (default) adds usage sites on top of GTF
             sites. ``'intersect'`` and ``'intersect+gtf'`` restrict to GTF
             sites that also appear in the usage parquet. ``'intersect+usage'``
-            keeps all filtered usage sites.
+            and ``'usage-only'`` keep all filtered usage sites (ignoring GTF).
     """
     import pandas as pd
 
@@ -299,13 +299,14 @@ def convert_splice_sites_to_parquet(
                 gtf_df[key].apply(tuple, axis=1).isin(usage_set)
             ].copy()
             frames = [gtf_df_filtered]
-        elif usage_mode == "intersect+usage":
-            print(f"  Intersect+Usage (output): {n_usage:>10,} (all filtered usage sites)")
+        elif usage_mode in {"intersect+usage", "usage-only"}:
+            mode_label = "Usage-only" if usage_mode == "usage-only" else "Intersect+Usage"
+            print(f"  {mode_label} (output): {n_usage:>10,} (all filtered usage sites)")
             frames = [usage_df.copy()]
         else:
             raise ValueError(
                 f"Unknown usage_mode: {usage_mode!r}. Expected one of "
-                "'union', 'intersect', 'intersect+gtf', 'intersect+usage'."
+                "'union', 'intersect', 'intersect+gtf', 'intersect+usage', 'usage-only'."
             )
     elif usage_df is not None:
         # No GTF provided — usage only
@@ -390,11 +391,11 @@ Examples:
                         help="Prepend 'chr' to all chromosome names (e.g. '1' → 'chr1').")
     parser.add_argument("--strip-chr-prefix", action="store_true",
                         help="Remove 'chr' prefix from chromosome names (e.g. 'chr1' → '1').")
-    parser.add_argument("--usage-mode", default="union", choices=["union", "intersect", "intersect+gtf", "intersect+usage"],
+    parser.add_argument("--usage-mode", default="union", choices=["union", "intersect", "intersect+gtf", "intersect+usage", "usage-only"],
                         help="How to combine GTF and usage sites when --usage-parquet is given. "
                              "'union' (default): add usage sites on top of GTF sites. "
                              "'intersect' or 'intersect+gtf': keep overlapping GTF sites only. "
-                            "'intersect+usage': keep all filtered usage sites.")
+                             "'intersect+usage' or 'usage-only': keep all filtered usage sites (ignoring GTF).")
     args = parser.parse_args()
 
     if args.add_chr_prefix and args.strip_chr_prefix:

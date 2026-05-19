@@ -130,163 +130,6 @@ def build_gtf_position_set(gtf_parquet: str) -> set[tuple[str, int]]:
 
 
 
-# ---------------------------------------------------------------------------
-# Gene-overlap filtering
-# ---------------------------------------------------------------------------
-
-def build_gene_intervals(gene_annotation_parquet: str) -> dict[str, np.ndarray]:
-    """Build merged gene intervals per chromosome from a gene annotation parquet.
-
-    Reads transcript (or all) features and merges overlapping intervals per
-    chromosome.  Returns ``{chrom: array of shape (N, 2)}`` where each row is
-    a ``[start, end)`` 0-based half-open interval (sorted, non-overlapping).
-    """
-    import pandas as pd
-
-    df = pd.read_parquet(
-        gene_annotation_parquet,
-        columns=["Chromosome", "Feature", "Start", "End"],
-    )
-    tx = df[df["Feature"] == "transcript"][["Chromosome", "Start", "End"]]
-    if tx.empty:
-        # Fallback: use all rows (some annotations lack an explicit transcript feature)
-        tx = df[["Chromosome", "Start", "End"]].drop_duplicates()
-    tx = tx.copy()
-    tx["Chromosome"] = tx["Chromosome"].astype(str)
-
-    result: dict[str, np.ndarray] = {}
-    for chrom, grp in tx.groupby("Chromosome"):
-        starts = grp["Start"].values.astype(np.int64)
-        ends = grp["End"].values.astype(np.int64)
-        order = np.argsort(starts)
-        starts = starts[order]
-        ends = ends[order]
-
-        # Merge overlapping / adjacent intervals
-        ms = [int(starts[0])]
-        me = [int(ends[0])]
-        for i in range(1, len(starts)):
-            if starts[i] <= me[-1]:
-                me[-1] = max(me[-1], int(ends[i]))
-            else:
-                ms.append(int(starts[i]))
-                me.append(int(ends[i]))
-        result[str(chrom)] = np.column_stack([ms, me])
-    return result
-
-
-def _window_overlaps_genes(
-    chrom: str,
-    win_start: int,
-    win_end: int,
-    gene_intervals: dict[str, np.ndarray],
-) -> bool:
-    """Return True if [win_start, win_end) overlaps any merged gene interval."""
-    intervals = gene_intervals.get(chrom)
-    if intervals is None:
-        return False
-    starts = intervals[:, 0]
-    ends = intervals[:, 1]
-    # Overlap condition: interval.start < win_end AND interval.end > win_start
-    lo = int(np.searchsorted(ends, win_start, side="right"))   # first end > win_start
-    hi = int(np.searchsorted(starts, win_end, side="left"))    # first start >= win_end
-    return lo < hi
-
-
-def filter_bed_by_gene_overlap(
-    bed_file: str,
-    gene_intervals: dict[str, np.ndarray],
-    output_bed: str | Path,
-    sequence_length: int = 131_072,
-) -> tuple[int, int]:
-    """Write a filtered BED keeping only windows that overlap gene regions.
-
-    Returns ``(n_kept, n_total)``.
-    """
-    half = sequence_length // 2
-    output_bed = Path(output_bed)
-    output_bed.parent.mkdir(parents=True, exist_ok=True)
-
-    # Build a chromosome alias map (handle chr-prefix mismatches)
-    alias: dict[str, str] = {}
-    for chrom in gene_intervals:
-        alias[chrom] = chrom
-        if chrom.startswith("chr"):
-            alias[chrom[3:]] = chrom
-        else:
-            alias["chr" + chrom] = chrom
-
-    n_kept = n_total = 0
-    with open(bed_file) as fin, open(output_bed, "w") as fout:
-        for line in fin:
-            if line.startswith("#"):
-                fout.write(line)
-                continue
-            parts = line.strip().split("\t")
-            if len(parts) < 3:
-                continue
-            n_total += 1
-            chrom_raw = parts[0]
-            chrom = alias.get(chrom_raw, chrom_raw)
-            center = (int(parts[1]) + int(parts[2])) // 2
-            win_start = center - half
-            win_end = center + half
-            if _window_overlaps_genes(chrom, win_start, win_end, gene_intervals):
-                fout.write(line)
-                n_kept += 1
-    return n_kept, n_total
-
-
-def build_gene_overlap_mask(
-    bed_file: str,
-    gene_intervals: dict[str, np.ndarray],
-    sequence_length: int = 131_072,
-) -> np.ndarray:
-    """Build a boolean mask over all per-position predictions.
-
-    Returns a 1-D boolean array of length ``n_windows * sequence_length``
-    where ``True`` means the position falls within a gene interval.
-    """
-    half = sequence_length // 2
-
-    # Chromosome alias map (handle chr-prefix mismatches)
-    alias: dict[str, str] = {}
-    for chrom in gene_intervals:
-        alias[chrom] = chrom
-        if chrom.startswith("chr"):
-            alias[chrom[3:]] = chrom
-        else:
-            alias["chr" + chrom] = chrom
-
-    masks: list[np.ndarray] = []
-    with open(bed_file) as f:
-        for line in f:
-            if line.startswith("#"):
-                continue
-            parts = line.strip().split("\t")
-            if len(parts) < 3:
-                continue
-            chrom_raw = parts[0]
-            chrom = alias.get(chrom_raw, chrom_raw)
-            center = (int(parts[1]) + int(parts[2])) // 2
-            win_start = center - half
-
-            win_mask = np.zeros(sequence_length, dtype=bool)
-            intervals = gene_intervals.get(chrom)
-            if intervals is not None:
-                starts = intervals[:, 0]
-                ends = intervals[:, 1]
-                lo = int(np.searchsorted(ends, win_start, side="right"))
-                hi = int(np.searchsorted(starts, win_start + sequence_length, side="left"))
-                for gs, ge in zip(starts[lo:hi], ends[lo:hi]):
-                    rel_start = max(0, int(gs) - win_start)
-                    rel_end = min(sequence_length, int(ge) - win_start)
-                    if rel_start < rel_end:
-                        win_mask[rel_start:rel_end] = True
-            masks.append(win_mask)
-
-    return np.concatenate(masks)
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -335,12 +178,6 @@ def parse_args() -> argparse.Namespace:
         help="Skip inference; load saved predictions from --output-dir instead.",
     )
 
-    parser.add_argument(
-        "--gene-overlap-annotation", nargs="*", default=None,
-        help="Gene annotation parquets used only for gene-overlap filtering "
-             "(Chromosome/Start/End/Feature), one per organism. When provided, "
-             "only BED windows/positions overlapping gene regions are evaluated.",
-    )
     parser.add_argument(
         "--per-condition", action="store_true",
         help="Evaluate and plot usage separately per condition.",
@@ -871,7 +708,7 @@ def collect_predictions(
     seq_len: int = 131_072,
     skip_usage: bool = False,
     condition_mapping: dict[int, int] | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict]:
+) -> tuple[np.ndarray, np.ndarray, dict, np.ndarray | None]:
     """Run inference for one organism.
 
     Args:
@@ -884,10 +721,12 @@ def collect_predictions(
     cls_probs               : (N_masked_positions, 5)  float32 - only positions where loss_mask=True
     cls_labels              : (N_masked_positions,)    int64 - only positions where loss_mask=True
     usage_per_cond          : dict  condition_idx -> {'pred': list[float], 'true': list[float]}
+    loss_mask_full          : (N_all_positions,) bool - full loss_mask before filtering, or None
     
     Note:
         If loss_mask is present in batches, only predictions for masked positions
         (gene body regions) are returned. If loss_mask is absent, all positions are returned.
+        The loss_mask_full return value is the concatenated mask before filtering is applied.
     """
     all_cls_probs: list[np.ndarray] = []
     all_cls_labels: list[np.ndarray] = []
@@ -951,21 +790,25 @@ def collect_predictions(
                 batch["usage_mask"].numpy(),
                 usage_per_cond,
                 condition_mapping=condition_mapping,
+                window_starts=batch["window_start"].numpy() if "window_start" in batch else None,
+                chrom_idxs=batch["chrom_idx"].numpy() if "chrom_idx" in batch else None,
             )
 
     cls_probs = np.concatenate(all_cls_probs, axis=0)
     cls_labels = np.concatenate(all_cls_labels, axis=0)
     
-    # Filter by loss_mask if present (only evaluate gene body regions)
+    # Concatenate loss_mask before filtering
+    loss_mask_full = None
     if all_loss_masks:
-        loss_mask = np.concatenate(all_loss_masks, axis=0)
-        cls_probs = cls_probs[loss_mask]
-        cls_labels = cls_labels[loss_mask]
+        loss_mask_full = np.concatenate(all_loss_masks, axis=0)
+        cls_probs = cls_probs[loss_mask_full]
+        cls_labels = cls_labels[loss_mask_full]
     
     return (
         cls_probs,
         cls_labels,
         usage_per_cond,
+        loss_mask_full,
     )
 
 
@@ -976,6 +819,8 @@ def _accumulate_usage(
     mask: np.ndarray,           # (B, max_sites, n_data_cond) bool
     acc: dict,
     condition_mapping: dict[int, int] | None = None,
+    window_starts: np.ndarray | None = None,  # (B,) int64 genomic start of each window
+    chrom_idxs: np.ndarray | None = None,     # (B,) int32 chromosome index per window
 ) -> None:
     """Accumulate usage predictions and ground truth.
     
@@ -983,6 +828,8 @@ def _accumulate_usage(
         usage_preds: Model predictions (B, S, T_model)
         condition_mapping: Optional mapping from data condition index -> model condition index
                           for cross-species evaluation. Only accumulates mapped conditions.
+        window_starts: Optional genomic start coordinate for each window in the batch.
+        chrom_idxs: Optional chromosome integer index for each window in the batch.
     """
     B = positions.shape[0]
     n_data_cond = values.shape[2]
@@ -994,6 +841,12 @@ def _accumulate_usage(
         valid_vals = values[i][valid]       # (k, n_data_cond)
         valid_mask = mask[i][valid]         # (k, n_data_cond) bool
         valid_preds = usage_preds[i, valid_pos, :]  # (k, T_model)
+
+        # Genomic coordinates for this window
+        win_start = int(window_starts[i]) if window_starts is not None else 0
+        chrom_idx = int(chrom_idxs[i]) if chrom_idxs is not None else -1
+        # 0-based absolute genomic positions for the valid sites
+        genomic_positions = valid_pos + win_start  # (k,) int
 
         for data_c in range(n_data_cond):
             obs = valid_mask[:, data_c]
@@ -1011,9 +864,11 @@ def _accumulate_usage(
                 model_c = data_c
             
             # Extract predictions from model output index, store under data index
-            entry = acc.setdefault(data_c, {"pred": [], "true": []})
+            entry = acc.setdefault(data_c, {"pred": [], "true": [], "chrom_idx": [], "genomic_pos": []})
             entry["pred"].extend(valid_preds[obs, model_c].tolist())
             entry["true"].extend(valid_vals[obs, data_c].tolist())
+            entry["chrom_idx"].extend([chrom_idx] * int(obs.sum()))
+            entry["genomic_pos"].extend(genomic_positions[obs].tolist())
 
 
 
@@ -1502,16 +1357,20 @@ def plot_usage_correlation_by_tissue(
     for cond_idx, data in usage_per_cond.items():
         if len(data["pred"]) > 1 and cond_idx in condition_info:
             try:
+                # Check if data has variance (not all constant)
+                if np.std(data["true"]) == 0 or np.std(data["pred"]) == 0:
+                    continue  # Skip constant arrays
                 r, p_value = pearsonr(data["true"], data["pred"])
-                condition_correlations.append({
-                    'condition_idx': cond_idx,
-                    'condition_name': condition_info[cond_idx]['name'],
-                    'tissue': condition_info[cond_idx]['tissue'],
-                    'timepoint': condition_info[cond_idx]['timepoint'],
-                    'correlation': r,
-                    'p_value': p_value,
-                    'n_sites': len(data["pred"])
-                })
+                if not np.isnan(r):  # Only include valid correlations
+                    condition_correlations.append({
+                        'condition_idx': cond_idx,
+                        'condition_name': condition_info[cond_idx]['name'],
+                        'tissue': condition_info[cond_idx]['tissue'],
+                        'timepoint': condition_info[cond_idx]['timepoint'],
+                        'correlation': r,
+                        'p_value': p_value,
+                        'n_sites': len(data["pred"])
+                    })
             except Exception:
                 continue
 
@@ -1531,6 +1390,20 @@ def plot_usage_correlation_by_tissue(
         )
         return None
     
+    # Filter out tissues with no valid correlation values
+    valid_tissues = corr_df.groupby('tissue')['correlation'].apply(
+        lambda x: x.notna().any()
+    )
+    valid_tissues = valid_tissues[valid_tissues].index.tolist()
+    
+    if len(valid_tissues) == 0:
+        logging.getLogger("evaluate_splice").warning(
+            "No tissues with valid correlations; skipping tissue correlation boxplot"
+        )
+        return None
+    
+    corr_df = corr_df[corr_df['tissue'].isin(valid_tissues)].copy()
+    
     # Tissue colors (matching notebook)
     TISSUE_COLORS = {
         'Brain': '#3399cc',
@@ -1549,14 +1422,16 @@ def plot_usage_correlation_by_tissue(
     # Create figure
     fig, ax = plt.subplots(figsize=(max(6, n_tissues * 0.8), 5))
     
-    # Create boxplot with lower zorder
+    # Create boxplot - use hue parameter to satisfy seaborn API
     sns.boxplot(
         data=corr_df,
         x='tissue',
         y='correlation',
+        hue='tissue',
         order=tissues,
-        showfliers=False,
         palette=[TISSUE_COLORS.get(t, '#888888') for t in tissues],
+        showfliers=False,
+        legend=False,
         ax=ax,
         zorder=1
     )
@@ -1636,9 +1511,13 @@ def save_predictions(
     cls_probs: np.ndarray,
     cls_labels: np.ndarray,
     usage_per_cond: dict,
+    chrom_names: list[str] | None = None,
 ) -> None:
     """Persist prediction arrays to disk for later re-plotting / re-analysis as Parquet."""
+
     out_dir.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
+    # Save predictions as before
     npz_kwargs: dict = dict(
         cls_probs  = cls_probs.astype(np.float32),
         cls_labels = cls_labels.astype(np.int64),
@@ -1646,10 +1525,13 @@ def save_predictions(
     npz_path = out_dir / f"predictions_{org_name}.npz"
     np.savez_compressed(npz_path, **npz_kwargs)
 
+    # Save usage predictions
     usage_path = out_dir / f"usage_{org_name}.npz"
     cond_ids_chunks: list[np.ndarray] = []
     pred_chunks: list[np.ndarray] = []
     true_chunks: list[np.ndarray] = []
+    genomic_pos_chunks: list[np.ndarray] = []
+    chrom_idx_chunks: list[np.ndarray] = []
     stats_cond_ids: list[int] = []
     stats_n: list[int] = []
     stats_sum_pred: list[float] = []
@@ -1657,6 +1539,7 @@ def save_predictions(
     stats_sum_pred2: list[float] = []
     stats_sum_true2: list[float] = []
     stats_sum_prod: list[float] = []
+    has_coords = False
 
     for cond_idx, data in usage_per_cond.items():
         pred = np.asarray(data["pred"], dtype=np.float32)
@@ -1666,6 +1549,14 @@ def save_predictions(
         cond_ids_chunks.append(np.full(pred.size, int(cond_idx), dtype=np.int32))
         pred_chunks.append(pred)
         true_chunks.append(true)
+
+        # Genomic coordinate arrays (present when batch contained window_start/chrom_idx)
+        if "genomic_pos" in data and "chrom_idx" in data:
+            gpos = np.asarray(data["genomic_pos"], dtype=np.int64)
+            cidx = np.asarray(data["chrom_idx"], dtype=np.int32)
+            genomic_pos_chunks.append(gpos)
+            chrom_idx_chunks.append(cidx)
+            has_coords = True
 
         stats_cond_ids.append(int(cond_idx))
         stats_n.append(int(pred.size))
@@ -1686,8 +1577,7 @@ def save_predictions(
         pred_arr = np.array([], dtype=np.float32)
         true_arr = np.array([], dtype=np.float32)
 
-    np.savez_compressed(
-        usage_path,
+    npz_kwargs: dict = dict(
         cond_ids=cond_ids_arr,
         pred=pred_arr,
         true=true_arr,
@@ -1699,6 +1589,18 @@ def save_predictions(
         stats_sum_true2=np.array(stats_sum_true2, dtype=np.float64),
         stats_sum_prod=np.array(stats_sum_prod, dtype=np.float64),
     )
+
+    if has_coords and genomic_pos_chunks and chrom_names:
+        # Combine into "chrom:position" strings — one entry per observation
+        all_chrom_idxs = np.concatenate(chrom_idx_chunks, axis=0)
+        all_genomic_pos = np.concatenate(genomic_pos_chunks, axis=0)
+        chr_pos = np.array(
+            [f"{chrom_names[ci]}:{gp}" for ci, gp in zip(all_chrom_idxs, all_genomic_pos)],
+            dtype=str,
+        )
+        npz_kwargs["chr_pos"] = chr_pos
+
+    np.savez_compressed(usage_path, **npz_kwargs)
 
     logging.getLogger("evaluate_splice").info(f"  Saved: {npz_path}  {usage_path}")
 
@@ -1894,12 +1796,6 @@ def main() -> None:
         bed_files.append(bed_file)
     logger.info(f"BED files    : {bed_files}")
 
-    if args.gene_overlap_annotation is not None and len(args.gene_overlap_annotation) != len(species_specs):
-        sys.exit(
-            f"--gene-overlap-annotation: expected {len(species_specs)} file(s), "
-            f"got {len(args.gene_overlap_annotation)}"
-        )
-
     def species_needs_inference(spec: dict) -> bool:
         """Return True when this species still needs inference in the current run."""
         if args.skip_predictions:
@@ -1948,6 +1844,7 @@ def main() -> None:
         logger.info("Using stats-first loading mode: raw usage arrays are skipped for faster exact metrics.")
 
 
+    import pandas as pd
     for i, (spec, bed_file) in enumerate(zip(species_specs, bed_files)):
         org_idx: int = spec["organism_index"]
         org_name: str = spec.get("name", ORGANISM_NAMES.get(org_idx, f"organism_{org_idx}"))
@@ -2042,26 +1939,9 @@ def main() -> None:
             if not usage_results and usage_per_cond:
                 usage_results[""] = (usage_per_cond, org_name)
         else:
-            # -- Load annotation (for gene filtering if provided) ----------------
-            seq_len = model_cfg.get("sequence_length", 131_072)
-            if args.gene_overlap_annotation is not None:
-                gene_intervals = build_gene_intervals(args.gene_overlap_annotation[i])
-                n_genes = sum(len(iv) for iv in gene_intervals.values())
-                logger.info(
-                    f"[{org_name}] Loaded {n_genes:,} merged gene intervals "
-                    f"across {len(gene_intervals)} chromosomes"
-                )
-                filtered_bed = out_dir / f"filtered_bed_{org_name}.bed"
-                n_kept, n_total = filter_bed_by_gene_overlap(
-                    bed_file, gene_intervals, filtered_bed, seq_len,
-                )
-                logger.info(
-                    f"[{org_name}] Gene-overlap filter: kept {n_kept:,} / "
-                    f"{n_total:,} windows ({100*n_kept/max(n_total,1):.1f}%)"
-                )
-                bed_file = str(filtered_bed)
-
             # -- Dataset & loader --------------------------------------------
+            seq_len = model_cfg.get("sequence_length", 131_072)
+            
             logger.info(f"[{org_name}] Loading annotation from {spec['annotation_parquet']} …")
             annotation = SpliceSiteAnnotation(spec["annotation_parquet"])
 
@@ -2169,17 +2049,32 @@ def main() -> None:
             total_windows = len(dataset)
             
             # Random sampling if max_windows is specified
+            sampled_bed_file = None
             if args.max_windows is not None and args.max_windows < total_windows:
                 import random
                 from torch.utils.data import Subset
                 
                 random.seed(args.seed)
                 indices = random.sample(range(total_windows), args.max_windows)
-                dataset = Subset(dataset, indices)
+                indices_sorted = sorted(indices)
+                # Use sorted indices for Subset to maintain consistent ordering
+                dataset = Subset(dataset, indices_sorted)
                 logger.info(
                     f"[{org_name}] Randomly sampled {len(dataset):,} / {total_windows:,} windows "
                     f"(seed={args.seed})"
                 )
+                
+                # Save a filtered BED with only the sampled windows
+                # Build from actual dataset positions, not BED line indices
+                # (some BED lines may have been skipped during dataset creation)
+                sampled_bed_file = out_dir / f"sampled_windows_{org_name}.bed"
+                with open(sampled_bed_file, "w") as fout:
+                    for idx in indices_sorted:
+                        chrom, win_start, win_end = dataset.dataset._positions[idx]
+                        mask_start_rel, mask_end_rel = dataset.dataset._loss_masks[idx]
+                        # Write BED format: chr, start, end, gene_id (placeholder), mask_start_rel, mask_end_rel
+                        fout.write(f"{chrom}\t{win_start}\t{win_end}\t.\t{mask_start_rel}\t{mask_end_rel}\n")
+                logger.info(f"[{org_name}] Saved sampled windows to {sampled_bed_file}")
             else:
                 logger.info(f"[{org_name}] {total_windows:,} windows to evaluate")
 
@@ -2194,7 +2089,7 @@ def main() -> None:
             # -- Inference ---------------------------------------------------
             # Classification predictions (same for all usage heads)
             logger.info(f"[{org_name}] Running classification inference …")
-            cls_probs, cls_labels, _ = collect_predictions(
+            cls_probs, cls_labels, _, loss_mask_full = collect_predictions(
                 model=model,
                 usage_heads=usage_heads,
                 loader=loader,
@@ -2214,7 +2109,7 @@ def main() -> None:
                         f"[{org_name}] Running usage inference with {source_name} head "
                         f"(organism_index {usage_org_idx}) …"
                     )
-                    _, _, usage_per_cond = collect_predictions(
+                    _, _, usage_per_cond, _ = collect_predictions(
                         model=model,
                         usage_heads=usage_heads,
                         loader=loader,
@@ -2241,6 +2136,9 @@ def main() -> None:
                 cls_probs=cls_probs.astype(np.float32),
                 cls_labels=cls_labels.astype(np.int64),
             )
+            # Also save loss_mask if it exists
+            if loss_mask_full is not None:
+                npz_kwargs["loss_mask"] = loss_mask_full
             cls_npz_path = out_dir / f"predictions_{org_name}.npz"
             np.savez_compressed(cls_npz_path, **npz_kwargs)
             logger.info(f"  Saved: {cls_npz_path}")
@@ -2250,6 +2148,10 @@ def main() -> None:
                 import tempfile
                 import shutil
                 
+                # Extract chromosome name list from the dataset for coordinate tracking
+                _ds = dataset.dataset if hasattr(dataset, "dataset") else dataset
+                _chrom_names = getattr(_ds, "chrom_names", None)
+
                 for suffix, (usage_per_cond, source_name) in usage_results.items():
                     result_name = f"{org_name}_{suffix}" if suffix else org_name
                     usage_path = out_dir / f"usage_{result_name}.npz"
@@ -2257,13 +2159,13 @@ def main() -> None:
                     # Use save_predictions to create usage file, extract just the usage part
                     with tempfile.TemporaryDirectory(dir=out_dir) as tmpdir:
                         tmpdir_path = Path(tmpdir)
-                        save_predictions(tmpdir_path, "temp", cls_probs, cls_labels, usage_per_cond)
+                        save_predictions(tmpdir_path, "temp", cls_probs, cls_labels, usage_per_cond,
+                                         chrom_names=_chrom_names)
                         # Move only usage file
                         temp_usage = tmpdir_path / "usage_temp.npz"
                         if temp_usage.exists():
                             shutil.move(str(temp_usage), str(usage_path))
                             logger.info(f"  Saved: {usage_path}")
-                            
             
             usage_stats = {}
 
@@ -2291,30 +2193,6 @@ def main() -> None:
         logger.info(f"{'='*62}")
         logger.info(f"  {org_name.upper()} - Metrics & Plotting")
         logger.info(f"{'='*62}")
-
-        # -- Filter positions to gene-overlapping sites ----------------------
-        if args.gene_overlap_annotation is not None:
-            gene_intervals = build_gene_intervals(args.gene_overlap_annotation[i])
-
-            # Determine which BED was used for predictions
-            filtered_bed_path = out_dir / f"filtered_bed_{org_name}.bed"
-            if filtered_bed_path.exists():
-                mask_bed = str(filtered_bed_path)
-            else:
-                mask_bed = str(bed_file)
-
-            gene_mask = build_gene_overlap_mask(
-                mask_bed, gene_intervals, seq_len,
-            )
-            n_in_gene = int(gene_mask.sum())
-            n_total_pos = len(gene_mask)
-            logger.info(
-                f"[{org_name}] Position-level gene filter: {n_in_gene:,} / "
-                f"{n_total_pos:,} positions in genes ({100*n_in_gene/max(n_total_pos,1):.1f}%)"
-            )
-
-            cls_probs = cls_probs[gene_mask]
-            cls_labels = cls_labels[gene_mask]
 
         # -- Metrics ---------------------------------------------------------
         logger.info(f"[{org_name}] Computing metrics …")
