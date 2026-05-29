@@ -141,6 +141,8 @@ DEFAULTS = {
     "sequence_length": 131072,
     "organism_index": 0,
     "max_sites": 1024,
+    "usage_coord_base": 0,
+    "observed_conditions_only": False,
     # Model
     "lora_rank": 8,
     "lora_alpha": 16,
@@ -244,6 +246,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         choices=[0, 1],
         help="Coordinate base in usage parquet: 0 for 0-based (default), 1 if using 1-based Spliser format",
+    )
+    data.add_argument(
+        "--observed-conditions-only",
+        action="store_true",
+        help="Only compute usage loss for observed (position, condition) pairs. "
+             "When False (default), unobserved conditions are treated as 0 and included in loss.",
     )
 
     # Model arguments
@@ -399,6 +407,7 @@ def parse_args() -> argparse.Namespace:
         "max_sites",
         "cache_genome",
         "usage_coord_base",
+        "observed_conditions_only",
         "pretrained_weights",
         "lora_rank",
         "lora_alpha",
@@ -546,8 +555,10 @@ def create_datasets(args: argparse.Namespace, rank: int):
             usage_index = SpliceSiteUsageIndex(
                 spec["usage_parquet"],
                 usage_coord_base=args.usage_coord_base,
+                observed_conditions_only=args.observed_conditions_only,
             )
             print_rank0(f"  [{name}] Using usage_coord_base={args.usage_coord_base} (1=Spliser/1-based, 0=already 0-based)", rank)
+            print_rank0(f"  [{name}] observed_conditions_only={args.observed_conditions_only} (True=only observed, False=unobserved as 0)", rank)
             cond = usage_index.n_conditions
             species_n_conditions[spec["organism_index"]] = cond
             print_rank0(f"  [{name}] Usage conditions: {cond}", rank)
@@ -997,6 +1008,8 @@ def main() -> None:
         "species_specs": args.species_specs,
         "sequence_length": args.sequence_length,
         "max_sites": args.max_sites,
+        "usage_coord_base": args.usage_coord_base,
+        "observed_conditions_only": args.observed_conditions_only,
         "species_n_conditions": species_n_conditions,
         "cls_weight": args.cls_weight,
         "usage_weight": args.usage_weight,

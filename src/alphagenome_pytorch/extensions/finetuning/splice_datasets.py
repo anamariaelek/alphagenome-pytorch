@@ -138,7 +138,8 @@ class SpliceSiteUsageIndex:
             (default: 10).
         alpha_min: Optional minimum ``Alpha`` count.
         usage_coord_base: Coordinate base in the parquet (1 or 0).
-            Use ``1`` (default) for Spliser output, which is 1-based.
+            Use ``1`` for Spliser output, which is 1-based.
+            Use ``0`` for 0-based coordinates (e.g. if you already post-processed the Spliser output to convert to 0-based).
     """
 
     def __init__(
@@ -146,7 +147,7 @@ class SpliceSiteUsageIndex:
         usage_parquet: str | Path,
         min_coverage: int = 10,
         alpha_min: int | None = None,
-        usage_coord_base: int = 1,
+        usage_coord_base: int = 0,
         observed_conditions_only: bool = False,
     ) -> None:
         import pandas as pd

@@ -26,6 +26,7 @@ def convert_gtf_to_parquet(
     input_path: str | Path,
     output_path: str | Path,
     compression: str = "snappy",
+    biotype_filter: list[str] | None = None,
 ) -> None:
     """Convert GTF file to Parquet format.
 
@@ -33,6 +34,7 @@ def convert_gtf_to_parquet(
         input_path: Path to input GTF/GFF file
         output_path: Path to output Parquet file
         compression: Parquet compression codec ('snappy', 'gzip', 'zstd', 'none')
+        biotype_filter: Optional list of gene biotypes to keep (e.g., ['protein_coding', 'lncRNA'])
     """
     import pandas as pd
     import pyranges
@@ -56,6 +58,24 @@ def convert_gtf_to_parquet(
 
     print(f"  Total features: {len(df):,}")
     print(f"  Feature types: {df['Feature'].value_counts().to_dict()}")
+
+    # Apply biotype filter if specified
+    if biotype_filter is not None:
+        # Try gene_biotype first, fall back to gene_type
+        biotype_col = None
+        if 'gene_biotype' in df.columns:
+            biotype_col = 'gene_biotype'
+        elif 'gene_type' in df.columns:
+            biotype_col = 'gene_type'
+        
+        if biotype_col is None:
+            print(f"  Warning: No gene_biotype or gene_type column found, skipping biotype filter")
+        else:
+            original_len = len(df)
+            df = df[df[biotype_col].isin(biotype_filter)].copy()
+            print(f"  Filtered to biotypes {biotype_filter}: {len(df):,} features ({100*len(df)/original_len:.1f}% kept)")
+            if len(df) == 0:
+                raise ValueError(f"No features match biotype filter {biotype_filter}")
 
     # Optimize column types for smaller file and faster loading
     print("Optimizing column types...")
@@ -123,6 +143,12 @@ Examples:
         --input annotation.gtf \\
         --output annotation.parquet \\
         --compression zstd
+
+    # Filter to only protein-coding and lncRNA genes
+    python scripts/convert_gtf_to_parquet.py \\
+        --input gencode.v49.annotation.gtf \\
+        --output gencode.v49.protein_coding_lncRNA.parquet \\
+        --biotype-filter protein_coding lncRNA
         """,
     )
     parser.add_argument(
@@ -141,6 +167,12 @@ Examples:
         default="snappy",
         help="Parquet compression codec (default: snappy)",
     )
+    parser.add_argument(
+        "--biotype-filter",
+        nargs="+",
+        help="Optional list of gene biotypes to keep (e.g., protein_coding lncRNA miRNA). "
+             "Filters based on gene_biotype or gene_type column.",
+    )
 
     args = parser.parse_args()
 
@@ -149,6 +181,7 @@ Examples:
             input_path=args.input,
             output_path=args.output,
             compression=args.compression,
+            biotype_filter=args.biotype_filter,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

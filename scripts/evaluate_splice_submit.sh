@@ -54,7 +54,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 
 # Create a timestamp for unique log file names
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TIMESTAMP="intersect" # gtf usage union intersect intersect_usage
+TIMESTAMP="intersect_protein_coding" # gtf usage intersect union intersect_protein_coding union_protein_coding
 
 # Work directory
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
@@ -67,8 +67,7 @@ CHECKPOINT_PATH=${WORK_DIR}/checkpoints/pretrained.pth
 PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-for RUN in 132kb_intersect_human_mouse_rat_rabbit_opossum 132kb_union_human_mouse_rat_rabbit_opossum 132kb_human_mouse_rat_rabbit_opossum 132kb_human_mouse_rat_rabbit 132kb_human_mouse_rat; do
-# RUN=132kb_intersect_human_mouse_rat_rabbit_opossum
+RUN=132kb_w_human_mouse_rat_rabbit_opossum
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
@@ -86,13 +85,9 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --eval-species "${EVAL_SPECIES}" \
     --per-tissue \
     --batch-size 2 \
+    --max-windows 1000 \
     --device cuda \
     --seed 1950 \
-    --output-dir "${OUT_DIR}" \
-    --overwrite
-
-#   --max-windows 1000 \
-
-done
+    --output-dir "${OUT_DIR}" 
 
 done
