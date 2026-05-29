@@ -18,7 +18,7 @@
 species:
   - name: human
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect_usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/human/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/human/fold0/valid.bed
@@ -26,7 +26,7 @@ species:
 
   - name: mouse
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect_usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/mouse/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/mouse/fold0/valid.bed
@@ -34,7 +34,7 @@ species:
 
   - name: rat
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites_intersect_usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites_intersect.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rat/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rat/fold0/valid.bed
@@ -42,7 +42,7 @@ species:
   
   - name: rabbit
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Oryctolagus_cuniculus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/splice_sites_intersect_usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/splice_sites_intersect.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rabbit/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/rabbit/fold0/valid.bed
@@ -50,11 +50,19 @@ species:
   
   - name: opossum
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Monodelphis_domestica.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/splice_sites_intersect_usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/splice_sites_intersect.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/opossum/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/opossum/fold0/valid.bed
     organism_index: 4
+
+  - name: chicken
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Gallus_gallus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/splice_sites_intersect.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/chicken/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb/chicken/fold0/valid.bed
+    organism_index: 5
 
 classification_head_init:
   0: 0   # new organism 0 from pretrained organism 0
@@ -62,8 +70,9 @@ classification_head_init:
   2: 1   # new organism 2 from pretrained organism 1
   3: 1   # new organism 3 from pretrained organism 1
   4: 1   # new organism 4 from pretrained organism 1
+  5: 1   # new organism 5 from pretrained organism 1 
 
-# ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
 # Pretrained weights
 # ---------------------------------------------------------------------------
 pretrained_weights: $HOME/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
@@ -106,7 +115,7 @@ warmup_steps: 1000
 lr_schedule: cosine              # cosine | constant
 
 # Loss weights
-cls_weight: 1.0
+cls_weight: 100
 usage_weight: 1.0
 max_grad_norm: 1.0             # gradient clipping (0 to disable)
 
@@ -129,7 +138,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 132kb_encode_intersect_usage_human_mouse_rat_rabbit_opossum        # defaults to timestamp
+run_name: 132kb_w_human_mouse_rat_rabbit_opossum_chicken        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

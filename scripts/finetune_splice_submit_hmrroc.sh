@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hmrro-intersect-usage-132kb
+#SBATCH --job-name=ft-hmrroc-pc-132kb
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
-#SBATCH --mem=200gb
-#SBATCH --time=48:00:00
+#SBATCH --mem=240gb
+#SBATCH --time=36:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_hmrro_132kb.yaml"
+CONFIG="${WORK_DIR}/configs/finetune_hmrroc_132kb.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then
