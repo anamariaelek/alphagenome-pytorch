@@ -1217,6 +1217,10 @@ def main() -> None:
                     secs = int(seconds % 60)
                     return f"{mins}m{secs}s"
             
+
+            # Add BCE/MSE breakdown if both are present
+            dual_train = hasattr(train_metrics, "bce_loss")
+            dual_val = hasattr(val_metrics, "bce_loss")
             summary = (
                 f"Epoch {epoch}: "
                 f"train_loss={train_loss:.4f}  "
@@ -1228,17 +1232,35 @@ def main() -> None:
                 f"lr={current_lr:.2e}\n"
                 f"  Timing: {format_time(epoch_elapsed)} ({format_time(train_metrics.elapsed_s)} train + {format_time(val_metrics.elapsed_s)} val)"
             )
+            if dual_train or dual_val:
+                summary += "\n  [usage breakdown]"
+                if dual_train:
+                    summary += (
+                        f"\n    train_bce_loss={train_metrics.bce_loss:.4f}  train_delta_loss={train_metrics.delta_loss:.4f}"
+                    )
+                if dual_val:
+                    summary += (
+                        f"\n    val_bce_loss={val_metrics.bce_loss:.4f}  val_delta_loss={val_metrics.delta_loss:.4f}"
+                    )
             print(summary)
 
             # Log epoch metrics
-
             extra = {
                 "train_cls_loss": train_metrics.cls_loss,
                 "train_usage_loss": train_metrics.usage_loss,
                 "val_cls_loss": val_metrics.cls_loss,
                 "val_usage_loss": val_metrics.usage_loss,
             }
-
+            if dual_train:
+                extra.update({
+                    "train_bce_loss": train_metrics.bce_loss,
+                    "train_delta_loss": train_metrics.delta_loss,
+                })
+            if dual_val:
+                extra.update({
+                    "val_bce_loss": val_metrics.bce_loss,
+                    "val_delta_loss": val_metrics.delta_loss,
+                })
             logger.log_epoch(epoch, train_loss, val_loss, current_lr, is_best, extra)
 
             # Save checkpoints

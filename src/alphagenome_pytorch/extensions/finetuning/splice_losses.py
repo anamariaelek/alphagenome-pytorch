@@ -90,7 +90,8 @@ def splice_usage_loss(
     usage_values: Tensor,
     usage_mask: Tensor,
     delta_from_mean: bool = False,
-) -> tuple[Tensor, dict]:
+    return_vals: bool = False,
+) -> tuple:
     """Masked loss for per-condition splice-site usage.
 
     Gathers model predictions at sparse splice-site positions and computes
@@ -150,6 +151,8 @@ def splice_usage_loss(
         # No observations in this batch — return zero loss with gradient and empty metrics dict
         loss = (predictions * 0.0).sum()
         metrics_dict = {"correlation": float("nan"), "n_valid": 0}
+        if return_vals:
+            return loss, metrics_dict, torch.tensor([]), torch.tensor([])
         return loss, metrics_dict
 
     if delta_from_mean:
@@ -186,6 +189,8 @@ def splice_usage_loss(
         else:
             metrics_dict["correlation"] = float("nan")
         metrics_dict["n_valid"] = int(n_valid)
+    if return_vals:
+        return loss, metrics_dict, pred_vals, true_vals
     return loss, metrics_dict
 
 
