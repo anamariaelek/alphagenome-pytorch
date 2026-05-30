@@ -89,12 +89,21 @@ def splice_usage_loss(
     usage_positions: Tensor,
     usage_values: Tensor,
     usage_mask: Tensor,
+    delta_from_mean: bool = False,
 ) -> tuple[Tensor, dict]:
-    """Masked binary cross-entropy loss for per-condition splice-site usage.
+    """Masked loss for per-condition splice-site usage.
 
     Gathers model predictions at sparse splice-site positions and computes
-    BCE only for ``(position, condition)`` pairs where the usage index has
+    the loss only for ``(position, condition)`` pairs where the usage index has
     an observation (as indicated by *usage_mask*).
+
+    By default (``delta_from_mean=False``) uses binary cross-entropy with
+    logits (BCE) to predict absolute usage values in ``[0, 1]``.
+
+    When *delta_from_mean* is ``True``, the loss is instead MSE on the
+    deviation of each condition from the per-site mean across all observed
+    conditions.  This encourages the model to learn the relative difference
+    in usage between conditions for a given site rather than the absolute level.
 
     Args:
         predictions: Raw logits from
@@ -108,12 +117,16 @@ def splice_usage_loss(
         usage_mask: Boolean mask indicating observed
             ``(position, condition)`` pairs, shape
             ``(B, max_sites, n_conditions)``.
+        delta_from_mean: When ``True``, compute MSE on the deviation of each
+            condition from the per-site mean across observed conditions
+            (mean computed separately for predictions and targets).
+            When ``False`` (default), compute BCE on absolute usage values.
 
     Returns:
         Tuple of:
-        - ``loss``: Scalar mean binary cross-entropy over all observed entries.
+        - ``loss``: Scalar mean loss over all observed entries.
         - ``metrics``: dict with ``'correlation'`` (overall) and
-          ``'corr_cond0'`` … ``'corr_cond{n_conditions-1}'`` per-condition correlation strings.
+          ``'n_valid'`` count.
     """
     _B, max_sites, n_conditions = usage_values.shape
 
@@ -139,20 +152,36 @@ def splice_usage_loss(
         metrics_dict = {"correlation": float("nan"), "n_valid": 0}
         return loss, metrics_dict
 
-    loss = F.binary_cross_entropy_with_logits(
-        gathered[final_mask],
-        usage_values[final_mask],
-        reduction="mean",
-    )
+    if delta_from_mean:
+        pred_sigmoid = torch.sigmoid(gathered)  # (B, max_sites, n_cond)
+        # Compute per-site mean over observed conditions only
+        n_obs = final_mask.sum(-1, keepdim=True).float().clamp(min=1)  # (B, max_sites, 1)
+        mean_preds = (pred_sigmoid * final_mask).sum(-1, keepdim=True) / n_obs
+        mean_targets = (usage_values * final_mask).sum(-1, keepdim=True) / n_obs
+        # Compute deviation from per-site mean
+        delta_preds = pred_sigmoid - mean_preds      # (B, max_sites, n_cond)
+        delta_targets = usage_values - mean_targets  # (B, max_sites, n_cond)
+        loss = F.mse_loss(
+            delta_preds[final_mask],
+            delta_targets[final_mask],
+            reduction="mean",
+        )
+        pred_vals = delta_preds[final_mask].detach()
+        true_vals = delta_targets[final_mask]
+    else:
+        loss = F.binary_cross_entropy_with_logits(
+            gathered[final_mask],
+            usage_values[final_mask],
+            reduction="mean",
+        )
+        pred_vals = torch.sigmoid(gathered[final_mask]).detach()
+        true_vals = usage_values[final_mask]
 
     # Calculate correlation metrics
     metrics_dict = {}
     with torch.no_grad():
-        pred_sigmoid = torch.sigmoid(gathered[final_mask])
-        true_vals = usage_values[final_mask]
-
-        if pred_sigmoid.numel() > 1:
-            corr = torch.corrcoef(torch.stack([pred_sigmoid, true_vals]))[0, 1].item()
+        if pred_vals.numel() > 1:
+            corr = torch.corrcoef(torch.stack([pred_vals, true_vals]))[0, 1].item()
             metrics_dict["correlation"] = corr
         else:
             metrics_dict["correlation"] = float("nan")

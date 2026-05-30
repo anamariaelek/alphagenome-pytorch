@@ -101,6 +101,7 @@ def train_epoch_splice(
     epoch: int = 0,
     logger: "TrainingLogger | None" = None,
     max_grad_norm: float = 1.0,
+    usage_delta_from_mean: bool = False,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -206,7 +207,8 @@ def train_epoch_splice(
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                     usage_loss_val = splice_usage_loss(
-                        usage_out["logits"], usage_pos, usage_vals, usage_mask
+                        usage_out["logits"], usage_pos, usage_vals, usage_mask,
+                        delta_from_mean=usage_delta_from_mean,
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -308,6 +310,7 @@ def validate_splice(
     usage_weight: float = 1.0,
     class_weights: Tensor | None = None,
     use_amp: bool = True,
+    usage_delta_from_mean: bool = False,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -378,7 +381,8 @@ def validate_splice(
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 usage_loss_val = splice_usage_loss(
-                    usage_out["logits"], usage_pos, usage_vals, usage_mask
+                    usage_out["logits"], usage_pos, usage_vals, usage_mask,
+                    delta_from_mean=usage_delta_from_mean,
                 )
                 total_loss = total_loss + usage_weight * usage_loss_val
 

@@ -70,6 +70,11 @@ usage_coord_base: 0
 # observed_conditions_only: true means only compute loss for observed (position, condition) pairs
 observed_conditions_only: true
 
+# usage_delta_from_mean: false (default) computes MSE on absolute usage values
+# usage_delta_from_mean: true computes MSE on deviation from per-site mean across observed conditions
+usage_delta_from_mean: false
+
+
 # ---------------------------------------------------------------------------
 # Model / LoRA
 # ---------------------------------------------------------------------------
@@ -84,7 +89,7 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 4
+batch_size: 8
 gradient_accumulation_steps: 24   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
@@ -94,7 +99,16 @@ lr_schedule: cosine              # cosine | constant
 # Loss weights
 cls_weight: 1.0
 usage_weight: 1.0
-max_grad_norm: 1.0             # gradient clipping (0 to disable)
+
+# Only used if usage_delta_from_mean: true
+#   bce: weight for BCE on absolute usage
+#   delta_mse: weight for MSE on deviation from mean
+usage_loss_weights:
+  bce: 1.0
+  delta_mse: 1.0
+
+# Gradient clipping (0 to disable)
+max_grad_norm: 1.0
 
 # ---------------------------------------------------------------------------
 # Performance

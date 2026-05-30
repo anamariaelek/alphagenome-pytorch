@@ -95,6 +95,8 @@ def train_epoch_splice(
     epoch: int = 0,
     logger: "TrainingLogger | None" = None,
     max_grad_norm: float = 1.0,
+    usage_delta_from_mean: bool = False,
+    usage_loss_weights: dict | None = None,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -195,15 +197,36 @@ def train_epoch_splice(
 
                 # ── Usage loss (optional) ────────────────────────────────────────
                 usage_loss_val = torch.tensor(0.0, device=device)
+                usage_corr = {}
                 if active_usage_head is not None and "usage_positions" in batch:
                     usage_pos = batch["usage_positions"].to(device)
                     usage_vals = batch["usage_values"].to(device)
                     usage_mask = batch["usage_mask"].to(device)
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                    usage_loss_val, usage_corr = splice_usage_loss(
-                        usage_out["logits"], usage_pos, usage_vals, usage_mask
-                    )
+                    logits = usage_out["logits"]
+                    # Weighted combination logic
+                    if usage_delta_from_mean and usage_loss_weights is not None:
+                        bce_w = usage_loss_weights.get("bce", 1.0)
+                        delta_w = usage_loss_weights.get("delta_mse", 1.0)
+                        # BCE loss
+                        bce_loss, bce_corr = splice_usage_loss(
+                            logits, usage_pos, usage_vals, usage_mask, delta_from_mean=False
+                        )
+                        # Delta-from-mean loss
+                        delta_loss, delta_corr = splice_usage_loss(
+                            logits, usage_pos, usage_vals, usage_mask, delta_from_mean=True
+                        )
+                        usage_loss_val = bce_w * bce_loss + delta_w * delta_loss
+                        # Merge metrics (show both correlations)
+                        usage_corr = {"correlation_bce": bce_corr.get("correlation", 0.0),
+                                      "correlation_delta": delta_corr.get("correlation", 0.0),
+                                      "n_valid": bce_corr.get("n_valid", 0)}
+                    else:
+                        usage_loss_val, usage_corr = splice_usage_loss(
+                            logits, usage_pos, usage_vals, usage_mask,
+                            delta_from_mean=usage_delta_from_mean,
+                        )
                     total_loss = total_loss + usage_weight * usage_loss_val
             if not torch.isfinite(total_loss):
                 continue
@@ -319,6 +342,8 @@ def validate_splice(
     usage_weight: float = 1.0,
     class_weights: Tensor | None = None,
     use_amp: bool = True,
+    usage_delta_from_mean: bool = False,
+    usage_loss_weights: dict | None = None,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -388,15 +413,36 @@ def validate_splice(
             total_loss = cls_weight * cls_loss_val
 
             usage_loss_val = torch.tensor(0.0, device=device)
+            usage_corr = {}
             if active_usage_head is not None and "usage_positions" in batch:
                 usage_pos = batch["usage_positions"].to(device)
                 usage_vals = batch["usage_values"].to(device)
                 usage_mask = batch["usage_mask"].to(device)
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                usage_loss_val, usage_corr = splice_usage_loss(
-                    usage_out["logits"], usage_pos, usage_vals, usage_mask
-                )
+                logits = usage_out["logits"]
+                # Weighted combination logic
+                if usage_delta_from_mean and usage_loss_weights is not None:
+                    bce_w = usage_loss_weights.get("bce", 1.0)
+                    delta_w = usage_loss_weights.get("delta_mse", 1.0)
+                    # BCE loss
+                    bce_loss, bce_corr = splice_usage_loss(
+                        logits, usage_pos, usage_vals, usage_mask, delta_from_mean=False
+                    )
+                    # Delta-from-mean loss
+                    delta_loss, delta_corr = splice_usage_loss(
+                        logits, usage_pos, usage_vals, usage_mask, delta_from_mean=True
+                    )
+                    usage_loss_val = bce_w * bce_loss + delta_w * delta_loss
+                    # Merge metrics (show both correlations)
+                    usage_corr = {"correlation_bce": bce_corr.get("correlation", 0.0),
+                                  "correlation_delta": delta_corr.get("correlation", 0.0),
+                                  "n_valid": bce_corr.get("n_valid", 0)}
+                else:
+                    usage_loss_val, usage_corr = splice_usage_loss(
+                        logits, usage_pos, usage_vals, usage_mask,
+                        delta_from_mean=usage_delta_from_mean,
+                    )
                 total_loss = total_loss + usage_weight * usage_loss_val
 
         metrics.loss += total_loss.item()

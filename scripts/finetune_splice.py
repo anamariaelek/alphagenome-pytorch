@@ -143,6 +143,7 @@ DEFAULTS = {
     "max_sites": 1024,
     "usage_coord_base": 0,
     "observed_conditions_only": False,
+    "usage_delta_from_mean": False,
     # Model
     "lora_rank": 8,
     "lora_alpha": 16,
@@ -252,6 +253,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only compute usage loss for observed (position, condition) pairs. "
              "When False (default), unobserved conditions are treated as 0 and included in loss.",
+    )
+    data.add_argument(
+        "--usage-delta-from-mean",
+        action="store_true",
+        help="Compute usage loss on the deviation of each condition from the per-site mean "
+             "across observed conditions (MSE on deltas). When False (default), compute MSE "
+             "on absolute usage values.",
     )
 
     # Model arguments
@@ -408,6 +416,7 @@ def parse_args() -> argparse.Namespace:
         "cache_genome",
         "usage_coord_base",
         "observed_conditions_only",
+        "usage_delta_from_mean",
         "pretrained_weights",
         "lora_rank",
         "lora_alpha",
@@ -509,6 +518,15 @@ def parse_args() -> argparse.Namespace:
         # Also expand pretrained_weights from CLI
         if args.pretrained_weights:
             args.pretrained_weights = expand_path(args.pretrained_weights)
+
+    # Parse usage_loss_weights from config if present
+    usage_loss_weights = None
+    if "usage_loss_weights" in config_data and config_data["usage_loss_weights"] is not None:
+        usage_loss_weights = config_data["usage_loss_weights"]
+    # Default if not present and needed
+    if usage_loss_weights is None and getattr(args, "usage_delta_from_mean", False):
+        usage_loss_weights = {"bce": 1.0, "delta_mse": 1.0}
+    args.usage_loss_weights = usage_loss_weights
 
     args.species_specs = species_specs
     return args
@@ -1010,6 +1028,7 @@ def main() -> None:
         "max_sites": args.max_sites,
         "usage_coord_base": args.usage_coord_base,
         "observed_conditions_only": args.observed_conditions_only,
+        "usage_delta_from_mean": args.usage_delta_from_mean,
         "species_n_conditions": species_n_conditions,
         "cls_weight": args.cls_weight,
         "usage_weight": args.usage_weight,
@@ -1153,6 +1172,8 @@ def main() -> None:
                 epoch=epoch,
                 logger=logger,
                 max_grad_norm=args.max_grad_norm,
+                usage_delta_from_mean=args.usage_delta_from_mean,
+                usage_loss_weights=args.usage_loss_weights,
             )
 
             if handler.preempted:
@@ -1170,6 +1191,8 @@ def main() -> None:
                 usage_weight=args.usage_weight,
                 class_weights=class_weights,
                 use_amp=use_amp,
+                usage_delta_from_mean=args.usage_delta_from_mean,
+                usage_loss_weights=args.usage_loss_weights,
             )
 
             if torch.cuda.is_available():
