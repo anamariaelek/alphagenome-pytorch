@@ -75,6 +75,14 @@ cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 # 0 = already converted to 0-based coordinates
 usage_coord_base: 0
 
+# observed_conditions_only: false (default) means unobserved conditions are treated as 0 and included in loss
+# observed_conditions_only: true means only compute loss for observed (position, condition) pairs
+observed_conditions_only: true
+
+# usage_delta_from_mean: false (default) computes MSE on absolute usage values
+# usage_delta_from_mean: true computes MSE on deviation from per-site mean across observed conditions
+usage_delta_from_mean: false
+
 # ---------------------------------------------------------------------------
 # Model / LoRA
 # ---------------------------------------------------------------------------
@@ -99,7 +107,16 @@ lr_schedule: cosine              # cosine | constant
 # Loss weights
 cls_weight: 1.0
 usage_weight: 1.0
-max_grad_norm: 1.0             # gradient clipping (0 to disable)
+
+# Only used if usage_delta_from_mean: true
+#   bce: weight for BCE on absolute usage
+#   delta_mse: weight for MSE on deviation from mean
+usage_loss_weights:
+  bce: 1.0
+  delta_mse: 1.0
+
+# Gradient clipping (0 to disable)
+max_grad_norm: 1.0 
 
 # ---------------------------------------------------------------------------
 # Performance

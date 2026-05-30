@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hmrro-intersect-usage-132kb
+#SBATCH --job-name=ft-hmrro-observed-132kb
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
