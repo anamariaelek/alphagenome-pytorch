@@ -322,6 +322,14 @@ def train_epoch_splice(
         # Keep only recent batch times (rolling window of 100 batches)
         if len(recent_batch_times) > 100:
             recent_batch_times.pop(0)
+        # Limit batch_latencies to prevent unbounded memory growth
+        if len(batch_latencies) > 1000:
+            # Keep rolling average by downsampling
+            batch_latencies = batch_latencies[-1000:]
+        
+        # Periodic memory cleanup to prevent accumulation
+        if (batch_idx + 1) % 100 == 0 and device.type == 'cuda':
+            torch.cuda.empty_cache()
 
     # Average
     if metrics.n_batches > 0:
@@ -412,7 +420,7 @@ def validate_splice(
     val_start = time.perf_counter()
 
     batch_latencies = []
-    for batch in val_loader:
+    for batch_idx, batch in enumerate(val_loader):
         batch_start = time.perf_counter()
         seq = batch["sequence"].to(device)
         org_idx = batch["organism_index"].to(device)
@@ -488,6 +496,13 @@ def validate_splice(
         metrics.n_batches += 1
         batch_end = time.perf_counter()
         batch_latencies.append((batch_end - batch_start) * 1000.0)  # ms
+        # Limit batch_latencies in validation too
+        if len(batch_latencies) > 1000:
+            batch_latencies = batch_latencies[-1000:]
+        
+        # Periodic memory cleanup in validation
+        if (batch_idx + 1) % 100 == 0 and device.type == 'cuda':
+            torch.cuda.empty_cache()
 
     if metrics.n_batches > 0:
         metrics.loss /= metrics.n_batches

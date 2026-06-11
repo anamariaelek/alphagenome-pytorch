@@ -647,7 +647,7 @@ def create_dataloaders(
         pin_memory=True,
         collate_fn=collate_splice,
         prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0,
+        persistent_workers=False,  # Disabled to prevent memory accumulation in workers
     )
 
     val_loader = DataLoader(
@@ -657,7 +657,7 @@ def create_dataloaders(
         pin_memory=True,
         collate_fn=collate_splice,
         prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0,
+        persistent_workers=False,  # Disabled to prevent memory accumulation in workers
     )
 
     return train_loader, val_loader, train_sampler, val_sampler
@@ -1303,6 +1303,10 @@ def main() -> None:
                     **usage_extra,
                 )
                 print(f"  Saved best model (val_loss={val_loss:.4f})")
+            
+            # Clear GPU memory at the end of each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
