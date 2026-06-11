@@ -661,6 +661,47 @@ def compute_usage_metrics_per_tissue(
 # Plotting
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# PR Curve Plotting (per-class AUPRC)
+# ---------------------------------------------------------------------------
+
+def plot_pr_curves(
+    cls_probs: np.ndarray,
+    cls_labels: np.ndarray,
+    class_names: list[str],
+    title: str,
+    output_path: Path,
+):
+    """Precision-recall curves for the 4 splice-site classes (one-vs-rest)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+
+    CLASS_COLORS = ['#ff7f00', '#33a02c', '#fdbf6f', '#b2df8a']
+    fig, ax = plt.subplots(figsize=(5, 4))
+    n_sites = len(cls_labels)
+    for c in range(4):
+        y_true = (cls_labels == c).astype(np.int32)
+        n_pos = y_true.sum()
+        if n_pos == 0:
+            continue
+        precision, recall, _ = precision_recall_curve(y_true, cls_probs[:, c])
+        pr_auc = float(average_precision_score(y_true, cls_probs[:, c]))
+        ax.plot(recall, precision,
+                label=f"{class_names[c]} (AUC={pr_auc:.3f}, n={n_pos:,})",
+                color=CLASS_COLORS[c])
+
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title(f"PR Curve – {title} (n={n_sites:,})")
+    ax.legend(loc="lower left", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
 def plot_tissue_correlations(
     cond_records: list[dict],
     org_name: str,
@@ -845,12 +886,25 @@ def main() -> None:
         )
         save_predictions(species_dir, org_name, cls_probs, cls_labels, usage_per_cond, logger, chrom_names=chrom_names)
 
+
         # Classification metrics
         cls_m = compute_classification_metrics(cls_probs, cls_labels)
         logger.info(f"  binary AUPRC:           {cls_m['binary_auprc']:.4f}")
         logger.info(f"  mean per-class AUPRC:   {cls_m['mean_splice_class_auprc']:.4f}")
         for name, ap in cls_m["per_class_auprc"].items():
             logger.info(f"    {name:<12s}  AUPRC={ap:.4f}  (n={cls_m['per_class_n_positives'][name]:,})")
+
+        # PR curve plot (per-class)
+        if not args.skip_plots:
+            pr_curve_path = species_dir / f"pr_curve_{org_name}.png"
+            plot_pr_curves(
+                cls_probs,
+                cls_labels,
+                SPLICE_CLASS_NAMES,
+                title=f"{org_name}",
+                output_path=pr_curve_path,
+            )
+            logger.info(f"  Saved PR curve plot: {pr_curve_path}")
 
         result = {**cls_m}
 
