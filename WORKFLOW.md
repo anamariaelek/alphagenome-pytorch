@@ -41,10 +41,10 @@ python scripts/convert_gtf_to_parquet.py \
 
 ```bash
 python -u scripts/convert_splice_usage_to_parquet.py \
-    --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/${species} \
+    --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/data/${species} \
     --output ${data_dir}/${species}/usage.parquet \
     --min-reproducibility 0.5 \
-    --min-coverage 100 \
+    --min-coverage 10 \
     --strip-chr-names > logs/usage_to_parquet_${species}.log
 ```
 
@@ -52,38 +52,26 @@ python -u scripts/convert_splice_usage_to_parquet.py \
 
 Save parquet file with splice site annotations. 
 
-To save only those sites found in gtf file:
+To save only those sites found in gtf file, you only pass the gtf file as input. Alternatively, you can also keep all sites with usage above a certain threshold, or take the union/intersection of the gtf and usage-based sites.
 
 ```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --output ${data_dir}/${species}/splice_sites_gtf.parquet > logs/splice_sites_to_parquet_${species}_gtf.log
-```
 
-To save only those sites found in usage file:
-
-```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --usage-mode usage-only \
     --min-alpha 5 \
     --output ${data_dir}/${species}/splice_sites_usage.parquet > logs/splice_sites_to_parquet_${species}_usage.log
-```
 
-To save all sites found in either gtf file or in usage file: `--usage-mode union`.
-
-```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --usage-mode union \
     --min-alpha 5 \
     --output ${data_dir}/${species}/splice_sites_union.parquet > logs/splice_sites_to_parquet_${species}_union.log
-```
 
-Alternativelly, to save annotations for only those sies found in both gtf file and in usage file: `--usage-mode intersect`.
-
-```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
@@ -101,13 +89,6 @@ python -u scripts/convert_splice_sites_to_parquet.py \
     --usage-mode 'intersect+usage' \
     --min-alpha 5 \
     --output ${data_dir}/${species}/splice_sites_intersect_usage.parquet > logs/splice_sites_to_parquet_${species}_intersect_usage.log
-
-# The noisy version without alpha filtering used for training
-python -u scripts/convert_splice_sites_to_parquet.py \
-    --gtf ${data_dir}/${species}/gene_annotation.parquet \
-    --usage-parquet ${data_dir}/${species}/usage.parquet \
-    --usage-mode 'intersect+usage' \
-    --output ${data_dir}/${species}/splice_sites.parquet > logs/splice_sites_to_parquet_${species}.log
 ```
 
 To additionally keep splice sites only for protein-coding genes, use pre-filtered gtf annotation file:
@@ -126,6 +107,13 @@ python -u scripts/convert_splice_sites_to_parquet.py \
     --usage-mode 'union' \
     --min-alpha 5 \
     --output ${data_dir}/${species}/splice_sites_union_protein_coding.parquet > logs/splice_sites_to_parquet_${species}_union_protein_coding.log
+
+python -u scripts/convert_splice_sites_to_parquet.py \
+    --gtf ${data_dir}/${species}/gene_annotation_protein_coding.parquet \
+    --usage-parquet ${data_dir}/${species}/usage.parquet \
+    --usage-mode 'intersect+usage' \
+    --min-alpha 5 \
+    --output ${data_dir}/${species}/splice_sites_intersect_usage_protein_coding.parquet > logs/splice_sites_to_parquet_${species}_intersect_usage_protein_coding.log
 ```
 
 # Prepare orthology-based folds
