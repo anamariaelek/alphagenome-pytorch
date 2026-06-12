@@ -145,6 +145,8 @@ def train_epoch_splice(
         usage_head.train()
         usage_head.to(device)
 
+    import gc
+    
     metrics = SpliceTrainMetrics()
     # For tracking separate loss components if both are used
     bce_loss_sum = 0.0
@@ -161,7 +163,6 @@ def train_epoch_splice(
     epoch_start = time.perf_counter()
     step_start  = time.perf_counter()
 
-    batch_latencies = []
     recent_batch_times = []  # Track recent batch times for rolling average
     for batch_idx, batch in enumerate(train_loader):
         batch_start = time.perf_counter()
@@ -272,6 +273,10 @@ def train_epoch_splice(
                 scheduler.step()
             optimizer.zero_grad()
             step += 1
+            
+            # Force garbage collection after optimizer step (every accumulation_steps batches)
+            # This helps release memory from gradient accumulation
+            gc.collect()
 
             # Accumulate metrics
             metrics.loss += total_loss.item()
@@ -314,29 +319,28 @@ def train_epoch_splice(
                 if logger is not None:
                     logger.log_step(log_metrics)
                 step_start = time.perf_counter()
-        # Record batch latency (for each optimizer step)
+        # Track recent batch times for rolling average (logging only)
         batch_end = time.perf_counter()
         batch_time = batch_end - batch_start
-        batch_latencies.append(batch_time * 1000.0)  # ms for metrics
         recent_batch_times.append(batch_time)  # seconds for logging
         # Keep only recent batch times (rolling window of 100 batches)
         if len(recent_batch_times) > 100:
             recent_batch_times.pop(0)
-        # Limit batch_latencies to prevent unbounded memory growth
-        if len(batch_latencies) > 1000:
-            # Keep rolling average by downsampling
-            batch_latencies = batch_latencies[-1000:]
         
-        # Periodic memory cleanup to prevent accumulation
-        if (batch_idx + 1) % 100 == 0 and device.type == 'cuda':
-            torch.cuda.empty_cache()
+        # Periodic memory cleanup to prevent RAM accumulation
+        if (batch_idx + 1) % 50 == 0:
+            gc.collect()  # Force Python garbage collection to free RAM
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+        
+        # Explicitly delete batch reference to help garbage collection
+        del batch
 
     # Average
     if metrics.n_batches > 0:
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
-        metrics.latency_ms = sum(batch_latencies) / len(batch_latencies)
     metrics.elapsed_s = time.perf_counter() - epoch_start
 
     # Add extra logging for dual loss
@@ -402,6 +406,8 @@ def validate_splice(
     Returns:
         :class:`SpliceTrainMetrics` averaged over the validation set.
     """
+    import gc
+    
     model.eval()
     if isinstance(usage_head, dict):
         for h in usage_head.values():
@@ -419,7 +425,6 @@ def validate_splice(
 
     val_start = time.perf_counter()
 
-    batch_latencies = []
     for batch_idx, batch in enumerate(val_loader):
         batch_start = time.perf_counter()
         seq = batch["sequence"].to(device)
@@ -494,21 +499,20 @@ def validate_splice(
         metrics.usage_loss += usage_loss_val.item()
         # No correlation tracking
         metrics.n_batches += 1
-        batch_end = time.perf_counter()
-        batch_latencies.append((batch_end - batch_start) * 1000.0)  # ms
-        # Limit batch_latencies in validation too
-        if len(batch_latencies) > 1000:
-            batch_latencies = batch_latencies[-1000:]
         
-        # Periodic memory cleanup in validation
-        if (batch_idx + 1) % 100 == 0 and device.type == 'cuda':
-            torch.cuda.empty_cache()
+        # Periodic memory cleanup in validation (RAM + GPU)
+        if (batch_idx + 1) % 50 == 0:
+            gc.collect()  # Force Python garbage collection
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+        
+        # Explicitly delete batch reference
+        del batch
 
     if metrics.n_batches > 0:
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
-        metrics.latency_ms = sum(batch_latencies) / len(batch_latencies)
     metrics.elapsed_s = time.perf_counter() - val_start
 
     if n_dual_batches > 0:

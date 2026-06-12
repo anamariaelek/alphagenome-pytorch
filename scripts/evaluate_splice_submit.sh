@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=eval-524-human
+#SBATCH --job-name=eval-pc-no-mask
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
-#SBATCH --mem=120gb
-#SBATCH --time=10:00:00
+#SBATCH --mem=60gb
+#SBATCH --time=8:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -54,7 +54,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 
 # Create a timestamp for unique log file names
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TIMESTAMP="intersect_protein_coding" # gtf usage intersect union intersect_protein_coding union_protein_coding
+TIMESTAMP="intersect" # gtf usage intersect union intersect_protein_coding union_protein_coding
 
 # Work directory
 WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
@@ -63,11 +63,11 @@ WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 
 # Pretrained model for sanity check
-CHECKPOINT_PATH=${WORK_DIR}/checkpoints/pretrained.pth
-PRED_DIR=preds_pretrained_${TIMESTAMP}
+# CHECKPOINT_PATH=${WORK_DIR}/checkpoints/pretrained.pth
+# PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=132kb_w_human_mouse_rat_rabbit_opossum
+RUN=132kb_encode_intersect_usage_pc_human_mouse_rat_rabbit_opossum 
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
@@ -84,7 +84,7 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --data-config "${DATA_CONFIG}" \
     --eval-species "${EVAL_SPECIES}" \
     --per-tissue \
-    --batch-size 2 \
+    --batch-size 8 \
     --max-windows 1000 \
     --device cuda \
     --seed 1950 \
