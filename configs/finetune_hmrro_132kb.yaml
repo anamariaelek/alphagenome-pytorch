@@ -66,7 +66,7 @@ classification_head_init:
 # ---------------------------------------------------------------------------
 # Pretrained weights
 # ---------------------------------------------------------------------------
-pretrained_weights: $HOME/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+pretrained_weights: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/checkpoints/model_fold_0.safetensors
 
 # ---------------------------------------------------------------------------
 # Training mode: linear-probe | lora | full
@@ -85,8 +85,10 @@ cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
 usage_coord_base: 0
 
 # observed_conditions_only: false (default) means unobserved conditions are treated as 0 and included in loss
-# observed_conditions_only: true means only compute loss for observed (position, condition) pairs
-observed_conditions_only: false
+# observed_conditions_only: true means only compute loss for:
+#     1) observed conditions in tissues with at least one observed timepoint, and
+#     2) all conditions in tissues with no observed timepoints (treating them as 0)
+observed_conditions_only: true
 
 # usage_delta_from_mean: false (default) computes MSE on absolute usage values
 # usage_delta_from_mean: true computes MSE on deviation from per-site mean across observed conditions
@@ -106,8 +108,8 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 4
-gradient_accumulation_steps: 32   # effective batch = batch_size * accum * gpus
+batch_size: 12
+gradient_accumulation_steps: 16   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -115,7 +117,7 @@ lr_schedule: cosine              # cosine | constant
 
 # Loss weights
 cls_weight: 1.0
-usage_weight: 10.0
+usage_weight: 1.0
 
 # Only used if usage_delta_from_mean: true
 #   bce: weight for BCE on absolute usage
@@ -146,7 +148,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 132kb_encode_intersect_usage_pc_mask_human_mouse_rat_rabbit_opossum        # defaults to timestamp
+run_name: 132kb_encode_intersect_usage_pc_obs_human_mouse_rat_rabbit_opossum        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

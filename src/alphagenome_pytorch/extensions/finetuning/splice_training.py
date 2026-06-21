@@ -294,8 +294,8 @@ def train_epoch_splice(
                 avg_batch_time = sum(recent_batch_times) / len(recent_batch_times) if recent_batch_times else 0.0
                 elapsed = time.perf_counter() - step_start
                 sps = log_every / elapsed  # optimizer steps per second
-                # Add usage_bce and usage_delta to log if present
-                usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_bce is not None else ""
+                # Add usage_bce and usage_delta to log if usage_delta is calculated (indicates dual loss mode)
+                usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_delta is not None else ""
                 usage_delta_str = f" usage_mse_delta={usage_delta:.4f}" if usage_delta is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "

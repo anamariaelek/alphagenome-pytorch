@@ -187,6 +187,16 @@ def parse_args() -> argparse.Namespace:
         help="Evaluate and plot usage separately per tissue (from usage metadata).",
     )
     parser.add_argument(
+        "--observed-conditions-only", action="store_true",
+        help="When set, only evaluate usage on conditions observed in the data (and 0s only if no condition in tissue is observed). "
+             "Otherwise, evaluate on all conditions (infering 0 usage for unobserved conditions).",
+    )
+    parser.add_argument(
+        "--cross-species-usage", action="store_true",
+        help="When set, also evaluate usage predictions from all model species against the target species' conditions (if metadata allows matching). "
+             "This enables cross-species evaluation of usage heads.",
+    )
+    parser.add_argument(
         "--skip-plots", action="store_true",
         help="Skip all plotting (metrics only, faster).",
     )
@@ -871,9 +881,6 @@ def _accumulate_usage(
             entry["genomic_pos"].extend(genomic_positions[obs].tolist())
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
@@ -1038,23 +1045,6 @@ def compute_usage_metrics_from_stats(usage_stats: dict | None) -> dict:
         "usage_n_conditions_total": int(n.size),
         "usage_n_observations": int(n.sum()),
     }
-
-
-
-
-
-
-
-
-def print_usage_metrics(org_name: str, usage_m: dict, logger: logging.Logger | None = None) -> None:
-    log_func = logger.info if logger else print
-    log_func(f"\n{org_name} – Usage Prediction Metrics:")
-    log_func(f"  Mean Pearson r (across conditions): {usage_m['usage_mean_pearson_r']:.4f}")
-    log_func(f"  Median Pearson r (across conditions): {usage_m['usage_median_pearson_r']:.4f}")
-    log_func(
-        f"  Conditions evaluated: {usage_m['usage_n_conditions_evaluated']} / {usage_m['usage_n_conditions_total']}"
-    )
-    log_func(f"  Total observations: {usage_m['usage_n_observations']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -1498,9 +1488,6 @@ def plot_usage_correlation_by_tissue(
     return per_tissue_metrics
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Save / load predictions
 # ---------------------------------------------------------------------------
@@ -1660,13 +1647,6 @@ def load_predictions(
 
 
 # ---------------------------------------------------------------------------
-# Per-source metrics
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -1706,10 +1686,15 @@ def print_metrics(org_name: str, cls_m: dict, usage_m: dict | None, logger: logg
         log_func(f"{prefix}Usage: no valid conditions found (too few observations per condition)")
 
 
-
-
-
-
+def print_usage_metrics(org_name: str, usage_m: dict, logger: logging.Logger | None = None) -> None:
+    log_func = logger.info if logger else print
+    log_func(f"\n{org_name} – Usage Prediction Metrics:")
+    log_func(f"  Mean Pearson r (across conditions): {usage_m['usage_mean_pearson_r']:.4f}")
+    log_func(f"  Median Pearson r (across conditions): {usage_m['usage_median_pearson_r']:.4f}")
+    log_func(
+        f"  Conditions evaluated: {usage_m['usage_n_conditions_evaluated']} / {usage_m['usage_n_conditions_total']}"
+    )
+    log_func(f"  Total observations: {usage_m['usage_n_observations']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -1960,7 +1945,7 @@ def main() -> None:
                     spec["usage_parquet"],
                     min_coverage=args.min_coverage,
                     usage_coord_base=0,
-                    observed_conditions_only=False,
+                    observed_conditions_only=args.observed_conditions_only,
                 )
                 
                 # Match conditions between model and data
@@ -2009,31 +1994,32 @@ def main() -> None:
                             f"{len(condition_mapping)} matched conditions"
                         )
 
-                    # Also evaluate with all OTHER trained usage heads that have overlapping conditions
-                    all_cross_mappings = match_cross_species_usage_conditions(
-                        model_cfg, spec, logger=logger
-                    )
-                    for other_org_idx, other_cond_mapping in all_cross_mappings.items():
-                        if other_org_idx == org_idx:
-                            continue  # Already handled above
-                        source_spec = next(
-                            (s for s in model_cfg.get("species_specs", [])
-                             if s["organism_index"] == other_org_idx),
-                            None,
+                    if args.cross_species_usage or spec.get("cross_species", False):
+                        # Also evaluate with all OTHER trained usage heads that have overlapping conditions
+                        all_cross_mappings = match_cross_species_usage_conditions(
+                            model_cfg, spec, logger=logger
                         )
-                        if source_spec:
-                            source_species = extract_species_from_path(
-                                source_spec.get("annotation_parquet", "")
+                        for other_org_idx, other_cond_mapping in all_cross_mappings.items():
+                            if other_org_idx == org_idx:
+                                continue  # Already handled above
+                            source_spec = next(
+                                (s for s in model_cfg.get("species_specs", [])
+                                if s["organism_index"] == other_org_idx),
+                                None,
                             )
-                            source_name = next(
-                                (k for k, v in SPECIES_NAME_MAP.items() if v == source_species),
-                                f"org{other_org_idx}",
-                            )
-                            usage_head_configs[other_org_idx] = (other_cond_mapping, source_name)
-                            logger.info(
-                                f"[{org_name}] Will also evaluate with {source_name} usage head "
-                                f"(organism_index {other_org_idx}, {len(other_cond_mapping)} conditions)"
-                            )
+                            if source_spec:
+                                source_species = extract_species_from_path(
+                                    source_spec.get("annotation_parquet", "")
+                                )
+                                source_name = next(
+                                    (k for k, v in SPECIES_NAME_MAP.items() if v == source_species),
+                                    f"org{other_org_idx}",
+                                )
+                                usage_head_configs[other_org_idx] = (other_cond_mapping, source_name)
+                                logger.info(
+                                    f"[{org_name}] Will also evaluate with {source_name} usage head "
+                                    f"(organism_index {other_org_idx}, {len(other_cond_mapping)} conditions)"
+                                )
 
             logger.info(f"[{org_name}] Building dataset from {bed_file} …")
             dataset = SpliceSiteDataset(

@@ -134,18 +134,19 @@ class SpliceSiteUsageIndex:
             JSON metadata file is expected at the same path with a ``.json``
             extension (e.g. ``splice_usage.json`` next to
             ``splice_usage.parquet``).
-        min_coverage: Minimum ``Alpha + Beta`` to include a site
+        min_coverage: Optional minimum ``Alpha + Beta`` to include a site
             (default: 10).
         alpha_min: Optional minimum ``Alpha`` count.
         usage_coord_base: Coordinate base in the parquet (1 or 0).
             Use ``1`` for Spliser output, which is 1-based.
             Use ``0`` for 0-based coordinates (e.g. if you already post-processed the Spliser output to convert to 0-based).
+        observed_conditions_only: If ``True``, usage targets will only be returned for conditions with observed coverage.
     """
 
     def __init__(
         self,
         usage_parquet: str | Path,
-        min_coverage: int = 10,
+        min_coverage: int | None = 10,
         alpha_min: int | None = None,
         usage_coord_base: int = 0,
         observed_conditions_only: bool = False,
@@ -167,12 +168,26 @@ class SpliceSiteUsageIndex:
         self.n_conditions: int = len(self._condition_labels)
         self.observed_conditions_only = observed_conditions_only
         none_class = self._class_labels.get("None", 4)
+        
+        # Map condition indices to Tissues
+        # Assumes condition labels are formatted like "Tissue_Timepoint" (e.g., "Brain_1", "Brain_2")
+        self._tissue_to_cond_indices: dict[str, list[int]] = {}
+        self._cond_idx_to_tissue: dict[int, str] = {}
+        
+        for cond_name, cond_idx in self._condition_labels.items():
+            tissue = cond_name.split("_")[0]  # Extracts "Brain" from "Brain_1"
+            self._tissue_to_cond_indices.setdefault(tissue, []).append(cond_idx)
+            self._cond_idx_to_tissue[cond_idx] = tissue
 
+        # Load usage data
         df = pd.read_parquet(usage_parquet)
 
-        # Filter: exclude "None" class and apply coverage thresholds
+        # Filter: exclude "None" class
         df = df[df["Label"] != none_class].copy()
-        df = df[df["Alpha"] + df["Beta"] >= min_coverage]
+        
+        # Apply coverage thresholds
+        if min_coverage is not None:
+            df = df[df["Alpha"] + df["Beta"] >= min_coverage]
         if alpha_min is not None:
             df = df[df["Alpha"] >= alpha_min]
 
@@ -215,7 +230,7 @@ class SpliceSiteUsageIndex:
             - ``masks``: per-site bool array of shape (n_conditions,) with
                             True only for observed conditions when
                             ``observed_conditions_only=True``; otherwise True for all
-                            conditions and unobserved conditions are treated as value=0.
+                            conditions so that unobserved conditions are treated as value=0.
         """
         site_positions: list[int] = []
         values_list: list[np.ndarray] = []
@@ -226,15 +241,40 @@ class SpliceSiteUsageIndex:
             entries = self._lookup.get(key)
             if not entries:
                 continue
+
             vals = np.zeros(self.n_conditions, dtype=np.float32)
-            mask = np.zeros(self.n_conditions, dtype=bool)
-            # Fill in observed SSE values (unobserved remain 0)
+            
+            # If observed_conditions_only is True, default everything to False (masked out)
+            # If False, default everything to True (standard behavior)
+            mask = np.zeros(self.n_conditions, dtype=bool) if self.observed_conditions_only else np.ones(self.n_conditions, dtype=bool)
+            
+            # Track which tissues have at least one observation for this specific genomic site
+            observed_tissues_for_site = set()
+            observed_cond_indices = []
+
+            # First pass: Fill values and identify which conditions/tissues are observed
             for cond_idx, sse in entries:
                 if 0 <= cond_idx < self.n_conditions:
                     vals[cond_idx] = sse
-                    mask[cond_idx] = True
-            if not self.observed_conditions_only:
-                mask[:] = True
+                    observed_cond_indices.append(cond_idx)
+
+                    if self.observed_conditions_only:
+                        tissue = self._cond_idx_to_tissue.get(cond_idx)
+                        if tissue:
+                            observed_tissues_for_site.add(tissue)
+
+            # Second pass: Refine masking logic if observed_conditions_only is activated
+            if self.observed_conditions_only:
+                # 1. For any tissue that has NO observed points at all, treat all its timepoints as True (Value=0)
+                for tissue, cond_indices in self._tissue_to_cond_indices.items():
+                    if tissue not in observed_tissues_for_site:
+                        for idx in cond_indices:
+                            mask[idx] = True  # Tell loss function to evaluate these biological 0s
+                
+                # 2. For tissues that DO have observations, only set True for the exact observed timepoints
+                for idx in observed_cond_indices:
+                    mask[idx] = True  # Keeps the actual data points visible, drops unobserved missing timepoints
+
             site_positions.append(int(pos))
             values_list.append(vals)
             masks_list.append(mask)

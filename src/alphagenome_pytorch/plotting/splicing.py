@@ -212,12 +212,13 @@ CHR_SIZES = {
     }
 }
 
+
 def plot_splice_site_dynamics(
     df,
     site_coords,
     metric='SSE',
-    tissue_order=None,
-    tissue_colors=None,
+    tissue_order=TISSUE_ORDER,
+    tissue_colors=TISSUE_COLORS,
     figsize=None,
     title=None,
     jitter=0.0,
@@ -267,10 +268,39 @@ def plot_splice_site_dynamics(
     if isinstance(site_coords, str):
         site_coords = [site_coords]
 
+
+    # --- Normalize column casing ---------------------------------------
+    rename_targets = ['species', 'chromosome', 'position', 'strand', 'tissue', 'timepoint']
+    df.columns = [col.capitalize() if col.lower() in rename_targets else col for col in df.columns]
+    if verbose:
+        print(f"Debug: DataFrame columns after capitalization: {df.columns.tolist()}")
+
+    if 'Condition_Name' not in df.columns:
+        if set(['Tissue', 'Timepoint']).issubset(df.columns):
+            df['Condition_Name'] = df['Tissue'].astype(str) + '_' + df['Timepoint'].astype(str)
+            if verbose:
+                print("Debug: Created 'Condition_Name' column by combining 'Tissue' and 'Timepoint'")
+        else:
+            raise ValueError(
+                "DataFrame must contain 'Condition_Name' column or both 'Tissue' "
+                "and 'Timepoint' columns to create it."
+            )
+
     # Check if DataFrame has optimal index for fast lookups
-    index_cols = ['Species', 'Chromosome', 'Position', 'Strand']
-    has_index = (isinstance(df.index, pd.MultiIndex) and 
-                 list(df.index.names) == index_cols)
+    index_cols = ['Species', 'Chromosome', 'Position']
+    
+    # Check if 'Strand' exists either as a column or as an index level name
+    has_strand = 'Strand' in df.columns or (
+        isinstance(df.index, pd.MultiIndex) and 'Strand' in df.index.names
+    )
+    if has_strand:
+        index_cols.append('Strand')
+
+    # Determine if the DataFrame is already properly MultiIndexed
+    has_index = (
+        isinstance(df.index, pd.MultiIndex)
+        and all(name in df.index.names for name in ['Species', 'Chromosome', 'Position'])
+    )
 
     site_filters = []
     for coord in site_coords:
@@ -307,14 +337,14 @@ def plot_splice_site_dynamics(
                     
                     if strand is not None:
                         # Specific strand requested
-                        level_sel = df.loc[(species, str(chrom), slice(start, end), strand), :]
+                        level_sel = df.loc[pd.IndexSlice[species, str(chrom), start:end, strand], :]
                     else:
                         # All strands - use slice(None) to select all values in the Strand level
-                        level_sel = df.loc[(species, str(chrom), slice(start, end), slice(None)), :]
+                        level_sel = df.loc[pd.IndexSlice[species, str(chrom), start:end, :], :]
                     
                     if isinstance(level_sel, pd.Series):
                         level_sel = level_sel.to_frame().T
-                    sites_in_range = level_sel.index.to_frame(index=False)[['Position', 'Strand']].drop_duplicates()
+                    sites_in_range = level_sel.index.to_frame(index=False)[index_cols[2:]].drop_duplicates() # Position (and Strand if present)
                     sites_in_range['Species'] = species
                     sites_in_range['Chromosome'] = str(chrom)
                 except (KeyError, IndexError) as e:
@@ -333,13 +363,13 @@ def plot_splice_site_dynamics(
                 )
                 if strand is not None:
                     mask = mask & (df['Strand'] == strand)
-                sites_in_range = df[mask][['Species', 'Chromosome', 'Position', 'Strand']].drop_duplicates()
+                sites_in_range = df[mask][index_cols].drop_duplicates()
 
             if sites_in_range.empty:
                 print(f"Warning: No sites found in range {coord}")
                 continue
 
-            sites_in_range = sites_in_range.sort_values(['Position', 'Strand'])
+            sites_in_range = sites_in_range.sort_values(index_cols[2:])  # Sort by Position (and Strand if present)
             for _, row in sites_in_range.iterrows():
                 site_filters.append((row['Species'], row['Chromosome'], row['Position'], row['Strand']))
 
@@ -357,11 +387,12 @@ def plot_splice_site_dynamics(
                 if has_index:
                     try:
                         # Need to include all strands in the query
-                        level_sel = df.loc[(species, str(chrom), pos, slice(None)), :]
+                        level_sel = df.loc[pd.IndexSlice[species, str(chrom), pos, :], :]
                         if isinstance(level_sel, pd.Series):
                             strand = level_sel.name[-1] if isinstance(level_sel.name, tuple) else '?'
                         else:
                             strand = level_sel.index[0][-1] if len(level_sel) > 0 else '?'
+                            
                     except (KeyError, IndexError):
                         strand = '?'
                 else:
@@ -372,9 +403,10 @@ def plot_splice_site_dynamics(
                     )
                     matching_rows = df[mask]
                     if not matching_rows.empty:
-                        strand = matching_rows.iloc[0]['Strand']
-                    else:
-                        strand = '?'
+                        if "Strand" in matching_rows.columns:
+                            strand = matching_rows.iloc[0]['Strand']
+                        else:
+                            strand = '?'
 
             site_filters.append((species, chrom, pos, strand))
 
@@ -537,29 +569,25 @@ def plot_splice_site_dynamics(
             ax.set_ylim(0, 1)
             continue
 
-        # Split Condition_Name (e.g. "Brain_1") directly into tissue and timepoint
-        split = df_site['Condition_Name'].str.rsplit('_', n=1, expand=True)
-        df_site['tissue'] = split[0]
-        df_site['timepoint'] = pd.to_numeric(split[1], errors='coerce')
-        df_site = df_site.dropna(subset=['tissue', 'timepoint'])
-        df_site['timepoint'] = df_site['timepoint'].astype(int)
-
-        tissues = [t for t in tissue_order if t in df_site['tissue'].values]
+        df_site = df_site.dropna(subset=['Tissue', 'Timepoint'])
+        df_site['Timepoint'] = df_site['Timepoint'].astype(int)
+        tissues = [t for t in tissue_order if t in df_site['Tissue'].values]
         all_tissues_found.update(tissues)
-        all_tps = sorted(df_site['timepoint'].unique())
+        all_tps = sorted(df_site['Timepoint'].unique())
 
         if verbose:
             print(f"\n{species} {chrom}:{pos} ({site_type})")
             print(f"  Total data points: {len(df_site)}")
             print(f"  Tissues present: {', '.join(tissues)}")
             print(f"  Timepoints: {', '.join(map(str, all_tps))}")
-            tissue_tp_summary = df_site.groupby(['Condition_Name', 'tissue', 'timepoint']).size().reset_index(name='count')
-            tissue_tp_summary = tissue_tp_summary.sort_values(['tissue', 'timepoint'])
+            tissue_tp_summary = df_site.groupby(['Condition_Name', 'Tissue', 'Timepoint']).size().reset_index(name='count')
+            tissue_tp_summary = tissue_tp_summary.sort_values(['Tissue', 'Timepoint'])
             print("  Conditions:")
             for _, row in tissue_tp_summary.iterrows():
-                print(f"    {row['tissue']} {row['timepoint']} ({row['Condition_Name']}) n={row['count']}")
+                print(f"    {row['Tissue']} {row['Timepoint']} ({row['Condition_Name']}) n={row['count']}")
 
         n_tissues = len(tissues)
+        
         if jitter > 0 and n_tissues > 1:
             tissue_offsets = {
                 tissue: jitter * (i - (n_tissues - 1) / 2) / (n_tissues - 1)
@@ -582,17 +610,17 @@ def plot_splice_site_dynamics(
             has_size_range = False
 
         for tissue in tissues:
-            tissue_data = df_site[df_site['tissue'] == tissue]
+            tissue_data = df_site[df_site['Tissue'] == tissue]
 
             agg_dict = {'mean': (metric, 'mean'), 'std': (metric, 'std'), 'count': (metric, 'count')}
             if size_col is not None:
                 agg_dict['size_value'] = (size_col, 'mean')
 
-            grouped = tissue_data.groupby('timepoint').agg(**agg_dict).reset_index()
+            grouped = tissue_data.groupby('Timepoint').agg(**agg_dict).reset_index()
             grouped['std'] = grouped['std'].fillna(0)
 
             color = tissue_colors.get(tissue, '#808080')
-            x_coords = grouped['timepoint'] + tissue_offsets[tissue]
+            x_coords = grouped['Timepoint'] + tissue_offsets[tissue]
 
             ax.fill_between(
                 x_coords,
@@ -661,10 +689,408 @@ def plot_splice_site_dynamics(
     plt.tight_layout(rect=[0, 0, 0.85, 1] if all_tissues_found else None)
     return fig
 
+def plot_splice_site_predictions(
+    df,
+    site_coords,
+    true_col='true_usage',
+    pred_col='pred_usage',
+    tissue_order=TISSUE_ORDER,
+    tissue_colors=TISSUE_COLORS,
+    figsize=None,
+    title=None,
+    jitter=0.0,
+    size=None,
+    verbose=False,
+    alpha_threshold=None,
+    beta_threshold=None,
+    reads_threshold=None,
+    min_conditions=None,
+    n_cols=None,
+    n_rows=None,
+    split_by_tissue=False,
+):
+    """
+    Plot true vs. predicted splice site usage over time. Works efficiently with
+    DataFrames indexed by ['Species', 'Chromosome', 'Position'] or 
+    ['Species', 'Chromosome', 'Position', 'Strand'].
+    """
+    if isinstance(site_coords, str):
+        site_coords = [site_coords]
+
+    # --- Normalize column casing (only for non-index columns if indexed) -
+    rename_targets = ['species', 'chromosome', 'position', 'strand', 'tissue', 'timepoint']
+    if isinstance(df.index, pd.MultiIndex):
+        # Normalize index names if they exist
+        df.index.names = [col.capitalize() if col.lower() in rename_targets else col for col in df.index.names]
+    
+    if hasattr(df, 'columns') and df.columns is not None:
+        df.columns = [col.capitalize() if col.lower() in rename_targets else col for col in df.columns]
+
+    # Quick helper to safely get columns/index names
+    def get_all_dims(dataframe):
+        dims = []
+        if isinstance(dataframe.index, pd.MultiIndex):
+            dims.extend([name for name in dataframe.index.names if name is not None])
+        else:
+            if dataframe.index.name is not None:
+                dims.append(dataframe.index.name)
+        if hasattr(dataframe, 'columns'):
+            dims.extend(dataframe.columns.tolist())
+        return dims
+
+    all_dims = get_all_dims(df)
+
+    if 'Condition_Name' not in all_dims:
+        if set(['Tissue', 'Timepoint']).issubset(all_dims):
+            # Temporarily working with columns is safer for transformations
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.copy() # Avoid mutations
+                # Ensure we can add column safely if it's in index vs columns
+                tissue_series = df.index.get_level_values('Tissue') if 'Tissue' in df.index.names else df['Tissue']
+                tp_series = df.index.get_level_values('Timepoint') if 'Timepoint' in df.index.names else df['Timepoint']
+                df['Condition_Name'] = tissue_series.astype(str) + '_' + tp_series.astype(str)
+            else:
+                df['Condition_Name'] = df['Tissue'].astype(str) + '_' + df['Timepoint'].astype(str)
+            if verbose:
+                print("Debug: Created 'Condition_Name' column")
+        else:
+            raise ValueError("DataFrame must contain 'Condition_Name' or both 'Tissue' and 'Timepoint'.")
+
+    # Verify true/pred exist
+    for col in (true_col, pred_col):
+        if col not in all_dims:
+            raise ValueError(f"Column '{col}' not found in DataFrame.")
+
+    # Check if DataFrame has optimal index for fast lookups
+    has_index = isinstance(df.index, pd.MultiIndex) and set(['Species', 'Chromosome', 'Position']).issubset(df.index.names)
+    has_strand_in_index = has_index and 'Strand' in df.index.names
+
+    # --- Parse site_coords into (species, chrom, pos, strand) tuples ----
+    site_filters = []
+    for coord in site_coords:
+        parts = coord.strip().split()
+        if len(parts) != 2:
+            print(f"Warning: Invalid coordinate format '{coord}'")
+            continue
+        species = parts[0].lower()
+        chrom_pos_strand = parts[1].split(':')
+        if len(chrom_pos_strand) < 2 or len(chrom_pos_strand) > 3:
+            print(f"Warning: Invalid chrom:pos[:strand] format in '{coord}'")
+            continue
+        chrom = chrom_pos_strand[0]
+        strand = chrom_pos_strand[2] if len(chrom_pos_strand) == 3 else None
+
+        if '-' in chrom_pos_strand[1]:
+            try:
+                start, end = chrom_pos_strand[1].split('-')
+                start = int(start.replace('_', ''))
+                end = int(end.replace('_', ''))
+            except ValueError:
+                print(f"Warning: Invalid range in '{coord}'")
+                continue
+
+            if has_index:
+                try:
+                    if not df.index.is_monotonic_increasing:
+                        print("Warning: MultiIndex is not sorted. Slicing may not work correctly.")
+                        print("         Run: df = df.sort_index() before plotting.")
+                    
+                    # Target slicing using cross-section or index slicers
+                    idx_slicer = (species, str(chrom), slice(start, end))
+                    if has_strand_in_index and strand is not None:
+                        idx_slicer = (species, str(chrom), slice(start, end), strand)
+                    
+                    level_sel = df.loc[idx_slicer, :]
+                    if isinstance(level_sel, pd.Series):
+                        level_sel = level_sel.to_frame().T
+                    
+                    # Dynamically figure out remaining positions
+                    sites_in_range = level_sel.index.to_frame(index=False)[['Species', 'Chromosome', 'Position']].drop_duplicates()
+                    if has_strand_in_index:
+                        sites_in_range['Strand'] = level_sel.index.get_level_values('Strand')
+                except (KeyError, IndexError) as e:
+                    if verbose:
+                        print(f"Debug: KeyError/IndexError for range query: {e}")
+                    sites_in_range = pd.DataFrame()
+            else:
+                mask = (
+                    (df['Species'] == species)
+                    & (df['Chromosome'] == str(chrom))
+                    & (df['Position'] >= start)
+                    & (df['Position'] <= end)
+                )
+                if strand is not None and 'Strand' in df.columns:
+                    mask = mask & (df['Strand'] == strand)
+                sites_in_range = df[mask][['Species', 'Chromosome', 'Position', 'Strand' if 'Strand' in df.columns else 'Position']].drop_duplicates()
+
+            if sites_in_range.empty:
+                print(f"Warning: No sites found in range {coord}")
+                continue
+            
+            sites_in_range = sites_in_range.sort_values(['Position'])
+            for _, row in sites_in_range.iterrows():
+                strand_val = row['Strand'] if 'Strand' in sites_in_range.columns else (strand if strand else '?')
+                site_filters.append((row['Species'], row['Chromosome'], row['Position'], strand_val))
+            print(f"Found {len(sites_in_range)} sites in {coord}")
+        else:
+            try:
+                pos = int(chrom_pos_strand[1].replace('_', ''))
+            except ValueError:
+                print(f"Warning: Invalid position in '{coord}'")
+                continue
+
+            if strand is None:
+                if has_index:
+                    try:
+                        # Extract cross section safely to check strand labels
+                        idx_check = (species, str(chrom), pos)
+                        level_sel = df.loc[idx_check, :]
+                        if has_strand_in_index:
+                            strand = level_sel.index.get_level_values('Strand')[0] if len(level_sel) > 0 else '?'
+                        else:
+                            strand = '?'
+                    except (KeyError, IndexError):
+                        strand = '?'
+                else:
+                    mask = ((df['Species'] == species) & (df['Chromosome'] == str(chrom)) & (df['Position'] == pos))
+                    matching_rows = df[mask]
+                    strand = matching_rows.iloc[0]['Strand'] if not matching_rows.empty and 'Strand' in matching_rows.columns else '?'
+            site_filters.append((species, chrom, pos, strand))
+
+    if not site_filters:
+        print("No valid site coordinates provided")
+        return None
+
+    # --- Build df_filtered (union of all requested sites) ---------------
+    if has_index:
+        df_filtered_list = []
+        for species, chrom, pos, strand in site_filters:
+            try:
+                # Explicit index selection match based on index structure
+                if has_strand_in_index and strand != '?':
+                    subset = df.loc[[(species, str(chrom), pos, strand)], :]
+                else:
+                    subset = df.loc[[(species, str(chrom), pos)], :]
+                df_filtered_list.append(subset)
+            except KeyError:
+                continue
+        if not df_filtered_list:
+            print("No data found for any of the requested sites")
+            return None
+        # Crucial fix: reset_index drops standard multiindex names directly into clean columns!
+        df_filtered = pd.concat(df_filtered_list, axis=0).reset_index()
+    else:
+        query_parts = []
+        for species, chrom, pos, strand in site_filters:
+            if strand != '?' and 'Strand' in df.columns:
+                query_parts.append(f"(Species == {repr(species)} and Chromosome == {repr(str(chrom))} and Position == {pos} and Strand == {repr(strand)})")
+            else:
+                query_parts.append(f"(Species == {repr(species)} and Chromosome == {repr(str(chrom))} and Position == {pos})")
+        query_str = " or ".join(query_parts)
+        try:
+            df_filtered = df.query(query_str).copy()
+        except Exception:
+            site_masks = []
+            for species, chrom, pos, strand in site_filters:
+                mask = ((df['Species'] == species) & (df['Chromosome'] == str(chrom)) & (df['Position'] == pos))
+                if strand != '?' and 'Strand' in df.columns:
+                    mask = mask & (df['Strand'] == strand)
+                site_masks.append(mask)
+            combined_mask = site_masks[0]
+            for mask in site_masks[1:]:
+                combined_mask = combined_mask | mask
+            df_filtered = df[combined_mask].copy()
+
+    if df_filtered.empty:
+        print("No data found for any of the requested sites")
+        return None
+
+    if tissue_order is None:
+        tissue_order = TISSUE_ORDER
+    if tissue_colors is None:
+        tissue_colors = TISSUE_COLORS
+
+    label_to_type = {0: 'Donor+', 1: 'Acceptor+', 2: 'Donor-', 3: 'Acceptor-', 4: 'None'}
+
+    def site_mask(d, species, chrom, pos, strand):
+        m = (
+            (d['Species'].astype(str).str.lower() == str(species).lower())
+            & (d['Chromosome'].astype(str) == str(chrom))
+            & (d['Position'] == pos)
+        )
+        if strand != '?' and 'Strand' in d.columns:
+            m = m & (d['Strand'] == strand)
+        return m
+
+    # --- Optional min_conditions pre-filter ------------------------------
+    if min_conditions is not None:
+        valid_site_filters = []
+        for species, chrom, pos, strand in site_filters:
+            df_site_check = df_filtered[site_mask(df_filtered, species, chrom, pos, strand)]
+            if not df_site_check.empty:
+                n_conditions = df_site_check['Condition_Name'].nunique()
+                if n_conditions >= min_conditions:
+                    valid_site_filters.append((species, chrom, pos, strand))
+        site_filters = valid_site_filters
+
+    if not site_filters:
+        print("No sites to plot after applying filters")
+        return None
+
+    # --- Per-site filtering (thresholds) + site_type --------------------
+    site_data = []
+    for species, chrom, pos, strand in site_filters:
+        df_site = df_filtered[site_mask(df_filtered, species, chrom, pos, strand)].copy()
+
+        if df_site.empty:
+            continue
+
+        if alpha_threshold is not None and 'Alpha' in df_site.columns:
+            df_site = df_site[df_site['Alpha'] >= alpha_threshold]
+        if beta_threshold is not None and 'Beta' in df_site.columns:
+            df_site = df_site[df_site['Beta'] >= beta_threshold]
+        if reads_threshold is not None and {'Alpha', 'Beta'}.issubset(df_site.columns):
+            df_site = df_site[(df_site['Alpha'] + df_site['Beta']) >= reads_threshold]
+
+        if not df_site.empty and 'Label' in df_site.columns:
+            site_type = label_to_type.get(df_site.iloc[0]['Label'], f'{strand}')
+        else:
+            site_type = f'{strand}'
+
+        if not df_site.empty:
+            df_site = df_site.dropna(subset=['Tissue', 'Timepoint']).copy()
+            if not df_site.empty:
+                df_site['Timepoint'] = df_site['Timepoint'].astype(int)
+
+        site_data.append({
+            'species': species, 'chrom': chrom, 'pos': pos, 'strand': strand,
+            'site_type': site_type, 'df_site': df_site,
+        })
+
+    # --- Build the panel list -------------------------------------------
+    panels = []
+    all_tissues_found = set()
+    for sd in site_data:
+        df_site = sd['df_site']
+        tissues_present = [] if df_site.empty else [t for t in tissue_order if t in df_site['Tissue'].values]
+        all_tissues_found.update(tissues_present)
+
+        if split_by_tissue and tissues_present:
+            for t in tissues_present:
+                panels.append({**sd, 'tissue': t})
+        else:
+            panels.append({**sd, 'tissue': None})
+
+    n_panels = len(panels)
+    if n_panels == 0:
+        print("No valid panels to plot.")
+        return None
+
+    # --- Grid layout -------------------------------------------------------
+    if n_cols is None and n_rows is None:
+        n_cols = min(3, n_panels)
+        n_rows = (n_panels + n_cols - 1) // n_cols
+    elif n_cols is not None and n_rows is None:
+        n_rows = (n_panels + n_cols - 1) // n_cols
+    elif n_rows is not None and n_cols is None:
+        n_cols = (n_panels + n_rows - 1) // n_rows
+
+    if figsize is None:
+        figsize = (n_cols * 3, n_rows * 2.2)
+
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+
+    for panel_idx, panel in enumerate(panels):
+        ax = axes[panel_idx]
+        species, chrom, pos = panel['species'], panel['chrom'], panel['pos']
+        site_type, df_site, tissue = panel['site_type'], panel['df_site'], panel['tissue']
+
+        label = f'{species} {chrom}:{pos} ({site_type})'
+        label = label.replace('(?)', '')
+        if split_by_tissue and tissue is not None:
+            label = f'{label}\n{tissue}'
+
+        df_plot = df_site if tissue is None else df_site[df_site['Tissue'] == tissue]
+
+        if df_plot.empty:
+            ax.text(0.5, 0.5, f'No data\n{label}', ha='center', va='center', transform=ax.transAxes)
+            continue
+
+        plot_tissues = [tissue] if tissue is not None else [t for t in tissue_order if t in df_plot['Tissue'].values]
+
+        n_t = len(plot_tissues)
+        offsets = {t: jitter * (i - (n_t - 1) / 2) / (n_t - 1) if jitter > 0 and n_t > 1 else 0.0 for i, t in enumerate(plot_tissues)}
+
+        size_col = size if isinstance(size, str) and size in df_plot.columns else None
+        has_size_range = False
+        if size_col:
+            size_vals = pd.to_numeric(df_plot[size_col], errors='coerce')
+            smin, smax = size_vals.min(), size_vals.max()
+            has_size_range = pd.notna(smin) and pd.notna(smax) and (smax > smin)
+
+        for t in plot_tissues:
+            t_data = df_plot[df_plot['Tissue'] == t]
+            agg_dict = {
+                'true_mean': (true_col, 'mean'), 'true_std': (true_col, 'std'),
+                'pred_mean': (pred_col, 'mean'), 'pred_std': (pred_col, 'std'),
+            }
+            if size_col:
+                agg_dict['size_value'] = (size_col, 'mean')
+            
+            grouped = t_data.groupby('Timepoint').agg(**agg_dict).reset_index()
+            grouped[['true_std', 'pred_std']] = grouped[['true_std', 'pred_std']].fillna(0)
+
+            color = tissue_colors.get(t, '#808080')
+            x = grouped['Timepoint'] + offsets[t]
+
+            point_sizes = 20 + 100 * (grouped['size_value'] - smin) / (smax - smin) if has_size_range else pd.Series(20, index=grouped.index)
+            point_sizes = point_sizes.fillna(10).clip(lower=10, upper=200)
+
+            # True
+            ax.fill_between(x, grouped['true_mean'] - grouped['true_std'], grouped['true_mean'] + grouped['true_std'], color=color, alpha=0.1, linewidth=0)
+            ax.plot(x, grouped['true_mean'], color=color, linewidth=1.5, alpha=0.9, zorder=2)
+            ax.scatter(x, grouped['true_mean'], s=point_sizes, color=color, marker='o', edgecolors='white', linewidths=0.5, alpha=0.9, zorder=3)
+
+            # Pred
+            ax.plot(x, grouped['pred_mean'], color=color, linewidth=1, alpha=0.9, zorder=2, linestyle='--')
+            ax.scatter(x, grouped['pred_mean'], s=point_sizes, color=color, marker='x', linewidths=0.5, alpha=0.9, zorder=3)
+
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        ax.set_xlim(0.5, 15.5)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlabel('Timepoint', fontsize=10)
+        ax.set_ylabel('Usage', fontsize=10)
+        ax.set_title(label, fontsize=11)
+
+    for idx in range(n_panels, len(axes)):
+        axes[idx].set_visible(False)
+
+    # --- Legends -----------------------------------------------------------
+    style_handles = [
+        plt.Line2D([0], [0], color='black', linewidth=1.5, marker='o', markersize=4, label='True'),
+        plt.Line2D([0], [0], color='black', linewidth=1, marker='x', markersize=4, label='Predicted', linestyle='--'),
+    ]
+    if all_tissues_found and not split_by_tissue:
+        legend_tissues = [t for t in tissue_order if t in all_tissues_found]
+        tissue_handles = [plt.Line2D([0], [0], color=tissue_colors.get(t, '#808080'), linewidth=2, marker='o', markersize=4, label=t) for t in legend_tissues]
+        fig.legend(handles=tissue_handles, loc='center left', bbox_to_anchor=(1.0, 0.65), fontsize=10, title='Tissue')
+    
+    fig.legend(handles=style_handles, loc='center left', bbox_to_anchor=(1.0, 0.4), fontsize=10, title='Series')
+
+    if title:
+        fig.suptitle(title, fontsize=14, y=0.995)
+
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+    return fig
 
 def plot_usage_density(
     df: pd.DataFrame,
-    title: str,
+    title: str = None,
     site_coords=None,
     true_col: str = "true",
     pred_col: str = "pred",
@@ -691,6 +1117,10 @@ def plot_usage_density(
     if true_col not in df.columns or pred_col not in df.columns:
         raise ValueError(f"Missing required columns: '{true_col}' and/or '{pred_col}'")
 
+    # Normalize column casing
+    rename_targets = ['species', 'chromosome', 'position', 'strand', 'tissue', 'timepoint']
+    df.columns = [col.capitalize() if col.lower() in rename_targets else col for col in df.columns]
+    
     df_plot = df.copy()
 
     # Optional filtering by site coordinates (same style as plot_splice_site_dynamics)
@@ -751,7 +1181,7 @@ def plot_usage_density(
     # Keep valid points only
     df_plot = df_plot[[true_col, pred_col]].replace([np.inf, -np.inf], np.nan).dropna()
     if len(df_plot) < 2:
-        return None
+        raise ValueError("Not enough valid data points to plot after filtering")
 
     true_arr = df_plot[true_col].to_numpy(dtype=np.float32)
     pred_arr = df_plot[pred_col].to_numpy(dtype=np.float32)

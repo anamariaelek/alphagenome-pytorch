@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eval-pc-no-mask
+#SBATCH --job-name=eval
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
@@ -54,10 +54,10 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 
 # Create a timestamp for unique log file names
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TIMESTAMP="intersect" # gtf usage intersect union intersect_protein_coding union_protein_coding
+TIMESTAMP="intersect_protein_coding" # gtf usage intersect union intersect_protein_coding union_protein_coding
 
 # Work directory
-WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
+WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Models directory
 DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
@@ -67,7 +67,7 @@ DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 # PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=132kb_encode_intersect_usage_pc_human_mouse_rat_rabbit_opossum 
+RUN=132kb_encode_intersect_usage_pc_obs2_human_mouse_rat_rabbit_opossum 
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
@@ -84,6 +84,8 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --data-config "${DATA_CONFIG}" \
     --eval-species "${EVAL_SPECIES}" \
     --per-tissue \
+    --observed-conditions-only \
+    --cross-species-usage \
     --batch-size 8 \
     --max-windows 1000 \
     --device cuda \

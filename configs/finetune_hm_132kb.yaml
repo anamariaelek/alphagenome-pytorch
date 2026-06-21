@@ -1,0 +1,135 @@
+# =============================================================================
+# Example configuration for finetune_splice.py
+#
+# Usage:
+#   python scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
+#
+# CLI flags always override values set here.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Multi-species data
+# ---------------------------------------------------------------------------
+# When 'species' is present, per-species datasets are created and combined.
+# Each species may have a different usage_parquet (or none at all).
+# SpeciesGroupedSampler guarantees every batch is single-species, so
+# n_conditions can differ freely between organisms.
+
+species:
+  - name: human
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/valid.bed
+    organism_index: 0
+
+  - name: mouse
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/mouse/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/mouse/fold0/valid.bed
+    organism_index: 1
+
+
+classification_head_init:
+  0: 0   # new organism 0 from pretrained organism 0
+  1: 1   # new organism 1 from pretrained organism 1
+
+# ---------------------------------------------------------------------------
+# Pretrained weights
+# ---------------------------------------------------------------------------
+pretrained_weights: $HOME/projects/alphagenome_ft_pytorch/checkpoints/model_fold_0.safetensors
+
+# ---------------------------------------------------------------------------
+# Training mode: linear-probe | lora | full
+# ---------------------------------------------------------------------------
+mode: lora
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+sequence_length: 131072
+max_sites: 1024
+cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
+# Set coordinate base for usage parquet
+# 1 = Spliser default (1-based coordinates) — use this unless you explicitly converted to 0-based
+# 0 = already converted to 0-based coordinates
+usage_coord_base: 0
+
+# observed_conditions_only: false (default) means unobserved conditions are treated as 0 and included in loss
+# observed_conditions_only: true means only compute loss for:
+#     1) observed conditions in tissues with at least one observed timepoint, and
+#     2) all conditions in tissues with no observed timepoints (treating them as 0)
+observed_conditions_only: true
+
+# usage_delta_from_mean: false (default) computes MSE on absolute usage values
+# usage_delta_from_mean: true computes MSE on deviation from per-site mean across observed conditions
+usage_delta_from_mean: false
+
+
+# ---------------------------------------------------------------------------
+# Model / LoRA
+# ---------------------------------------------------------------------------
+dtype: bfloat16            # bfloat16 | float32
+gradient_checkpointing: true
+
+lora_rank: 8
+lora_alpha: 16
+lora_targets: q_proj,v_proj
+
+# ---------------------------------------------------------------------------
+# Optimiser
+# ---------------------------------------------------------------------------
+epochs: 20
+batch_size: 12
+gradient_accumulation_steps: 16   # effective batch = batch_size * accum * gpus
+lr: 1.0e-4
+weight_decay: 0.1
+warmup_steps: 1000
+lr_schedule: cosine              # cosine | constant
+
+# Loss weights
+cls_weight: 1.0
+usage_weight: 1.0
+
+# Only used if usage_delta_from_mean: true
+#   bce: weight for BCE on absolute usage
+#   delta_mse: weight for MSE on deviation from mean
+usage_loss_weights:
+  bce: 1.0
+  delta_mse: 1.0
+
+# Gradient clipping (0 to disable)
+max_grad_norm: 1.0
+
+# ---------------------------------------------------------------------------
+# Performance
+# ---------------------------------------------------------------------------
+num_workers: 2
+use_amp: true              # set false to disable AMP
+compile: true              # torch.compile for fused kernels
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+wandb: false
+wandb_project: alphagenome-splice
+# wandb_entity: my-team
+log_every: 10
+
+# ---------------------------------------------------------------------------
+# Output / checkpointing
+# ---------------------------------------------------------------------------
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+run_name: 132kb_encode_intersect_usage_pc_obs_human_mouse        # defaults to timestamp
+save_every: 1
+
+# Resume: path to checkpoint, or "auto" to find latest in output_dir
+resume: auto
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+seed: 1950
