@@ -90,6 +90,7 @@ def splice_usage_loss(
     usage_values: Tensor,
     usage_mask: Tensor,
     delta_from_mean: bool = False,
+    usage_loss_weights: dict[str, float] | None = None,
     return_vals: bool = False,
 ) -> tuple:
     """Masked loss for per-condition splice-site usage.
@@ -101,10 +102,18 @@ def splice_usage_loss(
     By default (``delta_from_mean=False``) uses binary cross-entropy with
     logits (BCE) to predict absolute usage values in ``[0, 1]``.
 
-    When *delta_from_mean* is ``True``, the loss is instead MSE on the
-    deviation of each condition from the per-site mean across all observed
-    conditions.  This encourages the model to learn the relative difference
-    in usage between conditions for a given site rather than the absolute level.
+        ``delta_from_mean`` is retained for backward compatibility, but the
+        effective behavior is now controlled by ``usage_loss_weights``.
+
+        When *usage_loss_weights* is provided, the loss can combine multiple
+        components in a single call. Supported keys are:
+
+        - ``bce``: BCE on absolute usage values.
+        - ``delta_mse``: MSE on deviation from the per-site mean.
+        - ``trajectory_pearson``: ``1 - PearsonR`` over each site's observed
+            condition trajectory, averaged across sites.
+
+        Missing keys default to ``0.0`` when a weight dictionary is passed.
 
     Args:
         predictions: Raw logits from
@@ -118,10 +127,12 @@ def splice_usage_loss(
         usage_mask: Boolean mask indicating observed
             ``(position, condition)`` pairs, shape
             ``(B, max_sites, n_conditions)``.
-        delta_from_mean: When ``True``, compute MSE on the deviation of each
-            condition from the per-site mean across observed conditions
-            (mean computed separately for predictions and targets).
-            When ``False`` (default), compute BCE on absolute usage values.
+        delta_from_mean: Deprecated compatibility flag. The loss is controlled
+            by ``usage_loss_weights``; when no weights are provided, BCE is
+            used.
+        usage_loss_weights: Optional dict of component weights. When provided,
+            the function combines the enabled usage loss terms instead of
+            returning a single loss component.
 
     Returns:
         Tuple of:
@@ -155,30 +166,66 @@ def splice_usage_loss(
             return loss, metrics_dict, torch.tensor([]), torch.tensor([])
         return loss, metrics_dict
 
-    if delta_from_mean:
-        pred_sigmoid = torch.sigmoid(gathered)  # (B, max_sites, n_cond)
-        # Compute per-site mean over observed conditions only
-        n_obs = final_mask.sum(-1, keepdim=True).float().clamp(min=1)  # (B, max_sites, 1)
-        mean_preds = (pred_sigmoid * final_mask).sum(-1, keepdim=True) / n_obs
-        mean_targets = (usage_values * final_mask).sum(-1, keepdim=True) / n_obs
-        # Compute deviation from per-site mean
-        delta_preds = pred_sigmoid - mean_preds      # (B, max_sites, n_cond)
-        delta_targets = usage_values - mean_targets  # (B, max_sites, n_cond)
-        loss = F.mse_loss(
-            delta_preds[final_mask],
-            delta_targets[final_mask],
-            reduction="mean",
-        )
-        pred_vals = delta_preds[final_mask].detach()
-        true_vals = delta_targets[final_mask]
-    else:
-        loss = F.binary_cross_entropy_with_logits(
-            gathered[final_mask],
-            usage_values[final_mask],
-            reduction="mean",
-        )
-        pred_vals = torch.sigmoid(gathered[final_mask]).detach()
-        true_vals = usage_values[final_mask]
+    if usage_loss_weights is not None:
+        total_loss = (predictions * 0.0).sum()
+        metrics_dict = {"correlation": float("nan"), "n_valid": int(n_valid)}
+
+        bce_w = float(usage_loss_weights.get("bce", 0.0))
+        delta_w = float(usage_loss_weights.get("delta_mse", 0.0))
+        traj_w = float(usage_loss_weights.get("trajectory_pearson", 0.0))
+
+        gathered_sigmoid = torch.sigmoid(gathered)
+
+        if bce_w != 0.0:
+            bce_loss = F.binary_cross_entropy_with_logits(
+                gathered[final_mask],
+                usage_values[final_mask],
+                reduction="mean",
+            )
+            total_loss = total_loss + bce_w * bce_loss
+            metrics_dict["bce_loss"] = bce_loss.item()
+            pred_vals = gathered_sigmoid[final_mask].detach()
+            true_vals = usage_values[final_mask]
+            if pred_vals.numel() > 1:
+                metrics_dict["correlation"] = torch.corrcoef(torch.stack([pred_vals, true_vals]))[0, 1].item()
+            else:
+                metrics_dict["correlation"] = float("nan")
+
+        if delta_w != 0.0:
+            n_obs = final_mask.sum(-1, keepdim=True).float().clamp(min=1)
+            mean_preds = (gathered_sigmoid * final_mask).sum(-1, keepdim=True) / n_obs
+            mean_targets = (usage_values * final_mask).sum(-1, keepdim=True) / n_obs
+            delta_preds = gathered_sigmoid - mean_preds
+            delta_targets = usage_values - mean_targets
+            delta_loss = F.mse_loss(
+                delta_preds[final_mask],
+                delta_targets[final_mask],
+                reduction="mean",
+            )
+            total_loss = total_loss + delta_w * delta_loss
+            metrics_dict["delta_loss"] = delta_loss.item()
+
+        if traj_w != 0.0:
+            traj_loss, traj_metrics = _trajectory_pearson_loss(
+                gathered_sigmoid, usage_values, final_mask
+            )
+            total_loss = total_loss + traj_w * traj_loss
+            metrics_dict["trajectory_loss"] = traj_loss.item()
+            metrics_dict.update(traj_metrics)
+
+        if return_vals:
+            pred_vals = gathered_sigmoid[final_mask].detach()
+            true_vals = usage_values[final_mask]
+            return total_loss, metrics_dict, pred_vals, true_vals
+        return total_loss, metrics_dict
+
+    loss = F.binary_cross_entropy_with_logits(
+        gathered[final_mask],
+        usage_values[final_mask],
+        reduction="mean",
+    )
+    pred_vals = torch.sigmoid(gathered[final_mask]).detach()
+    true_vals = usage_values[final_mask]
 
     # Calculate correlation metrics
     metrics_dict = {}
@@ -192,6 +239,38 @@ def splice_usage_loss(
     if return_vals:
         return loss, metrics_dict, pred_vals, true_vals
     return loss, metrics_dict
+
+
+def _trajectory_pearson_loss(
+    predictions: Tensor,
+    targets: Tensor,
+    mask: Tensor,
+) -> tuple[Tensor, dict[str, float]]:
+    """Compute a per-site Pearson-R trajectory loss over observed conditions."""
+    flat_predictions = predictions.reshape(-1, predictions.shape[-1])
+    flat_targets = targets.reshape(-1, targets.shape[-1])
+    flat_mask = mask.reshape(-1, mask.shape[-1])
+
+    site_losses = []
+    site_corrs = []
+
+    for pred_site, true_site, site_mask in zip(flat_predictions, flat_targets, flat_mask):
+        if int(site_mask.sum().item()) < 2:
+            continue
+
+        pred_vals = pred_site[site_mask]
+        true_vals = true_site[site_mask]
+        corr = metrics.pearson_r(pred_vals, true_vals, dim=0)
+        site_losses.append(1.0 - corr)
+        site_corrs.append(corr.detach())
+
+    if not site_losses:
+        zero = (predictions * 0.0).sum()
+        return zero, {"trajectory_corr": float("nan"), "n_trajectory_sites": 0}
+
+    loss = torch.stack(site_losses).mean()
+    corr_mean = torch.stack(site_corrs).mean().item()
+    return loss, {"trajectory_corr": corr_mean, "n_trajectory_sites": len(site_losses)}
 
 
 def compute_splice_class_weights(

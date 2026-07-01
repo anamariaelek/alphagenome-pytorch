@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hmrro-132kb-obs2
+#SBATCH --job-name=ft-hmrro-132kb-obs
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=1
-#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
+#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
 #SBATCH --mem=300gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log

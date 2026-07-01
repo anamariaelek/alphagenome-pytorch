@@ -73,6 +73,10 @@ class SpliceTrainMetrics:
     loss: float = 0.0
     cls_loss: float = 0.0
     usage_loss: float = 0.0
+    usage_bce_loss: float | None = None
+    usage_delta_loss: float | None = None
+    usage_trajectory_loss: float | None = None
+    species_metrics: dict[int, dict[str, float]] = field(default_factory=dict)
     n_batches: int = 0
     n_usage_valid_pairs: int = 0  # total (position, condition) pairs with observed usage
     elapsed_s: float = 0.0   # wall-clock seconds for this epoch
@@ -148,12 +152,13 @@ def train_epoch_splice(
     import gc
     
     metrics = SpliceTrainMetrics()
-    # For tracking separate loss components if both are used
-    bce_loss_sum = 0.0
-    delta_loss_sum = 0.0
-    n_dual_batches = 0
-    # For robust epoch-level correlation
-    # No correlation tracking
+    # Track optional usage loss components only when they are enabled.
+    usage_bce_sum = 0.0
+    usage_delta_sum = 0.0
+    usage_traj_sum = 0.0
+    n_usage_bce_batches = 0
+    n_usage_delta_batches = 0
+    n_usage_traj_batches = 0
     step = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
@@ -206,8 +211,6 @@ def train_epoch_splice(
                 # ── Usage loss (optional) ────────────────────────────────────────
                 usage_loss_val = torch.tensor(0.0, device=device)
                 usage_corr = {}
-                usage_bce = None
-                usage_delta = None
                 if active_usage_head is not None and "usage_positions" in batch:
                     usage_pos = batch["usage_positions"].to(device)
                     usage_vals = batch["usage_values"].to(device)
@@ -215,36 +218,26 @@ def train_epoch_splice(
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                     logits = usage_out["logits"]
-                    # Weighted combination logic
-                    if usage_delta_from_mean and usage_loss_weights is not None:
-                        bce_w = usage_loss_weights.get("bce", 1.0)
-                        delta_w = usage_loss_weights.get("delta_mse", 1.0)
-                        # BCE loss
-                        bce_loss, bce_corr = splice_usage_loss(
-                            logits, usage_pos, usage_vals, usage_mask, delta_from_mean=False
-                        )
-                        delta_loss, delta_corr = splice_usage_loss(
-                            logits, usage_pos, usage_vals, usage_mask, delta_from_mean=True
-                        )
-                        usage_loss_val = bce_w * bce_loss + delta_w * delta_loss
-                        usage_corr = {"n_valid": bce_corr.get("n_valid", 0),
-                                      "bce_loss": bce_loss.item(),
-                                      "delta_loss": delta_loss.item()}
-                        bce_loss_sum += bce_loss.item()
-                        delta_loss_sum += delta_loss.item()
-                        n_dual_batches += 1
-                        usage_bce = bce_loss.item()
-                        usage_delta = delta_loss.item()
-                    else:
-                        usage_loss_val, usage_corr = splice_usage_loss(
-                            logits, usage_pos, usage_vals, usage_mask,
-                            delta_from_mean=usage_delta_from_mean,
-                        )
-                        if usage_delta_from_mean:
-                            usage_delta = usage_loss_val.item()
-                        else:
-                            usage_bce = usage_loss_val.item()
-                    total_loss = total_loss + usage_weight * usage_loss_val
+                    usage_loss_val, usage_corr = splice_usage_loss(
+                        logits,
+                        usage_pos,
+                        usage_vals,
+                        usage_mask,
+                        delta_from_mean=usage_delta_from_mean,
+                        usage_loss_weights=usage_loss_weights,
+                    )
+
+                    if "bce_loss" in usage_corr:
+                        usage_bce_sum += usage_corr["bce_loss"]
+                        n_usage_bce_batches += 1
+                    if "delta_loss" in usage_corr:
+                        usage_delta_sum += usage_corr["delta_loss"]
+                        n_usage_delta_batches += 1
+                    if "trajectory_loss" in usage_corr:
+                        usage_traj_sum += usage_corr["trajectory_loss"]
+                        n_usage_traj_batches += 1
+
+                total_loss = total_loss + usage_weight * usage_loss_val
             if not torch.isfinite(total_loss):
                 continue
 
@@ -294,13 +287,16 @@ def train_epoch_splice(
                 avg_batch_time = sum(recent_batch_times) / len(recent_batch_times) if recent_batch_times else 0.0
                 elapsed = time.perf_counter() - step_start
                 sps = log_every / elapsed  # optimizer steps per second
-                # Add usage_bce and usage_delta to log if usage_delta is calculated (indicates dual loss mode)
-                usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_delta is not None else ""
+                usage_bce = usage_corr.get("bce_loss")
+                usage_delta = usage_corr.get("delta_loss")
+                usage_traj = usage_corr.get("trajectory_loss")
+                usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_bce is not None else ""
                 usage_delta_str = f" usage_mse_delta={usage_delta:.4f}" if usage_delta is not None else ""
+                usage_traj_str = f" usage_traj={usage_traj:.4f}" if usage_traj is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" +
-                    usage_bce_str + usage_delta_str +
+                    usage_bce_str + usage_delta_str + usage_traj_str +
                     f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
                 )
                 # Add to logger
@@ -316,6 +312,8 @@ def train_epoch_splice(
                     log_metrics["train_usage_bce_loss"] = usage_bce
                 if usage_delta is not None:
                     log_metrics["train_usage_mse_delta_loss"] = usage_delta
+                if usage_traj is not None:
+                    log_metrics["train_usage_trajectory_loss"] = usage_traj
                 if logger is not None:
                     logger.log_step(log_metrics)
                 step_start = time.perf_counter()
@@ -343,10 +341,12 @@ def train_epoch_splice(
         metrics.usage_loss /= metrics.n_batches
     metrics.elapsed_s = time.perf_counter() - epoch_start
 
-    # Add extra logging for dual loss
-    if n_dual_batches > 0:
-        metrics.bce_loss = bce_loss_sum / n_dual_batches
-        metrics.delta_loss = delta_loss_sum / n_dual_batches
+    if n_usage_bce_batches > 0:
+        metrics.usage_bce_loss = usage_bce_sum / n_usage_bce_batches
+    if n_usage_delta_batches > 0:
+        metrics.usage_delta_loss = usage_delta_sum / n_usage_delta_batches
+    if n_usage_traj_batches > 0:
+        metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
 
     # Warn when usage head is present but received zero gradient signal.
     # This typically means there are no matching (position, condition) pairs
@@ -416,10 +416,13 @@ def validate_splice(
         usage_head.eval()
 
     metrics = SpliceTrainMetrics()
-    bce_loss_sum = 0.0
-    delta_loss_sum = 0.0
-    n_dual_batches = 0
-    # No correlation tracking
+    species_sums: dict[int, dict[str, float]] = {}
+    usage_bce_sum = 0.0
+    usage_delta_sum = 0.0
+    usage_traj_sum = 0.0
+    n_usage_bce_batches = 0
+    n_usage_delta_batches = 0
+    n_usage_traj_batches = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
 
@@ -432,8 +435,8 @@ def validate_splice(
         cls_labels = batch["classification_labels"].to(device)
 
         # Resolve per-batch usage head
+        batch_org = int(batch["organism_index"][0].item())
         if isinstance(usage_head, dict):
-            batch_org = int(batch["organism_index"][0].item())
             active_usage_head = usage_head.get(batch_org)
         else:
             active_usage_head = usage_head
@@ -468,37 +471,44 @@ def validate_splice(
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 logits = usage_out["logits"]
-                # Weighted combination logic
-                if usage_delta_from_mean and usage_loss_weights is not None:
-                    bce_w = usage_loss_weights.get("bce", 1.0)
-                    delta_w = usage_loss_weights.get("delta_mse", 1.0)
-                    # BCE loss
-                    bce_loss, bce_corr = splice_usage_loss(
-                        logits, usage_pos, usage_vals, usage_mask, delta_from_mean=False
-                    )
-                    # Delta-from-mean loss
-                    delta_loss, delta_corr = splice_usage_loss(
-                        logits, usage_pos, usage_vals, usage_mask, delta_from_mean=True
-                    )
-                    usage_loss_val = bce_w * bce_loss + delta_w * delta_loss
-                    usage_corr = {"n_valid": bce_corr.get("n_valid", 0),
-                                  "bce_loss": bce_loss.item(),
-                                  "delta_loss": delta_loss.item()}
-                    bce_loss_sum += bce_loss.item()
-                    delta_loss_sum += delta_loss.item()
-                    n_dual_batches += 1
-                else:
-                    usage_loss_val, usage_corr = splice_usage_loss(
-                        logits, usage_pos, usage_vals, usage_mask,
-                        delta_from_mean=usage_delta_from_mean,
-                    )
-                total_loss = total_loss + usage_weight * usage_loss_val
+                usage_loss_val, usage_corr = splice_usage_loss(
+                    logits,
+                    usage_pos,
+                    usage_vals,
+                    usage_mask,
+                    delta_from_mean=usage_delta_from_mean,
+                    usage_loss_weights=usage_loss_weights,
+                )
+
+                if "bce_loss" in usage_corr:
+                    usage_bce_sum += usage_corr["bce_loss"]
+                    n_usage_bce_batches += 1
+                if "delta_loss" in usage_corr:
+                    usage_delta_sum += usage_corr["delta_loss"]
+                    n_usage_delta_batches += 1
+                if "trajectory_loss" in usage_corr:
+                    usage_traj_sum += usage_corr["trajectory_loss"]
+                    n_usage_traj_batches += 1
+
+            total_loss = total_loss + usage_weight * usage_loss_val
 
         metrics.loss += total_loss.item()
         metrics.cls_loss += cls_loss_val.item()
         metrics.usage_loss += usage_loss_val.item()
         # No correlation tracking
         metrics.n_batches += 1
+
+        if batch_org not in species_sums:
+            species_sums[batch_org] = {
+                "loss": 0.0,
+                "cls_loss": 0.0,
+                "usage_loss": 0.0,
+                "n_batches": 0.0,
+            }
+        species_sums[batch_org]["loss"] += total_loss.item()
+        species_sums[batch_org]["cls_loss"] += cls_loss_val.item()
+        species_sums[batch_org]["usage_loss"] += usage_loss_val.item()
+        species_sums[batch_org]["n_batches"] += 1.0
         
         # Periodic memory cleanup in validation (RAM + GPU)
         if (batch_idx + 1) % 50 == 0:
@@ -515,9 +525,21 @@ def validate_splice(
         metrics.usage_loss /= metrics.n_batches
     metrics.elapsed_s = time.perf_counter() - val_start
 
-    if n_dual_batches > 0:
-        metrics.bce_loss = bce_loss_sum / n_dual_batches
-        metrics.delta_loss = delta_loss_sum / n_dual_batches
+    if n_usage_bce_batches > 0:
+        metrics.usage_bce_loss = usage_bce_sum / n_usage_bce_batches
+    if n_usage_delta_batches > 0:
+        metrics.usage_delta_loss = usage_delta_sum / n_usage_delta_batches
+    if n_usage_traj_batches > 0:
+        metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
+
+    for org_idx, sums in species_sums.items():
+        n_batches = sums["n_batches"]
+        if n_batches > 0:
+            metrics.species_metrics[org_idx] = {
+                "val_loss": sums["loss"] / n_batches,
+                "val_cls_loss": sums["cls_loss"] / n_batches,
+                "val_usage_loss": sums["usage_loss"] / n_batches,
+            }
 
     # No correlation logging
 

@@ -1792,7 +1792,22 @@ def main() -> None:
         pred_npz = out_dir / f"predictions_{org_name}.npz"
         usage_json = out_dir / f"usage_{org_name}.json"
         usage_npz = out_dir / f"usage_{org_name}.npz"
-        return not (pred_npz.exists() and (usage_json.exists() or usage_npz.exists()))
+        base_exists = pred_npz.exists() and (usage_json.exists() or usage_npz.exists())
+        if not base_exists:
+            return True
+        # Base predictions exist. If cross-species-usage is requested for a same-species
+        # eval (i.e. this species' head was trained), check whether the cross-species usage
+        # files have been generated yet.
+        if (
+            args.cross_species_usage
+            and not spec.get("cross_species", False)
+            and spec.get("usage_parquet")
+            and not args.skip_usage
+        ):
+            cross_files = list(out_dir.glob(f"usage_{org_name}_from_*.npz"))
+            if not cross_files:
+                return True  # Cross-species usage files not yet generated
+        return False
 
     needs_inference = [species_needs_inference(spec) for spec in species_specs]
 
@@ -1842,7 +1857,14 @@ def main() -> None:
         pred_npz = out_dir / f"predictions_{org_name}.npz"
         usage_json = out_dir / f"usage_{org_name}.json"
         usage_npz = out_dir / f"usage_{org_name}.npz"
-        if (not args.overwrite and pred_npz.exists() and (usage_json.exists() or usage_npz.exists())):
+        _cross_species_missing = (
+            args.cross_species_usage
+            and not spec.get("cross_species", False)
+            and spec.get("usage_parquet")
+            and not args.skip_usage
+            and not list(out_dir.glob(f"usage_{org_name}_from_*.npz"))
+        )
+        if (not args.overwrite and pred_npz.exists() and (usage_json.exists() or usage_npz.exists()) and not _cross_species_missing):
             logger.info(f"[{org_name}] Predictions already exist. Skipping generation (use --overwrite to force).")
             cls_probs, cls_labels, usage_stats, usage_per_cond = load_predictions(
                 out_dir,

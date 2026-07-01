@@ -48,7 +48,7 @@ species:
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/rabbit/fold0/valid.bed
     organism_index: 3
 
-classification_head_init:
+organism_embedding_init:
   0: 0   # new organism 0 from pretrained organism 0
   1: 1   # new organism 1 from pretrained organism 1
   2: 1   # new organism 2 from pretrained organism 1
@@ -81,15 +81,13 @@ usage_coord_base: 0
 #     2) all conditions in tissues with no observed timepoints (treating them as 0)
 observed_conditions_only: true
 
-# usage_delta_from_mean: false (default) computes MSE on absolute usage values
-# usage_delta_from_mean: true computes MSE on deviation from per-site mean across observed conditions
-usage_delta_from_mean: false
-
 # ---------------------------------------------------------------------------
 # Model / LoRA
 # ---------------------------------------------------------------------------
 dtype: bfloat16            # bfloat16 | float32
 gradient_checkpointing: true
+
+train_species_embeddings: false
 
 lora_rank: 8
 lora_alpha: 16
@@ -99,8 +97,8 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 12
-gradient_accumulation_steps: 16   # effective batch = batch_size * accum * gpus
+batch_size: 6
+gradient_accumulation_steps: 32   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -110,12 +108,14 @@ lr_schedule: cosine              # cosine | constant
 cls_weight: 1.0
 usage_weight: 1.0
 
-# Only used if usage_delta_from_mean: true
+# Dictionary of usage weights
 #   bce: weight for BCE on absolute usage
 #   delta_mse: weight for MSE on deviation from mean
+#   trajectory_pearson: weight for 1 - PearsonR on the concatenated condition trajectory
 usage_loss_weights:
   bce: 1.0
-  delta_mse: 1.0
+  delta_mse: 0.0
+  trajectory_pearson: 0.0
 
 # Gradient clipping (0 to disable)
 max_grad_norm: 1.0 
@@ -139,7 +139,7 @@ log_every: 10
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 132kb_encode_intersect_usage_pc_obs_human_mouse_rat_rabbit        # defaults to timestamp
+run_name: 132kb_encode_intersect_usage_pc_obs_human_mouse_rat_rabbit       # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

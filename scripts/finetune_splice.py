@@ -148,6 +148,7 @@ DEFAULTS = {
     "lora_rank": 8,
     "lora_alpha": 16,
     "lora_targets": "q_proj,v_proj",
+    "train_species_embeddings": True,
     # Training
     "epochs": 10,
     "batch_size": 1,
@@ -290,6 +291,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable gradient checkpointing to trade compute for memory",
     )
+    model_grp.add_argument(
+        "--train-species-embeddings",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULTS["train_species_embeddings"],
+        help="Whether to train organism/species embedding tables",
+    )
 
     # Training arguments
     train_grp = parser.add_argument_group("Training")
@@ -421,6 +428,7 @@ def parse_args() -> argparse.Namespace:
         "lora_rank",
         "lora_alpha",
         "lora_targets",
+        "train_species_embeddings",
         "dtype",
         "gradient_checkpointing",
         "epochs",
@@ -523,9 +531,6 @@ def parse_args() -> argparse.Namespace:
     usage_loss_weights = None
     if "usage_loss_weights" in config_data and config_data["usage_loss_weights"] is not None:
         usage_loss_weights = config_data["usage_loss_weights"]
-    # Default if not present and needed
-    if usage_loss_weights is None and getattr(args, "usage_delta_from_mean", False):
-        usage_loss_weights = {"bce": 1.0, "delta_mse": 1.0}
     args.usage_loss_weights = usage_loss_weights
 
     args.species_specs = species_specs
@@ -699,27 +704,25 @@ def create_model(
     # --- Calculate num_organisms and initialization mapping BEFORE creating model ---
     num_organisms = max(s["organism_index"] for s in args.species_specs) + 1
     # Parse mapping from config/args (dict: new_org_idx -> pretrained_org_idx)
-    classification_head_init = getattr(args, "classification_head_init", None)
-    if classification_head_init is None and hasattr(args, "classification_head_init_dict"):
-        classification_head_init = args.classification_head_init_dict
+    organism_embedding_init = getattr(args, "organism_embedding_init", None)
 
     # Default: identity mapping (organism i → pretrained organism i).
-    # Override via classification_head_init e.g. {0: 1} to init organism 0
+    # Override via organism_embedding_init e.g. {0: 1} to init organism 0
     # from pretrained organism 1 (useful for cross-species transfer).
-    if classification_head_init is None:
-        classification_head_init = {i: i for i in range(num_organisms)}
+    if organism_embedding_init is None:
+        organism_embedding_init = {i: i for i in range(num_organisms)}
 
-    # Validate that all keys in classification_head_init are valid organism indices
-    invalid_keys = [k for k in classification_head_init.keys() if k >= num_organisms or k < 0]
+    # Validate that all keys in organism_embedding_init are valid organism indices
+    invalid_keys = [k for k in organism_embedding_init.keys() if k >= num_organisms or k < 0]
     if invalid_keys:
         raise ValueError(
-            f"Invalid organism indices in classification_head_init: {invalid_keys}. "
+            f"Invalid organism indices in organism_embedding_init: {invalid_keys}. "
             f"Model has {num_organisms} organism(s) with valid indices 0-{num_organisms-1}. "
-            f"Check your config's classification_head_init and species organism_index values."
+            f"Check your config's organism_embedding_init and species organism_index values."
         )
 
     print(f"Creating model with {num_organisms} organism(s)")
-    print(f"Organism initialization mapping: {classification_head_init}")
+    print(f"Organism initialization mapping: {organism_embedding_init}")
 
     model = AlphaGenome(
         num_organisms=num_organisms,
@@ -731,8 +734,8 @@ def create_model(
     # Note: This will have missing keys for organism embeddings beyond pretrained num_organisms
     model = load_trunk(model, args.pretrained_weights, exclude_heads=True)
 
-    # Initialize organism embeddings for new organisms from pretrained organisms
-    # This handles the case where we're adding rat (organism 2) from mouse (organism 1)
+    # Initialize organism embeddings for all mapped organisms from pretrained organisms.
+    # This also covers newly added organisms (e.g., rat/rabbit from mouse).
     import torch
     weights_path = args.pretrained_weights
     if weights_path.endswith('.safetensors'):
@@ -755,7 +758,7 @@ def create_model(
         pretrained_num_organisms = pretrained_organism_embed.shape[0]
         print(f"Pretrained model has {pretrained_num_organisms} organism(s)")
         
-        # Initialize new organism embeddings from specified pretrained organisms
+        # Initialize organism embeddings from specified pretrained organisms
         organism_embed_modules = [
             ('organism_embed', model.organism_embed),
             ('embedder_128bp.organism_embed', model.embedder_128bp.organism_embed),
@@ -763,25 +766,45 @@ def create_model(
             ('embedder_pair.organism_embed', model.embedder_pair.organism_embed),
         ]
         
-        for new_org_idx, pretrained_org_idx in classification_head_init.items():
-            if new_org_idx >= pretrained_num_organisms:
-                # This is a new organism that wasn't in the pretrained model
-                if pretrained_org_idx >= pretrained_num_organisms:
-                    print(f"[Warning] Cannot initialize organism {new_org_idx} from pretrained organism {pretrained_org_idx} "
-                          f"(pretrained model only has {pretrained_num_organisms} organisms)")
+        for new_org_idx, pretrained_org_idx in organism_embedding_init.items():
+            if pretrained_org_idx >= pretrained_num_organisms:
+                print(f"[Warning] Cannot initialize organism {new_org_idx} from pretrained organism {pretrained_org_idx} "
+                      f"(pretrained model only has {pretrained_num_organisms} organisms)")
+                continue
+
+            print(f"Initializing organism {new_org_idx} embeddings from pretrained organism {pretrained_org_idx}")
+            for name, module in organism_embed_modules:
+                pretrained_key = f'{name}.weight'
+                if pretrained_key not in state_dict:
+                    print(f"[Warning] Missing '{pretrained_key}' in checkpoint; skipping {name} copy")
                     continue
-                
-                print(f"Initializing organism {new_org_idx} embeddings from pretrained organism {pretrained_org_idx}")
-                for name, module in organism_embed_modules:
-                    pretrained_key = f'{name}.weight'
-                    if pretrained_key in state_dict:
-                        # Copy pretrained organism embedding to new organism
-                        module.weight.data[new_org_idx] = state_dict[pretrained_key][pretrained_org_idx].clone()
+                if new_org_idx >= module.weight.data.shape[0]:
+                    print(f"[Warning] Target organism index {new_org_idx} out of range for {name} "
+                          f"(size={module.weight.data.shape[0]}); skipping")
+                    continue
+                module.weight.data[new_org_idx] = state_dict[pretrained_key][pretrained_org_idx].clone()
 
     # Freeze backbone first for non-full modes
     if args.mode != "full":
         for param in model.parameters():
             param.requires_grad = False
+
+    # Keep species embedding tables trainable by default (configurable).
+    train_species_embeddings = bool(getattr(args, "train_species_embeddings", True))
+    for emb in (
+        model.organism_embed,
+        model.embedder_128bp.organism_embed,
+        model.embedder_1bp.organism_embed,
+        model.embedder_pair.organism_embed,
+    ):
+        emb.weight.requires_grad = train_species_embeddings
+
+    species_embedding_params = [
+        model.organism_embed.weight,
+        model.embedder_128bp.organism_embed.weight,
+        model.embedder_1bp.organism_embed.weight,
+        model.embedder_pair.organism_embed.weight,
+    ]
 
 
     # Remove all existing heads (including splice_sites_classification_head)
@@ -797,13 +820,13 @@ def create_model(
 
     # Copy pretrained classification head weights for each organism according to the mapping
     if pretrained_head_weights:
-        for new_org_idx, pretrained_org_idx in classification_head_init.items():
+        for new_org_idx, pretrained_org_idx in organism_embedding_init.items():
             try:
                 cls_head.conv.weight.data[new_org_idx] = pretrained_head_weights["weight"][pretrained_org_idx].clone()
                 cls_head.conv.bias.data[new_org_idx] = pretrained_head_weights["bias"][pretrained_org_idx].clone()
             except Exception as e:
                 print(f"[Warning] Could not copy head weights for organism {new_org_idx} from pretrained organism {pretrained_org_idx}: {e}")
-        print(f"Initialized classification head from pretrained weights (mapping: {classification_head_init})")
+        print(f"Initialized classification head from pretrained weights (mapping: {organism_embedding_init})")
     else:
         print(f"Created splice classification head (5-class, 1bp, {num_organisms} organism(s)), random init (no pretrained head found)")
 
@@ -835,6 +858,10 @@ def create_model(
         trainable_params.extend(list(cls_head.parameters()))
         for h in usage_heads.values():
             trainable_params.extend(list(h.parameters()))
+        if train_species_embeddings:
+            for p in species_embedding_params:
+                if p.requires_grad and all(p is not q for q in trainable_params):
+                    trainable_params.append(p)
         print("Mode: linear-probe (frozen backbone, heads only)")
 
     elif args.mode == "lora":
@@ -854,6 +881,10 @@ def create_model(
         trainable_params.extend(list(cls_head.parameters()))
         for h in usage_heads.values():
             trainable_params.extend(list(h.parameters()))
+        if train_species_embeddings:
+            for p in species_embedding_params:
+                if p.requires_grad and all(p is not q for q in trainable_params):
+                    trainable_params.append(p)
         mode_desc = f"lora (rank={args.lora_rank})" if args.lora_rank > 0 else "lora (rank=0, heads only)"
         print(f"Mode: {mode_desc}")
 
@@ -900,16 +931,16 @@ def main() -> None:
 
     args = parse_args()
 
-    # Support loading classification_head_init mapping from YAML config
+    # Support loading organism embedding initialization mapping from YAML config.
     # If present in config, inject as attribute for create_model
     if hasattr(args, 'config') and args.config is not None:
         import yaml
         with open(args.config, 'r') as f:
             config_yaml = yaml.safe_load(f)
-        if 'classification_head_init' in config_yaml:
+        if 'organism_embedding_init' in config_yaml:
             # Ensure keys are int (YAML may parse as str)
-            mapping = {int(k): int(v) for k, v in config_yaml['classification_head_init'].items()}
-            setattr(args, 'classification_head_init', mapping)
+            mapping = {int(k): int(v) for k, v in config_yaml['organism_embedding_init'].items()}
+            setattr(args, 'organism_embedding_init', mapping)
 
     # Single-process/single-GPU only
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1037,6 +1068,7 @@ def main() -> None:
         "lora_rank": args.lora_rank if args.mode == "lora" else None,
         "lora_alpha": args.lora_alpha if args.mode == "lora" else None,
         "lora_targets": args.lora_targets if args.mode == "lora" else None,
+        "train_species_embeddings": args.train_species_embeddings,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
@@ -1070,6 +1102,7 @@ def main() -> None:
 
     use_amp = not args.no_amp
     current_epoch = start_epoch
+    species_name_by_org = {int(s["organism_index"]): s["name"] for s in args.species_specs}
 
     def _save_preempt():
         """Save a preemption checkpoint (called on SIGUSR1)."""
@@ -1219,9 +1252,12 @@ def main() -> None:
                     return f"{mins}m{secs}s"
             
 
-            # Add BCE/MSE breakdown if both are present
-            dual_train = hasattr(train_metrics, "bce_loss")
-            dual_val = hasattr(val_metrics, "bce_loss")
+            train_bce = getattr(train_metrics, "usage_bce_loss", None)
+            train_delta = getattr(train_metrics, "usage_delta_loss", None)
+            train_traj = getattr(train_metrics, "usage_trajectory_loss", None)
+            val_bce = getattr(val_metrics, "usage_bce_loss", None)
+            val_delta = getattr(val_metrics, "usage_delta_loss", None)
+            val_traj = getattr(val_metrics, "usage_trajectory_loss", None)
             summary = (
                 f"Epoch {epoch}: "
                 f"train_loss={train_loss:.4f}  "
@@ -1233,16 +1269,27 @@ def main() -> None:
                 f"lr={current_lr:.2e}\n"
                 f"  Timing: {format_time(epoch_elapsed)} ({format_time(train_metrics.elapsed_s)} train + {format_time(val_metrics.elapsed_s)} val)"
             )
-            if dual_train or dual_val:
+            if any(v is not None for v in (train_bce, train_delta, train_traj, val_bce, val_delta, val_traj)):
                 summary += "\n  [usage breakdown]"
-                if dual_train:
-                    summary += (
-                        f"\n    train_bce_loss={train_metrics.bce_loss:.4f}  train_delta_loss={train_metrics.delta_loss:.4f}"
-                    )
-                if dual_val:
-                    summary += (
-                        f"\n    val_bce_loss={val_metrics.bce_loss:.4f}  val_delta_loss={val_metrics.delta_loss:.4f}"
-                    )
+                train_parts = []
+                if train_bce is not None:
+                    train_parts.append(f"train_bce_loss={train_bce:.4f}")
+                if train_delta is not None:
+                    train_parts.append(f"train_delta_loss={train_delta:.4f}")
+                if train_traj is not None:
+                    train_parts.append(f"train_trajectory_loss={train_traj:.4f}")
+                if train_parts:
+                    summary += "\n    " + "  ".join(train_parts)
+
+                val_parts = []
+                if val_bce is not None:
+                    val_parts.append(f"val_bce_loss={val_bce:.4f}")
+                if val_delta is not None:
+                    val_parts.append(f"val_delta_loss={val_delta:.4f}")
+                if val_traj is not None:
+                    val_parts.append(f"val_trajectory_loss={val_traj:.4f}")
+                if val_parts:
+                    summary += "\n    " + "  ".join(val_parts)
             print(summary)
 
             # Log epoch metrics
@@ -1252,16 +1299,23 @@ def main() -> None:
                 "val_cls_loss": val_metrics.cls_loss,
                 "val_usage_loss": val_metrics.usage_loss,
             }
-            if dual_train:
-                extra.update({
-                    "train_bce_loss": train_metrics.bce_loss,
-                    "train_delta_loss": train_metrics.delta_loss,
-                })
-            if dual_val:
-                extra.update({
-                    "val_bce_loss": val_metrics.bce_loss,
-                    "val_delta_loss": val_metrics.delta_loss,
-                })
+            if train_bce is not None:
+                extra["train_bce_loss"] = train_bce
+            if train_delta is not None:
+                extra["train_delta_loss"] = train_delta
+            if train_traj is not None:
+                extra["train_trajectory_loss"] = train_traj
+            if val_bce is not None:
+                extra["val_bce_loss"] = val_bce
+            if val_delta is not None:
+                extra["val_delta_loss"] = val_delta
+            if val_traj is not None:
+                extra["val_trajectory_loss"] = val_traj
+            if val_metrics.species_metrics:
+                for org_idx, species_vals in sorted(val_metrics.species_metrics.items()):
+                    species_name = species_name_by_org.get(org_idx, f"org_{org_idx}")
+                    for metric_name, metric_val in species_vals.items():
+                        extra[f"{metric_name}_{species_name}"] = metric_val
             logger.log_epoch(epoch, train_loss, val_loss, current_lr, is_best, extra)
 
             # Save checkpoints

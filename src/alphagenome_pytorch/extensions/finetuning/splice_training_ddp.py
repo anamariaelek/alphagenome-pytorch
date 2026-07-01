@@ -78,6 +78,9 @@ class SpliceTrainMetrics:
     loss: float = 0.0
     cls_loss: float = 0.0
     usage_loss: float = 0.0
+    usage_bce_loss: float | None = None
+    usage_delta_loss: float | None = None
+    usage_trajectory_loss: float | None = None
     accuracy: float = 0.0
     # Per-class accuracy (class 0-3 = splice sites, 4 = background)
     per_class_acc: dict[str, float] = field(default_factory=dict)
@@ -102,6 +105,7 @@ def train_epoch_splice(
     logger: "TrainingLogger | None" = None,
     max_grad_norm: float = 1.0,
     usage_delta_from_mean: bool = False,
+    usage_loss_weights: dict | None = None,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -151,6 +155,12 @@ def train_epoch_splice(
         usage_head.to(device)
 
     metrics = SpliceTrainMetrics()
+    usage_bce_sum = 0.0
+    usage_delta_sum = 0.0
+    usage_traj_sum = 0.0
+    n_usage_bce_batches = 0
+    n_usage_delta_batches = 0
+    n_usage_traj_batches = 0
     step = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
@@ -206,9 +216,13 @@ def train_epoch_splice(
                     usage_mask = batch["usage_mask"].to(device)
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                    usage_loss_val = splice_usage_loss(
-                        usage_out["logits"], usage_pos, usage_vals, usage_mask,
+                    usage_loss_val, _ = splice_usage_loss(
+                        usage_out["logits"],
+                        usage_pos,
+                        usage_vals,
+                        usage_mask,
                         delta_from_mean=usage_delta_from_mean,
+                        usage_loss_weights=usage_loss_weights,
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -260,6 +274,15 @@ def train_epoch_splice(
             metrics.loss += total_loss.item()
             metrics.cls_loss += cls_loss_val.item()
             metrics.usage_loss += usage_loss_val.item()
+            if "bce_loss" in usage_corr:
+                usage_bce_sum += usage_corr["bce_loss"]
+                n_usage_bce_batches += 1
+            if "delta_loss" in usage_corr:
+                usage_delta_sum += usage_corr["delta_loss"]
+                n_usage_delta_batches += 1
+            if "trajectory_loss" in usage_corr:
+                usage_traj_sum += usage_corr["trajectory_loss"]
+                n_usage_traj_batches += 1
             metrics.accuracy += cls_acc.get("accuracy", 0.0)
             for k, v in cls_acc.items():
                 metrics.per_class_acc[k] = metrics.per_class_acc.get(k, 0.0) + v
@@ -295,6 +318,12 @@ def train_epoch_splice(
         metrics.per_class_acc = {
             k: v / metrics.n_batches for k, v in metrics.per_class_acc.items()
         }
+    if n_usage_bce_batches > 0:
+        metrics.usage_bce_loss = usage_bce_sum / n_usage_bce_batches
+    if n_usage_delta_batches > 0:
+        metrics.usage_delta_loss = usage_delta_sum / n_usage_delta_batches
+    if n_usage_traj_batches > 0:
+        metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
     metrics.elapsed_s = time.perf_counter() - epoch_start
 
     return metrics
@@ -311,6 +340,7 @@ def validate_splice(
     class_weights: Tensor | None = None,
     use_amp: bool = True,
     usage_delta_from_mean: bool = False,
+    usage_loss_weights: dict | None = None,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -339,6 +369,12 @@ def validate_splice(
         usage_head.eval()
 
     metrics = SpliceTrainMetrics()
+    usage_bce_sum = 0.0
+    usage_delta_sum = 0.0
+    usage_traj_sum = 0.0
+    n_usage_bce_batches = 0
+    n_usage_delta_batches = 0
+    n_usage_traj_batches = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
 
@@ -380,15 +416,28 @@ def validate_splice(
                 usage_mask = batch["usage_mask"].to(device)
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
-                usage_loss_val = splice_usage_loss(
-                    usage_out["logits"], usage_pos, usage_vals, usage_mask,
+                usage_loss_val, _ = splice_usage_loss(
+                    usage_out["logits"],
+                    usage_pos,
+                    usage_vals,
+                    usage_mask,
                     delta_from_mean=usage_delta_from_mean,
+                    usage_loss_weights=usage_loss_weights,
                 )
                 total_loss = total_loss + usage_weight * usage_loss_val
 
         metrics.loss += total_loss.item()
         metrics.cls_loss += cls_loss_val.item()
         metrics.usage_loss += usage_loss_val.item()
+        if "bce_loss" in usage_corr:
+            usage_bce_sum += usage_corr["bce_loss"]
+            n_usage_bce_batches += 1
+        if "delta_loss" in usage_corr:
+            usage_delta_sum += usage_corr["delta_loss"]
+            n_usage_delta_batches += 1
+        if "trajectory_loss" in usage_corr:
+            usage_traj_sum += usage_corr["trajectory_loss"]
+            n_usage_traj_batches += 1
         metrics.accuracy += cls_acc.get("accuracy", 0.0)
         for k, v in cls_acc.items():
             metrics.per_class_acc[k] = metrics.per_class_acc.get(k, 0.0) + v
@@ -402,6 +451,12 @@ def validate_splice(
         metrics.per_class_acc = {
             k: v / metrics.n_batches for k, v in metrics.per_class_acc.items()
         }
+    if n_usage_bce_batches > 0:
+        metrics.usage_bce_loss = usage_bce_sum / n_usage_bce_batches
+    if n_usage_delta_batches > 0:
+        metrics.usage_delta_loss = usage_delta_sum / n_usage_delta_batches
+    if n_usage_traj_batches > 0:
+        metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
     metrics.elapsed_s = time.perf_counter() - val_start
 
     return metrics

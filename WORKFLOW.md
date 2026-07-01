@@ -96,10 +96,14 @@ To additionally keep splice sites only for protein-coding genes, use pre-filtere
 ```bash
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation_protein_coding.parquet \
+    --output ${data_dir}/${species}/splice_sites_gtf_protein_coding.parquet > logs/splice_sites_to_parquet_${species}_gtf_protein_coding.log
+
+python -u scripts/convert_splice_sites_to_parquet.py \
+    --gtf ${data_dir}/${species}/gene_annotation_protein_coding.parquet \
     --usage-parquet ${data_dir}/${species}/usage.parquet \
     --usage-mode 'intersect' \
     --min-alpha 5 \
-    --output ${data_dir}/${species}/splice_sites_intersect_protein_coding.parquet > logs/splice_sites_to_parquet_${species}intersect_protein_coding.log
+    --output ${data_dir}/${species}/splice_sites_intersect_protein_coding.parquet > logs/splice_sites_to_parquet_${species}_intersect_protein_coding.log
 
 python -u scripts/convert_splice_sites_to_parquet.py \
     --gtf ${data_dir}/${species}/gene_annotation_protein_coding.parquet \

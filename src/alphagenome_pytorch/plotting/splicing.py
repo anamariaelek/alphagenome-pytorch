@@ -213,12 +213,40 @@ CHR_SIZES = {
 }
 
 
+def _normalize_tissue_subset(tissue_subset):
+    """Return a de-duplicated list of tissue names or None."""
+    if tissue_subset is None:
+        return None
+
+    if isinstance(tissue_subset, str):
+        tissues = [tissue_subset]
+    elif isinstance(tissue_subset, (list, tuple, set, np.ndarray, pd.Index)):
+        tissues = list(tissue_subset)
+    else:
+        raise TypeError("tissue_subset must be a string or a list-like of strings")
+
+    normalized = []
+    for tissue in tissues:
+        if pd.isna(tissue):
+            continue
+        tissue_name = str(tissue).strip()
+        if tissue_name:
+            normalized.append(tissue_name)
+
+    normalized = list(dict.fromkeys(normalized))
+    if not normalized:
+        raise ValueError("tissue_subset is empty after normalization")
+
+    return normalized
+
+
 def plot_splice_site_dynamics(
     df,
     site_coords,
     metric='SSE',
     tissue_order=TISSUE_ORDER,
     tissue_colors=TISSUE_COLORS,
+    tissue_subset=None,
     figsize=None,
     title=None,
     jitter=0.0,
@@ -250,6 +278,8 @@ def plot_splice_site_dynamics(
         metric: Column name to plot (default: 'SSE')
         tissue_order: List of tissues in desired order
         tissue_colors: Dict mapping tissue names to colors
+        tissue_subset: Tissue name or list of tissue names to display
+            (e.g., 'Brain' or ['Brain', 'Heart']). If None, all tissues are shown.
         figsize: Tuple of (width, height) or None for auto
         title: Overall figure title
         jitter: Amount of horizontal jitter to apply to points (default: 0.0, typical: 0.1-0.3)
@@ -487,6 +517,21 @@ def plot_splice_site_dynamics(
     if tissue_colors is None:
         tissue_colors = TISSUE_COLORS
 
+    selected_tissues = _normalize_tissue_subset(tissue_subset)
+    if selected_tissues is not None:
+        if 'Tissue' not in df_filtered.columns:
+            raise ValueError("tissue_subset requires a 'Tissue' column")
+
+        df_filtered = df_filtered[df_filtered['Tissue'].astype(str).isin(selected_tissues)].copy()
+        if df_filtered.empty:
+            print("No data found for requested tissue_subset")
+            return None
+
+        selected_set = set(selected_tissues)
+        ordered_selected = [t for t in tissue_order if t in selected_set]
+        ordered_selected.extend([t for t in selected_tissues if t not in ordered_selected])
+        tissue_order = ordered_selected
+
     all_tissues_found = set()
 
     # Pre-filter sites to determine which will actually be plotted (if min_conditions is set)
@@ -530,7 +575,7 @@ def plot_splice_site_dynamics(
     # else: both specified, use as-is
 
     if figsize is None:
-        figsize = (n_cols * 5, n_rows * 4)
+        figsize = (n_cols * 3, n_rows * 2.2)
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
     axes = axes.flatten()
@@ -657,9 +702,7 @@ def plot_splice_site_dynamics(
                         alpha=0.9, label=tissue, zorder=2)
 
         ax.grid(axis='y', alpha=0.3, linestyle='--')
-        if len(all_tps) > 0:
-            ax.set_xlim(all_tps[0] - 0.5, all_tps[-1] + 0.5)
-
+        ax.set_xlim(0.5, 15.5)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
         if metric == 'SSE':
@@ -696,6 +739,7 @@ def plot_splice_site_predictions(
     pred_col='pred_usage',
     tissue_order=TISSUE_ORDER,
     tissue_colors=TISSUE_COLORS,
+    tissue_subset=None,
     figsize=None,
     title=None,
     jitter=0.0,
@@ -713,6 +757,10 @@ def plot_splice_site_predictions(
     Plot true vs. predicted splice site usage over time. Works efficiently with
     DataFrames indexed by ['Species', 'Chromosome', 'Position'] or 
     ['Species', 'Chromosome', 'Position', 'Strand'].
+
+    Args:
+        tissue_subset: Tissue name or list of tissue names to display
+            (e.g., 'Brain' or ['Brain', 'Heart']). If None, all tissues are shown.
     """
     if isinstance(site_coords, str):
         site_coords = [site_coords]
@@ -909,6 +957,21 @@ def plot_splice_site_predictions(
         tissue_order = TISSUE_ORDER
     if tissue_colors is None:
         tissue_colors = TISSUE_COLORS
+
+    selected_tissues = _normalize_tissue_subset(tissue_subset)
+    if selected_tissues is not None:
+        if 'Tissue' not in df_filtered.columns:
+            raise ValueError("tissue_subset requires a 'Tissue' column")
+
+        df_filtered = df_filtered[df_filtered['Tissue'].astype(str).isin(selected_tissues)].copy()
+        if df_filtered.empty:
+            print("No data found for requested tissue_subset")
+            return None
+
+        selected_set = set(selected_tissues)
+        ordered_selected = [t for t in tissue_order if t in selected_set]
+        ordered_selected.extend([t for t in selected_tissues if t not in ordered_selected])
+        tissue_order = ordered_selected
 
     label_to_type = {0: 'Donor+', 1: 'Acceptor+', 2: 'Donor-', 3: 'Acceptor-', 4: 'None'}
 

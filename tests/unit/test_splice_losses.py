@@ -183,3 +183,35 @@ class TestSpliceUsageLoss:
         assert loss.item() == 0.0
         # should not raise on backward
         loss.backward()
+
+    def test_trajectory_pearson_penalizes_flat_trajectory(self):
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, n_cond, max_sites = 1, 64, 3, 1
+        usage_positions = torch.tensor([[12]])
+        usage_values = torch.tensor([[[0.0, 0.5, 1.0]]])
+        usage_mask = torch.ones(B, max_sites, n_cond, dtype=torch.bool)
+
+        flat_predictions = torch.zeros(B, S, n_cond)
+        flat_predictions[0, 12, :] = 0.0
+
+        shaped_predictions = torch.zeros(B, S, n_cond)
+        shaped_predictions[0, 12, :] = torch.tensor([-3.0, 0.0, 3.0])
+
+        flat_loss, flat_metrics = splice_usage_loss(
+            flat_predictions,
+            usage_positions,
+            usage_values,
+            usage_mask,
+            usage_loss_weights={"trajectory_pearson": 1.0},
+        )
+        shaped_loss, shaped_metrics = splice_usage_loss(
+            shaped_predictions,
+            usage_positions,
+            usage_values,
+            usage_mask,
+            usage_loss_weights={"trajectory_pearson": 1.0},
+        )
+
+        assert shaped_loss.item() < flat_loss.item()
+        assert flat_metrics["trajectory_corr"] <= shaped_metrics["trajectory_corr"]
