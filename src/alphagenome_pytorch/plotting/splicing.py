@@ -1,6 +1,8 @@
 """Plotting utilities for splicing data.
 """
 
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -1150,6 +1152,265 @@ def plot_splice_site_predictions(
 
     plt.tight_layout(rect=[0, 0, 0.85, 1])
     return fig
+
+def gp_smooth_curve(
+    grid,
+    values,
+    out_grid=None,
+    length_scale=0.20,
+    noise_level=0.05,
+    length_scale_bounds=(0.05, 2.0),
+    noise_level_bounds=(1e-5, 0.5),
+    n_restarts=2,
+    optimize=True,
+    clip=(0.0, 1.0),
+):
+    """GP posterior mean of one trajectory sampled at ``grid``, evaluated on ``out_grid``.
+
+    Uses the same RBF + White kernel as ``cluster_trajectories.py`` /
+    ``splice_trajectory_clustering.ipynb`` (``ConstantKernel * RBF + WhiteKernel``,
+    ``normalize_y=True``, ``alpha=1e-8``, length-scale bounds ``(0.05, 2.0)``),
+    with time normalised to [0, 1]. Falls back to linear interpolation on failure.
+
+    Parameters
+    ----------
+    grid, values : array-like
+        Timepoints and their values (NaNs in ``values`` are skipped).
+    out_grid : array-like or None
+        Positions to evaluate the fitted curve at. Defaults to ``grid``.
+    optimize : bool
+        If True (default, as in the clustering pipeline) the kernel hyper-parameters
+        are fit per trajectory by maximising the marginal likelihood. If False the
+        length-scale is held fixed at ``length_scale`` — much faster, and avoids the
+        optimiser inflating the length-scale when smoothing an already-averaged curve.
+    """
+    grid = np.asarray(grid, dtype=float)
+    values = np.asarray(values, dtype=float)
+    out_grid = grid if out_grid is None else np.asarray(out_grid, dtype=float)
+
+    m = np.isfinite(values)
+    if m.sum() < 2:
+        return np.full(len(out_grid), np.nan)
+
+    t0, t1 = float(grid.min()), float(grid.max())
+    span = (t1 - t0) if t1 > t0 else 1.0
+    norm = lambda a: (np.asarray(a, float) - t0) / span
+
+    try:
+        from sklearn.gaussian_process import GaussianProcessRegressor
+        from sklearn.gaussian_process.kernels import (
+            RBF, ConstantKernel, WhiteKernel,
+        )
+        kernel = (
+            ConstantKernel(1.0, (1e-3, 5.0))
+            * RBF(length_scale, length_scale_bounds)
+            + WhiteKernel(noise_level, noise_level_bounds)
+        )
+        gpr = GaussianProcessRegressor(
+            kernel=kernel,
+            normalize_y=True,
+            alpha=1e-8,
+            n_restarts_optimizer=(n_restarts if optimize else 0),
+            optimizer=("fmin_l_bfgs_b" if optimize else None),
+            random_state=42,
+        )
+        gpr.fit(norm(grid[m]).reshape(-1, 1), values[m])
+        fit = gpr.predict(norm(out_grid).reshape(-1, 1))
+    except Exception:
+        from scipy.interpolate import interp1d
+        f = interp1d(grid[m], values[m], kind="linear", bounds_error=False,
+                     fill_value=(values[m][0], values[m][-1]))
+        fit = f(out_grid)
+
+    if clip is not None:
+        fit = np.clip(fit, clip[0], clip[1])
+    return fit
+
+
+def gp_smooth_trajectories(
+    values,
+    grid,
+    out_grid=None,
+    length_scale=0.20,
+    noise_level=0.05,
+    optimize=False,
+    n_restarts=2,
+    n_jobs=-1,
+    clip=(0.0, 1.0),
+):
+    """GP-smooth every trajectory (row) of ``values`` — the per-trajectory smoothing
+    step that ``cluster_trajectories.py`` applies before averaging.
+
+    The cluster profiles in the clustering pipeline look the way they do because
+    each trajectory is GP-smoothed *first* (which interpolates missing timepoints)
+    and the cluster mean is then a plain average of those smooth curves. Averaging a
+    plain (unsmoothed) matrix instead is much rougher; GP-smoothing the average is
+    much smoother — so the trajectories must be smoothed individually.
+
+    Parameters
+    ----------
+    values : ndarray, shape (N, G)
+        Per-trajectory values on ``grid`` (may contain NaN).
+    grid : array-like, shape (G,)
+        Timepoints of the columns of ``values``.
+    optimize : bool
+        Passed to :func:`gp_smooth_curve`. ``False`` (default) fixes the length-scale
+        (fast; matches the clustering roughness closely); ``True`` fits it per
+        trajectory exactly like the script (slower).
+    n_jobs : int
+        Parallel workers (joblib, thread backend). ``-1`` uses all cores.
+
+    Returns
+    -------
+    ndarray, shape (N, len(out_grid or grid))
+    """
+    values = np.asarray(values, dtype=float)
+    grid = np.asarray(grid, dtype=float)
+    out_grid = grid if out_grid is None else np.asarray(out_grid, dtype=float)
+
+    kw = dict(out_grid=out_grid, length_scale=length_scale, noise_level=noise_level,
+              optimize=optimize, n_restarts=n_restarts, clip=clip)
+
+    try:
+        from joblib import Parallel, delayed
+        rows = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(gp_smooth_curve)(grid, values[i], **kw)
+            for i in range(values.shape[0])
+        )
+    except ImportError:
+        rows = [gp_smooth_curve(grid, values[i], **kw)
+                for i in range(values.shape[0])]
+
+    return np.asarray(rows, dtype=float)
+
+
+def plot_cluster_trajectory_profiles(
+    grid,
+    features,
+    labels,
+    features2=None,
+    series_labels=("True", "Predicted"),
+    cluster_order=None,
+    color_by=None,
+    cmap="tab20",
+    title_by=None,
+    n_draw=120,
+    n_cols=4,
+    seed=0,
+    ylabel="SSE",
+    xlabel="Timepoint",
+    ylim=(-0.05, 1.05),
+    figsize=None,
+    suptitle=None,
+):
+    """Plot per-cluster trajectory profiles: thin individual trajectories + a
+    mean ± SD band + a bold **plain-mean** line, one panel per cluster.
+
+    Pure plotting — no smoothing is done here (that would over-smooth). Pass
+    *already GP-smoothed* per-trajectory ``features`` (e.g. from
+    :func:`gp_smooth_trajectories`, or the ``_gp_features.npy`` saved by
+    ``cluster_trajectories.py``); the bold line is then the plain average of those
+    smooth curves, exactly as in the clustering pipeline's saved plots.
+
+    Matches the cluster-profile style of ``splice_trajectory_clustering.ipynb`` /
+    ``cluster_trajectories.py`` and is shared by ``splice_trajectory_type_eval.ipynb``
+    (which passes a second, predicted series drawn dashed).
+
+    Parameters
+    ----------
+    grid : array-like, shape (G,)
+        Common x positions (e.g. developmental timepoints).
+    features : ndarray, shape (N, G)
+        Per-trajectory (smoothed) values on ``grid`` (may contain NaN).
+    labels : array-like, shape (N,)
+        Cluster id per trajectory. NaN entries are ignored.
+    features2 : ndarray or None
+        Optional second series (same shape), drawn dashed (e.g. predicted usage).
+    series_labels : (str, str)
+        Legend labels for ``features`` (solid) and ``features2`` (dashed).
+    cluster_order : list or None
+        Clusters (and their order); defaults to sorted unique labels.
+    color_by : dict or None
+        Maps cluster id -> colour. If None, colours come from ``cmap``.
+    title_by : dict or None
+        Maps cluster id -> string appended to the panel title (e.g. shape name).
+    n_draw : int
+        Max individual trajectories drawn per cluster (per series).
+    """
+    grid = np.asarray(grid, dtype=float)
+    labels = np.asarray(labels)
+    features = np.asarray(features, dtype=float)
+    if features2 is not None:
+        features2 = np.asarray(features2, dtype=float)
+
+    valid = ~pd.isna(labels)
+    if cluster_order is None:
+        cluster_order = sorted(pd.unique(labels[valid]))
+
+    n = len(cluster_order)
+    n_cols = min(n_cols, max(1, n))
+    n_rows = (n + n_cols - 1) // n_cols
+    if figsize is None:
+        figsize = (n_cols * 2.7, n_rows * 2.3)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize,
+                             squeeze=False, sharey=True, sharex=True)
+    rng = np.random.default_rng(seed)
+    default_colors = plt.get_cmap(cmap)
+
+    for idx, cl in enumerate(cluster_order):
+        ax = axes[idx // n_cols, idx % n_cols]
+        color = (color_by.get(cl) if color_by is not None
+                 else default_colors(idx % default_colors.N))
+        rows = np.where(labels == cl)[0]
+
+        for F, ls, alpha_band in ((features, "-", 0.25),
+                                  (features2, "--", 0.10)):
+            if F is None:
+                continue
+            Fc = F[rows]
+
+            draw = rng.choice(len(rows), size=min(n_draw, len(rows)), replace=False)
+            for i in draw:
+                ax.plot(grid, Fc[i], color=color, alpha=0.08, lw=0.5, ls=ls)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                mean = np.nanmean(Fc, axis=0)
+                sd = np.nanstd(Fc, axis=0)
+            ax.fill_between(grid, mean - sd, mean + sd, color=color, alpha=alpha_band, lw=0)
+            ax.plot(grid, mean, ls, color=color, lw=2.5)
+
+        title = f"Cluster {int(cl)}"
+        if title_by is not None and cl in title_by:
+            title += f" \u00b7 {title_by[cl]}"
+        title += f"\n(n={len(rows):,})"
+        ax.set_title(title, fontsize=8, fontweight="bold")
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.set_xlim(grid[0], grid[-1])
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=7)
+        if idx % n_cols == 0:
+            ax.set_ylabel(ylabel, fontsize=8)
+        if idx // n_cols == n_rows - 1:
+            ax.set_xlabel(xlabel, fontsize=8)
+
+    for j in range(n, n_rows * n_cols):
+        axes[j // n_cols, j % n_cols].set_visible(False)
+
+    if features2 is not None:
+        handles = [
+            plt.Line2D([0], [0], color="black", lw=2.5, ls="-", label=series_labels[0]),
+            plt.Line2D([0], [0], color="black", lw=2.5, ls="--", label=series_labels[1]),
+        ]
+        fig.legend(handles=handles, loc="upper right", fontsize=9, framealpha=0.9)
+
+    if suptitle is not None:
+        fig.suptitle(suptitle, y=1.0)
+    plt.tight_layout()
+    return fig
+
 
 def plot_usage_density(
     df: pd.DataFrame,
