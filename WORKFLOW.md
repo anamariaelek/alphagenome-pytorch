@@ -7,7 +7,8 @@ species=Monodelphis_domestica
 species=Macaca_mulatta
 species=Gallus_gallus
 
-if [[ "$species" == "Homo_sapiens" ]]; then
+# Use new genome for human and macaque
+if [[ "$species" == "Homo_sapiens" ]] || [[ "$species" == "Macaca_mulatta" ]]; then
     gtf_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/gtf/
     fa_dir=${HOME}/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/
 else

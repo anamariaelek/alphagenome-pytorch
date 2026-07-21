@@ -48,7 +48,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 }
 
 # Work directory
-WORK_DIR=${HOME}/projects/alphagenome_ft_pytorch/
+WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Config file
 CONFIG="${WORK_DIR}/configs/finetune_hmrroc_132kb.yaml"

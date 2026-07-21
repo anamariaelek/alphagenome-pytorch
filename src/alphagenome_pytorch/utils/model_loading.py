@@ -37,27 +37,45 @@ def _normalize_species_n_conditions(species_n_conditions):
         f"Got: {type(species_n_conditions).__name__}"
     )
 
-def load_model_for_inference(checkpoint_path, device, strict=True):
+def load_model_for_inference(checkpoint_path, device, strict=True, config_path=None):
     """
     Loads an AlphaGenome model for inference from either:
       - a fine-tuned checkpoint directory (with best_model.pth + config.json)
       - a single .pth file (pretrained or fine-tuned)
-    
+
     Supports path expansion for:
       - ~ (home directory)
       - $VAR and ${VAR} (environment variables)
-    
+
+    Args:
+        checkpoint_path: Checkpoint directory or .pth file.
+        device: Target device.
+        strict: strict flag passed to load_state_dict for fine-tuned checkpoints.
+        config_path: Optional explicit path to the config.json/.yaml to use, for
+            checkpoints whose config file isn't named "config.json"/"config.yaml"
+            (e.g. a directory containing "config_0-5.json" instead). Overrides
+            auto-detection.
+
     Returns (model, config_dict or None)
     """
     from alphagenome_pytorch import AlphaGenome
     import yaml
-    
+
     # Expand checkpoint path for ~ and environment variables
     checkpoint_path = expand_path(checkpoint_path)
     p = Path(checkpoint_path)
 
+    if config_path is not None:
+        cfg_path = Path(expand_path(config_path))
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"config_path not found: {cfg_path}")
+        if p.is_dir():
+            ckpt_file = p / "best_model.pth"
+            if not ckpt_file.exists():
+                raise FileNotFoundError(f"No best_model.pth found in directory: {p}")
+            p = ckpt_file
     # If a directory is given, look for best_model.pth and config.json/yaml
-    if p.is_dir():
+    elif p.is_dir():
         ckpt_file = p / "best_model.pth"
         cfg_json = p / "config.json"
         cfg_yaml = p / "config.yaml"
@@ -130,6 +148,16 @@ def load_model_for_inference(checkpoint_path, device, strict=True):
     elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         # Heuristic: fine-tuned checkpoints usually have model_state_dict
         is_finetuned = True
+
+    if is_finetuned and cfg is None:
+        raise RuntimeError(
+            f"Checkpoint at {p} looks fine-tuned (state dict has 'model_state_dict', "
+            f"'epoch', etc.) but no config.json/config.yaml was found next to it, and "
+            f"none of ['config', 'cfg', 'config_dict'] were embedded in the checkpoint. "
+            f"Pass the config explicitly via config_path= (e.g. a non-standard filename "
+            f"like 'config_0-5.json'); loading it as a plain pretrained checkpoint would "
+            f"fail with a confusing state-dict key mismatch."
+        )
 
     if is_finetuned and cfg is not None:
         # Fine-tuned model: reconstruct architecture

@@ -1,0 +1,8 @@
+# .claudeignore
+*.csv
+*.json
+dist/
+build/
+node_modules/
+.git/
+venv/
