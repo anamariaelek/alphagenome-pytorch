@@ -67,7 +67,7 @@ DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 # PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=132kb_encode_intersect_usage_pc_obs_mouse
+RUN=lora_32_human_mouse_rabbit_opossum
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
@@ -75,7 +75,7 @@ PRED_DIR=preds_${TIMESTAMP}
 DATA_CONFIG="${DIR}/data/data_config_${TIMESTAMP}.json"
 
 # Evaluation settings
-for EVAL_SPECIES in rat rabbit opossum chicken; do
+for EVAL_SPECIES in rabbit opossum; do
 OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 
@@ -84,10 +84,10 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --data-config "${DATA_CONFIG}" \
     --eval-species "${EVAL_SPECIES}" \
     --per-tissue \
-    --observed-conditions-only \
     --cross-species-usage \
+    --observed-conditions-only \
     --overwrite \
-    --batch-size 6 \
+    --batch-size 4 \
     --max-windows 1000 \
     --device cuda \
     --seed 1950 \
