@@ -107,9 +107,16 @@ gradient_checkpointing: true
 
 train_species_embeddings: true
 
-lora_rank: 8
-lora_alpha: 16
+lora_rank: 32
+lora_alpha: 64
 lora_targets: q_proj,v_proj
+
+# Additional components to fully fine-tune on top of whatever 'mode' already
+# trains (splice heads, LoRA-adapted attention, species embeddings above).
+# Comma-separated, ignored in 'mode: full' (everything is already trainable).
+# Valid names: encoder, tower, decoder, embedder_128bp, embedder_1bp,
+# embedder_pair, organism_embed
+#train_components: encoder,tower,decoder
 
 # ---------------------------------------------------------------------------
 # Optimiser
@@ -157,7 +164,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 132kb_encode_intersect_usage_pc_obs_human_mouse_rat_rabbit_opossum_chicken        # defaults to timestamp
+run_name: lora_32_human_mouse_rat_rabbit_opossum_chicken        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

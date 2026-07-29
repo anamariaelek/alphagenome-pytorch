@@ -170,7 +170,7 @@ def load_model_for_inference(checkpoint_path, device, strict=True, config_path=N
         dict_conds = _normalize_species_n_conditions(cfg.get("species_n_conditions", {}))
         dtype_str = cfg.get("dtype", "bfloat16")
         dtype_policy = DtypePolicy.full_float32() if dtype_str == "float32" else DtypePolicy.mixed_precision()
-        model = AlphaGenome(dtype_policy=dtype_policy)
+        model = AlphaGenome(num_organisms=num_organisms, dtype_policy=dtype_policy)
         model = load_trunk(model, cfg["pretrained_weights"], exclude_heads=True)
         model = remove_all_heads(model)
         if cfg.get("mode") == "lora" and cfg.get("lora_rank", 0) > 0:

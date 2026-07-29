@@ -53,7 +53,7 @@ import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage, fcluster
 
-from alphagenome_pytorch.plotting.splicing import (
+from alphagenome_pytorch.clustering import (
     T_GRID,
     SHAPE_ORDER,
     prepare_trajectories,
@@ -61,8 +61,8 @@ from alphagenome_pytorch.plotting.splicing import (
     smooth_all_trajectories,
     classify_cluster_shape,
     select_k_gap,
-    save_cluster_plots,
 )
+from alphagenome_pytorch.plotting.splicing import save_cluster_plots
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────

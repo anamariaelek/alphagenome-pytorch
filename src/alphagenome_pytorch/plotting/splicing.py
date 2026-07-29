@@ -218,40 +218,10 @@ CHR_SIZES = {
 }
 
 
-# ── Developmental-trajectory clustering: shared constants ───────────────────────
-
-T_GRID = np.arange(1, 16, dtype=float)  # developmental timepoints 1..15
-
-SHAPE_COLORS = {
-    # Upward: dark = abrupt early, medium = abrupt late, light = gradual
-    "up_early":      "#1a7a1a",   # dark green
-    "up_late":       "#5dac5d",   # medium green
-    "up_mid":        "#b3e0b3",   # light green  (gradual)
-    # Downward
-    "down_early":    "#a01010",   # dark red
-    "down_late":     "#e05050",   # medium red
-    "down_mid":      "#f0b0b0",   # light pink   (gradual)
-    # Biphasic
-    "up-down":       "#1f77b4",   # blue
-    "down-up":       "#ff7f0e",   # orange
-    # Flat
-    "flat_high":     "#9467bd",
-    "flat_mid_high": "#d8c8e8",
-    "flat_mid":      "#e0d4eb",
-    "flat_mid_low":  "#c6b2da",
-    "flat_low":      "#c5b0d5",
-    # No clear pattern
-    "complex":       "#7f7f7f",
-}
-
-SHAPE_ORDER = [
-    "up_early",   "up_late",   "up_mid",
-    "down_early", "down_late", "down_mid",
-    "up-down", "down-up",
-    "flat_high", "flat_mid_high", "flat_mid", "flat_mid_low", "flat_low",
-    "complex",
-]
-
+# ── Trajectory-clustering constants live in alphagenome_pytorch.clustering ──────
+from alphagenome_pytorch.clustering import (  # noqa: F401  (re-exported for back-compat)
+    T_GRID, SHAPE_COLORS, SHAPE_ORDER,
+)
 
 def _normalize_tissue_subset(tissue_subset):
     """Return a de-duplicated list of tissue names or None."""
@@ -441,7 +411,8 @@ def plot_splice_site_dynamics(
 
             sites_in_range = sites_in_range.sort_values(index_cols[2:])  # Sort by Position (and Strand if present)
             for _, row in sites_in_range.iterrows():
-                site_filters.append((row['Species'], row['Chromosome'], row['Position'], row['Strand']))
+                strand_val = row['Strand'] if 'Strand' in sites_in_range.columns else '?'
+                site_filters.append((row['Species'], row['Chromosome'], row['Position'], strand_val))
 
             print(f"Found {len(sites_in_range)} sites in {coord}")
         else:
@@ -478,6 +449,8 @@ def plot_splice_site_dynamics(
                         else:
                             strand = '?'
 
+            if strand is None:          # site not found / no strand info -> don't filter on Strand
+                strand = '?'
             site_filters.append((species, chrom, pos, strand))
 
     if not site_filters:
@@ -792,16 +765,46 @@ def plot_splice_site_predictions(
     n_cols=None,
     n_rows=None,
     split_by_tissue=False,
+    highlight_timepoints=None,
+    highlight_color='#ffd54a',
+    show_missing=False,
 ):
     """
     Plot true vs. predicted splice site usage over time. Works efficiently with
-    DataFrames indexed by ['Species', 'Chromosome', 'Position'] or 
+    DataFrames indexed by ['Species', 'Chromosome', 'Position'] or
     ['Species', 'Chromosome', 'Position', 'Strand'].
 
     Args:
         tissue_subset: Tissue name or list of tissue names to display
             (e.g., 'Brain' or ['Brain', 'Heart']). If None, all tissues are shown.
+        highlight_timepoints: Timepoint(s) to highlight with a shaded vertical band.
+            May be a single int, a list of ints (applied to every panel), or a dict
+            mapping a site key to a list of ints for per-panel highlighting. Accepted
+            site keys: 'species chrom:pos', 'chrom:pos', (species, chrom, pos), or the
+            integer position.
+        highlight_color: Color of the highlight band.
+        show_missing: If True, a requested site with no matching data still gets a
+            placeholder panel (labeled with its species, body "no data") instead of
+            being dropped — keeps a fixed panel grid across figures.
     """
+    def _highlights_for(species, chrom, pos):
+        """Resolve which timepoints to highlight for a given panel/site."""
+        if highlight_timepoints is None:
+            return []
+        if isinstance(highlight_timepoints, dict):
+            for key in ((str(species).lower(), str(chrom), int(pos)),
+                        f'{str(species).lower()} {chrom}:{pos}',
+                        f'{chrom}:{pos}', int(pos)):
+                if key in highlight_timepoints:
+                    tps = highlight_timepoints[key]
+                    break
+            else:
+                return []
+        else:
+            tps = highlight_timepoints
+        if np.isscalar(tps):
+            tps = [tps]
+        return [int(t) for t in tps]
     if isinstance(site_coords, str):
         site_coords = [site_coords]
 
@@ -1045,7 +1048,7 @@ def plot_splice_site_predictions(
     for species, chrom, pos, strand in site_filters:
         df_site = df_filtered[site_mask(df_filtered, species, chrom, pos, strand)].copy()
 
-        if df_site.empty:
+        if df_site.empty and not show_missing:
             continue
 
         if alpha_threshold is not None and 'Alpha' in df_site.columns:
@@ -1120,7 +1123,12 @@ def plot_splice_site_predictions(
         df_plot = df_site if tissue is None else df_site[df_site['Tissue'] == tissue]
 
         if df_plot.empty:
-            ax.text(0.5, 0.5, f'No data\n{label}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'no data', ha='center', va='center',
+                    transform=ax.transAxes, color='#999999', fontsize=9)
+            ax.set_title(str(species) if pos in (0, None) else label, fontsize=11)
+            ax.set_xlim(0.5, 15.5); ax.set_ylim(-0.05, 1.05)
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+            ax.set_xlabel('Timepoint', fontsize=10); ax.set_ylabel('Usage', fontsize=10)
             continue
 
         plot_tissues = [tissue] if tissue is not None else [t for t in tissue_order if t in df_plot['Tissue'].values]
@@ -1153,14 +1161,28 @@ def plot_splice_site_predictions(
             point_sizes = 20 + 100 * (grouped['size_value'] - smin) / (smax - smin) if has_size_range else pd.Series(20, index=grouped.index)
             point_sizes = point_sizes.fillna(10).clip(lower=10, upper=200)
 
-            # True
-            ax.fill_between(x, grouped['true_mean'] - grouped['true_std'], grouped['true_mean'] + grouped['true_std'], color=color, alpha=0.1, linewidth=0)
-            ax.plot(x, grouped['true_mean'], color=color, linewidth=1.5, alpha=0.9, zorder=2)
-            ax.scatter(x, grouped['true_mean'], s=point_sizes, color=color, marker='o', edgecolors='white', linewidths=0.5, alpha=0.9, zorder=3)
+            # True -- plotted only over timepoints where a true value was actually
+            # observed, so the line connects across whatever timepoints have ground
+            # truth instead of breaking (matplotlib splits a line at NaN y-values) at
+            # every timepoint that's merely missing an observation. Predicted values
+            # are unaffected -- if predictions exist for every timepoint (e.g. because
+            # they were freshly computed rather than looked up from an observation-only
+            # table), the pred line below still spans the full x range.
+            true_present = grouped['true_mean'].notna()
+            x_true = x[true_present]
+            true_mean = grouped['true_mean'][true_present]
+            true_std = grouped['true_std'][true_present]
+            true_sizes = point_sizes[true_present]
+            ax.fill_between(x_true, true_mean - true_std, true_mean + true_std, color=color, alpha=0.1, linewidth=0)
+            ax.plot(x_true, true_mean, color=color, linewidth=1.5, alpha=0.9, zorder=2)
+            ax.scatter(x_true, true_mean, s=true_sizes, color=color, marker='o', edgecolors='white', linewidths=0.5, alpha=0.9, zorder=3)
 
             # Pred
             ax.plot(x, grouped['pred_mean'], color=color, linewidth=1, alpha=0.9, zorder=2, linestyle='--')
             ax.scatter(x, grouped['pred_mean'], s=point_sizes, color=color, marker='x', linewidths=0.5, alpha=0.9, zorder=3)
+
+        for htp in _highlights_for(species, chrom, pos):
+            ax.axvspan(htp - 0.4, htp + 0.4, color=highlight_color, alpha=0.35, zorder=0, linewidth=0)
 
         ax.grid(axis='y', alpha=0.3, linestyle='--')
         ax.set_xlim(0.5, 15.5)
@@ -1456,586 +1478,12 @@ def plot_usage_density(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def prepare_trajectories(parquet_path, species=None, tissue=None,
-                         min_timepoints=5, min_reads=1,
-                         max_sites=None, random_seed=42):
-    """
-    Load splice-site usage data, aggregate to a per-(site, [tissue], [species])
-    x timepoint matrix, and filter by data availability.
-
-    Parameters
-    ----------
-    parquet_path : str
-        Direct path or template with ``{species}`` placeholder.
-    species : str or None
-        If None (or 'all'), all matching species files are loaded and Species
-        is retained as a trajectory-identity dimension.
-    tissue : str or None
-        If None, all tissues are kept and Tissue is a trajectory dimension.
-
-    Returns
-    -------
-    sites : pd.DataFrame        trajectory identifier columns
-    sse_wide : pd.DataFrame     SSE values (rows = trajectories, cols = timepoints 1-15)
-    reads_wide : pd.DataFrame   read counts, same shape (0 where undetected)
-    """
-    import glob
-    from pathlib import Path
-
-    if "{species}" in parquet_path:
-        if species is None:
-            paths = sorted(glob.glob(parquet_path.replace("{species}", "*")))
-            if not paths:
-                raise FileNotFoundError(
-                    f"No parquet files match template: {parquet_path!r}")
-            log.info("Loading %d species files: %s",
-                     len(paths), [Path(p).stem for p in paths])
-            df = pd.concat([pd.read_parquet(p) for p in paths],
-                           ignore_index=True)
-        else:
-            df = pd.read_parquet(parquet_path.format(species=species))
-    else:
-        df = pd.read_parquet(parquet_path)
-
-    if df.index.names[0] is not None and df.index.names[0] != 0:
-        df = df.reset_index()
-
-    if species is not None and "Species" in df.columns:
-        df = df[df["Species"] == species]
-    if tissue is not None and "Tissue" in df.columns:
-        df = df[df["Tissue"] == tissue]
-
-    if df.empty:
-        raise ValueError(f"No data for species={species!r}, tissue={tissue!r}")
-
-    if "Reads" not in df.columns and "Alpha" in df.columns and "Beta" in df.columns:
-        df = df.copy()
-        df["Reads"] = df["Alpha"] + df["Beta"]
-    if min_reads > 0 and "Reads" in df.columns:
-        df = df[df["Reads"] >= min_reads]
-
-    group_cols = ["Chromosome", "Position", "Strand"]
-    if species is None and "Species" in df.columns:
-        group_cols = ["Species"] + group_cols
-    if tissue is None and "Tissue" in df.columns:
-        group_cols = group_cols + ["Tissue"]
-
-    all_tps = list(range(1, 16))
-    reads_col = "Reads" if "Reads" in df.columns else "SSE"
-
-    agg = (
-        df.groupby(group_cols + ["Timepoint"])
-          .agg(SSE_mean=("SSE", "mean"), Reads_sum=(reads_col, "sum"))
-          .reset_index()
-    )
-
-    sse_wide = (
-        agg.pivot_table(index=group_cols, columns="Timepoint", values="SSE_mean")
-           .reindex(columns=all_tps)
-    )
-    reads_wide = (
-        agg.pivot_table(index=group_cols, columns="Timepoint",
-                        values="Reads_sum", fill_value=0)
-           .reindex(columns=all_tps, fill_value=0)
-           .reindex(sse_wide.index, fill_value=0)
-    )
-
-    keep = (reads_wide.values > 0).sum(axis=1) >= min_timepoints
-    sse_wide   = sse_wide[keep]
-    reads_wide = reads_wide[keep]
-
-    extra_dims = [c for c in group_cols
-                  if c not in ("Chromosome", "Position", "Strand")]
-    sp_label  = species or "all species"
-    tis_label = tissue  or "all tissues"
-    dim_note  = f"  [dims: {', '.join(extra_dims)}]" if extra_dims else ""
-    log.info("%s/%s: %s trajectories with >=%d detected timepoints "
-             "(from %s total)%s",
-             sp_label, tis_label,
-             f"{keep.sum():,}", min_timepoints, f"{len(keep):,}", dim_note)
-
-    if max_sites is not None and len(sse_wide) > max_sites:
-        rng = np.random.default_rng(random_seed)
-        idx = np.sort(rng.choice(len(sse_wide), size=max_sites, replace=False))
-        sse_wide   = sse_wide.iloc[idx]
-        reads_wide = reads_wide.iloc[idx]
-        log.info("Subsampled to %s trajectories", f"{max_sites:,}")
-
-    sites = sse_wide.reset_index()[group_cols]
-    return sites, sse_wide, reads_wide
-
-
-def filter_to_split(sites, data_config_path, species=None, split="test"):
-    """
-    Return a boolean mask selecting sites inside the genomic windows of a data
-    split (test / val / train). Boundaries come from BED files referenced in the
-    JSON config (key ``<split>_bed``); a site is in the split if its
-    (Chromosome, Position) falls in any ~131 kb window.
-    """
-    import json
-    import os
-
-    with open(data_config_path) as _f:
-        cfg = json.load(_f)
-
-    bed_key = f"{split}_bed"
-
-    def _load_intervals(sp):
-        path = os.path.expanduser(cfg[sp][bed_key])
-        bed  = pd.read_csv(path, sep="\t", header=None,
-                           usecols=[0, 1, 2],
-                           names=["chrom", "start", "end"],
-                           dtype={"chrom": str, "start": int, "end": int})
-        ivs = {}
-        for chrom, grp in bed.groupby("chrom"):
-            g = grp.sort_values("start")
-            ivs[chrom] = (g["start"].values, g["end"].values)
-        return ivs
-
-    def _apply_intervals(sub_sites, ivs):
-        chroms = sub_sites["Chromosome"].astype(str).values
-        posns  = sub_sites["Position"].astype(int).values
-        result = np.zeros(len(sub_sites), dtype=bool)
-        for chrom in np.unique(chroms):
-            if chrom not in ivs:
-                continue
-            starts, ends = ivs[chrom]
-            sel = chroms == chrom
-            pos = posns[sel]
-            idx = np.searchsorted(starts, pos, side="right") - 1
-            ok  = (idx >= 0) & (idx < len(ends))
-            hit = np.zeros(len(pos), dtype=bool)
-            hit[ok] = ends[idx[ok]] >= pos[ok]
-            result[sel] = hit
-        return result
-
-    mask = np.zeros(len(sites), dtype=bool)
-
-    if species is not None:
-        if species not in cfg:
-            raise KeyError(f"Species {species!r} not found in {data_config_path}")
-        ivs  = _load_intervals(species)
-        mask = _apply_intervals(sites, ivs)
-    else:
-        for sp in sites["Species"].unique():
-            if sp not in cfg:
-                log.warning("Species %r not in config — skipping split filter", sp)
-                continue
-            sp_sel = (sites["Species"] == sp).values
-            ivs    = _load_intervals(sp)
-            mask[sp_sel] = _apply_intervals(sites[sp_sel], ivs)
-
-    n   = int(mask.sum())
-    pct = 100.0 * n / max(len(mask), 1)
-    log.info("Split '%s': %s / %s trajectories (%.1f%%) inside %s windows",
-             split, f"{n:,}", f"{len(mask):,}", pct, split)
-    return mask
-
-
-def _make_kernel(length_scale=0.20, noise_level=0.05):
-    from sklearn.gaussian_process.kernels import (
-        RBF, ConstantKernel as C, WhiteKernel,
-    )
-    return (
-        C(1.0, (1e-3, 5.0))
-        * RBF(length_scale=length_scale, length_scale_bounds=(0.05, 2.0))
-        + WhiteKernel(noise_level=noise_level, noise_level_bounds=(1e-5, 0.5))
-    )
-
-
-def smooth_trajectory_gp(tps_obs, sse_obs, t_grid,
-                         length_scale=0.20, noise_level=0.05, n_restarts=2):
-    """Fit a GP to one trajectory's observed points; return (mean, std, lml).
-
-    The single-trajectory smoother used for illustration in
-    ``splice_trajectory_clustering.ipynb`` (see also :func:`_smooth_one`, which
-    adds hyperparameter diagnostics for the batch pipeline).
-    """
-    from sklearn.gaussian_process import GaussianProcessRegressor
-
-    t_min, t_max = float(t_grid[0]), float(t_grid[-1])
-    norm = lambda t: (np.asarray(t, float) - t_min) / (t_max - t_min)
-
-    gpr = GaussianProcessRegressor(
-        kernel=_make_kernel(length_scale, noise_level),
-        n_restarts_optimizer=n_restarts,
-        normalize_y=True, alpha=1e-8, random_state=42,
-    )
-    gpr.fit(norm(tps_obs).reshape(-1, 1), np.asarray(sse_obs, float))
-    y_mean, y_std = gpr.predict(norm(t_grid).reshape(-1, 1), return_std=True)
-    return np.clip(y_mean, 0.0, 1.0), y_std, gpr.log_marginal_likelihood_value_
-
-
-def _smooth_one(sse_row, reads_row, col_tps, t_grid,
-                length_scale, noise_level, n_restarts, bound_tol=0.01,
-                optimize=True):
-    """Smooth a single trajectory (GP, with hyperparameter diagnostics); falls
-    back to linear interpolation. Returns (y_mean, y_std, lml, diag).
-
-    ``optimize=True`` (default) fits the kernel hyper-parameters per trajectory by
-    maximising the marginal likelihood — the clustering-pipeline behaviour.
-    ``optimize=False`` holds the length-scale fixed at ``length_scale``, which is
-    far cheaper and only mildly smoother; useful for large ad-hoc batches.
-    """
-    from sklearn.gaussian_process import GaussianProcessRegressor
-    from sklearn.exceptions import ConvergenceWarning
-    from scipy.interpolate import interp1d
-
-    n_grid = len(t_grid)
-    kernel = _make_kernel(length_scale, noise_level)
-    ls_lo, ls_hi = kernel.k1.k2.length_scale_bounds
-    nl_lo, nl_hi = kernel.k2.noise_level_bounds
-
-    empty_diag = dict(
-        fit_length_scale=np.nan, fit_noise_level=np.nan,
-        length_scale_bound_lo=ls_lo, length_scale_bound_hi=ls_hi,
-        noise_level_bound_lo=nl_lo, noise_level_bound_hi=nl_hi,
-        hit_length_scale_lo=False, hit_length_scale_hi=False,
-        hit_noise_level_lo=False, hit_noise_level_hi=False,
-        n_observed=int((reads_row > 0).sum()), fallback=True,
-    )
-
-    detected = reads_row > 0
-    if detected.sum() < 2:
-        return np.full(n_grid, np.nan), np.zeros(n_grid), np.nan, empty_diag
-
-    tps  = col_tps[detected]
-    vals = np.nan_to_num(sse_row[detected], nan=0.0)
-
-    t_min, t_max = float(t_grid[0]), float(t_grid[-1])
-    norm = lambda t: (np.asarray(t, float) - t_min) / (t_max - t_min)
-
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", category=ConvergenceWarning)
-            gpr = GaussianProcessRegressor(
-                kernel=kernel,
-                n_restarts_optimizer=(n_restarts if optimize else 0),
-                optimizer=("fmin_l_bfgs_b" if optimize else None),
-                normalize_y=True, alpha=1e-8, random_state=42,
-            )
-            gpr.fit(norm(tps).reshape(-1, 1), vals)
-            saw_convergence_warning = any(
-                issubclass(w.category, ConvergenceWarning) for w in caught
-            )
-
-        y_mean, y_std = gpr.predict(norm(t_grid).reshape(-1, 1), return_std=True)
-        lml = gpr.log_marginal_likelihood_value_
-
-        fit_ls = float(gpr.kernel_.k1.k2.length_scale)
-        fit_nl = float(gpr.kernel_.k2.noise_level)
-
-        def _near(v, lo, hi, tol=bound_tol):
-            span = hi - lo
-            return (v - lo) <= tol * span, (hi - v) <= tol * span
-
-        ls_hit_lo, ls_hit_hi = _near(fit_ls, ls_lo, ls_hi)
-        nl_hit_lo, nl_hit_hi = _near(fit_nl, nl_lo, nl_hi)
-
-        diag = dict(
-            fit_length_scale=fit_ls, fit_noise_level=fit_nl,
-            length_scale_bound_lo=ls_lo, length_scale_bound_hi=ls_hi,
-            noise_level_bound_lo=nl_lo, noise_level_bound_hi=nl_hi,
-            hit_length_scale_lo=bool(ls_hit_lo), hit_length_scale_hi=bool(ls_hit_hi),
-            hit_noise_level_lo=bool(nl_hit_lo), hit_noise_level_hi=bool(nl_hit_hi),
-            n_observed=int(detected.sum()), fallback=False,
-            convergence_warning=bool(saw_convergence_warning),
-        )
-    except Exception:
-        f = interp1d(tps, vals, kind="linear", bounds_error=False,
-                     fill_value=(vals[0], vals[-1]))
-        y_mean = f(t_grid)
-        y_std  = np.zeros(n_grid)
-        lml    = np.nan
-        diag   = empty_diag
-
-    return np.clip(y_mean, 0.0, 1.0), y_std, lml, diag
-
-
-def _smooth_all_fixed(sse_arr, reads_arr, col_tps, t_grid,
-                      length_scale=0.20, noise_level=0.05, bound_tol=0.01):
-    """Closed-form, vectorised equivalent of ``_smooth_one(..., optimize=False)``.
-
-    With the kernel hyper-parameters held fixed, the GP posterior mean is a linear
-    smoother whose matrix depends only on *which* timepoints are observed — not on
-    their values. So trajectories are grouped by observed-timepoint pattern, the
-    smoother is built once per pattern, and every trajectory sharing that pattern is
-    smoothed with a single matrix product. Same numbers as the per-trajectory sklearn
-    path, but orders of magnitude faster (no per-fit estimator overhead).
-
-    Returns (features, stds, lmls, diagnostics) — the same contract as
-    :func:`smooth_all_trajectories`.
-    """
-    n, G = sse_arr.shape
-    n_grid = len(t_grid)
-    t_min, t_max = float(t_grid[0]), float(t_grid[-1])
-    span = (t_max - t_min) or 1.0
-    tn = (np.asarray(col_tps, float) - t_min) / span
-    gn = (np.asarray(t_grid, float) - t_min) / span
-
-    features = np.full((n, n_grid), np.nan)
-    stds     = np.zeros((n, n_grid))
-    lmls     = np.full(n, np.nan)
-
-    detected  = reads_arr > 0
-    n_obs_all = detected.sum(axis=1)
-
-    # Group rows by their observed-timepoint pattern
-    codes = detected.astype(np.int64) @ (1 << np.arange(G)).astype(np.int64)
-    for code in np.unique(codes):
-        rows = np.where(codes == code)[0]
-        m = detected[rows[0]]
-        n_obs = int(m.sum())
-        if n_obs < 2:
-            continue  # leave NaN, as _smooth_one does
-
-        X  = tn[m]
-        K  = np.exp(-0.5 * ((X[:, None] - X[None, :]) / length_scale) ** 2)
-        K[np.diag_indices_from(K)] += noise_level + 1e-8          # WhiteKernel + alpha
-        Ks = np.exp(-0.5 * ((gn[:, None] - X[None, :]) / length_scale) ** 2)
-        Kinv = np.linalg.inv(K)
-        S = Ks @ Kinv
-
-        Y  = np.nan_to_num(sse_arr[np.ix_(rows, np.where(m)[0])], nan=0.0)
-        mu = Y.mean(axis=1, keepdims=True)
-        sd = Y.std(axis=1, keepdims=True)
-        sd = np.where(sd < 1e-12, 1.0, sd)      # sklearn's _handle_zeros_in_scale
-        Yn = (Y - mu) / sd                      # normalize_y=True
-
-        features[rows] = (Yn @ S.T) * sd + mu
-
-        var = (1.0 + noise_level) - np.einsum("ij,ij->i", Ks, S)
-        stds[rows] = np.sqrt(np.clip(var, 0.0, None))[None, :] * sd
-
-        quad = np.einsum("ij,ji->i", Yn, Kinv @ Yn.T)
-        _, logdet = np.linalg.slogdet(K)
-        lmls[rows] = -0.5 * quad - 0.5 * logdet - 0.5 * n_obs * np.log(2 * np.pi)
-
-    features = np.clip(features, 0.0, 1.0)
-
-    ls_lo, ls_hi = 0.05, 2.0
-    nl_lo, nl_hi = 1e-5, 0.5
-    fitted = n_obs_all >= 2
-    diagnostics = pd.DataFrame({
-        "fit_length_scale": np.where(fitted, length_scale, np.nan),
-        "fit_noise_level":  np.where(fitted, noise_level, np.nan),
-        "length_scale_bound_lo": ls_lo, "length_scale_bound_hi": ls_hi,
-        "noise_level_bound_lo":  nl_lo, "noise_level_bound_hi":  nl_hi,
-        "hit_length_scale_lo": bool((length_scale - ls_lo) <= bound_tol * (ls_hi - ls_lo)),
-        "hit_length_scale_hi": bool((ls_hi - length_scale) <= bound_tol * (ls_hi - ls_lo)),
-        "hit_noise_level_lo":  bool((noise_level - nl_lo) <= bound_tol * (nl_hi - nl_lo)),
-        "hit_noise_level_hi":  bool((nl_hi - noise_level) <= bound_tol * (nl_hi - nl_lo)),
-        "n_observed": n_obs_all.astype(int),
-        "fallback": ~fitted,
-        "convergence_warning": False,
-    })
-    return (features.astype(np.float32), stds.astype(np.float32),
-            lmls.astype(np.float64), diagnostics)
-
-
-def smooth_all_trajectories(sse_wide, reads_wide, t_grid,
-                            length_scale=0.20, noise_level=0.05,
-                            n_restarts=2, n_jobs=-1, bound_tol=0.01,
-                            optimize=True):
-    """Fit a GP to every trajectory in ``sse_wide`` (parallelised).
-
-    Each trajectory is smoothed individually (interpolating its missing
-    timepoints); a cluster profile is then a plain average of these smooth
-    curves. A timepoint counts as observed where ``reads_wide > 0`` — for data
-    without read counts, pass ``sse_wide.notna().astype(int)``.
-
-    Parameters
-    ----------
-    sse_wide, reads_wide : pd.DataFrame
-        Values and read counts, rows = trajectories, columns = ``t_grid``.
-    optimize : bool
-        True (default) fits kernel hyper-parameters per trajectory (the
-        clustering-pipeline behaviour). False holds the length-scale fixed at
-        ``length_scale`` — much faster for large batches, only mildly smoother.
-
-    Returns (features, stds, lmls, diagnostics) where ``features`` are the GP
-    posterior means at ``t_grid`` (n x len(t_grid)).
-    """
-    import time
-    try:
-        from joblib import Parallel, delayed
-        has_joblib = True
-    except ImportError:
-        has_joblib = False
-    try:
-        from tqdm import tqdm
-    except ImportError:
-        def tqdm(it, **kw):
-            return it
-
-    sse_arr   = sse_wide.values.astype(float)
-    reads_arr = reads_wide.values.astype(float)
-    col_tps   = np.array([float(c) for c in sse_wide.columns])
-    n_sites   = sse_arr.shape[0]
-
-    t0 = time.time()
-
-    if not optimize:
-        # Fixed hyper-parameters -> the posterior mean is a linear smoother, so the
-        # whole batch is done in closed form (grouped by observed-timepoint pattern).
-        log.info("Smoothing %s trajectories with fixed hyper-parameters "
-                 "(vectorised closed form) ...", f"{n_sites:,}")
-        features, stds, lmls, diagnostics = _smooth_all_fixed(
-            sse_arr, reads_arr, col_tps, t_grid,
-            length_scale=length_scale, noise_level=noise_level,
-            bound_tol=bound_tol,
-        )
-    else:
-        log.info("Fitting GPs to %s trajectories  (n_jobs=%d, n_restarts=%d) ...",
-                 f"{n_sites:,}", n_jobs, n_restarts)
-
-        kwargs = dict(col_tps=col_tps, t_grid=t_grid,
-                      length_scale=length_scale, noise_level=noise_level,
-                      n_restarts=n_restarts, bound_tol=bound_tol,
-                      optimize=optimize)
-
-        if has_joblib and n_jobs != 1:
-            # The per-trajectory optimiser is CPU-bound and holds the GIL, so a thread
-            # pool oversubscribes and runs *slower* than sequential. Use processes
-            # (loky) instead — same results, ~10x faster on a many-core machine.
-            results = Parallel(n_jobs=n_jobs, backend="loky")(
-                delayed(_smooth_one)(sse_arr[i], reads_arr[i], **kwargs)
-                for i in tqdm(range(n_sites), desc="GP", unit="site")
-            )
-        else:
-            results = [
-                _smooth_one(sse_arr[i], reads_arr[i], **kwargs)
-                for i in tqdm(range(n_sites), desc="GP", unit="site")
-            ]
-
-        features = np.array([r[0] for r in results], dtype=np.float32)
-        stds     = np.array([r[1] for r in results], dtype=np.float32)
-        lmls     = np.array([r[2] for r in results], dtype=np.float64)
-        diagnostics = pd.DataFrame([r[3] for r in results])
-
-    diagnostics.insert(0, "site_index", np.arange(n_sites))
-
-    elapsed = time.time() - t0
-    n_nan   = np.isnan(features).any(axis=1).sum()
-    log.info("GP done in %.0fs.  Invalid: %s/%s", elapsed, f"{n_nan:,}", f"{n_sites:,}")
-
-    fitted = diagnostics[~diagnostics["fallback"]]
-    if len(fitted):
-        ls_lo_n = int(fitted["hit_length_scale_lo"].sum())
-        ls_hi_n = int(fitted["hit_length_scale_hi"].sum())
-        nl_lo_n = int(fitted["hit_noise_level_lo"].sum())
-        nl_hi_n = int(fitted["hit_noise_level_hi"].sum())
-        cw_n    = int(fitted.get("convergence_warning", pd.Series(dtype=bool)).sum())
-        log.info("Hyperparameter boundary check (tol=%.0f%% of range, n=%s fitted):",
-                 bound_tol * 100, f"{len(fitted):,}")
-        log.info("  length_scale at lower bound (%.3g): %s trajectories",
-                 fitted["length_scale_bound_lo"].iloc[0], f"{ls_lo_n:,}")
-        log.info("  length_scale at upper bound (%.3g): %s trajectories",
-                 fitted["length_scale_bound_hi"].iloc[0], f"{ls_hi_n:,}")
-        log.info("  noise_level  at lower bound (%.3g): %s trajectories",
-                 fitted["noise_level_bound_lo"].iloc[0], f"{nl_lo_n:,}")
-        log.info("  noise_level  at upper bound (%.3g): %s trajectories",
-                 fitted["noise_level_bound_hi"].iloc[0], f"{nl_hi_n:,}")
-        log.info("  sklearn ConvergenceWarning raised: %s trajectories", f"{cw_n:,}")
-        if ls_lo_n:
-            log.warning(
-                "%s trajectories hit the length_scale lower bound (%.3g) — the GP "
-                "wants to smooth less than allowed.",
-                f"{ls_lo_n:,}", fitted["length_scale_bound_lo"].iloc[0],
-            )
-
-    return features, stds, lmls, diagnostics
-
-
-def classify_cluster_shape(mean_traj,
-                           amplitude_threshold=0.08,
-                           smooth_window=3,
-                           monotone_frac=0.65,
-                           peak_window=(0.25, 0.75),
-                           reversal_fraction=0.30,
-                           min_net_change=0.12,
-                           knee_frac=0.65,
-                           flat_high=0.80,
-                           flat_low=0.20,
-                           level_window=3):
-    """Classify a cluster's mean trajectory into one of 14 shape labels
-    (see ``SHAPE_ORDER``). Decision tree: flat_* -> monotone up/down
-    {early/late/mid} -> biphasic up-down/down-up -> net-direction fallback ->
-    complex."""
-    from scipy.ndimage import uniform_filter1d
-
-    y = uniform_filter1d(np.asarray(mean_traj, float),
-                         size=smooth_window, mode="nearest")
-    n   = len(y)
-    win = max(1, min(level_window, n // 4))
-
-    amplitude = float(np.max(y) - np.min(y))
-
-    if amplitude < amplitude_threshold:
-        mv = float(np.mean(y))
-        if mv >= flat_high: return "flat_high"
-        if mv <= flat_low:  return "flat_low"
-        if mv <= 0.4:       return "flat_mid_low"
-        if mv >= 0.6:       return "flat_mid_high"
-        return "flat_mid"
-
-    def _knee():
-        total = abs(float(y[-1]) - float(y[0]))
-        if total < 1e-6:
-            return "mid"
-        mid = n // 2
-        first_half  = abs(float(y[mid]) - float(y[0]))
-        second_half = abs(float(y[-1]) - float(y[mid]))
-        if first_half  / total >= knee_frac: return "early"
-        if second_half / total >= knee_frac: return "late"
-        return "mid"
-
-    start_val  = float(np.mean(y[:win]))
-    end_val    = float(np.mean(y[-win:]))
-    net_change = end_val - start_val
-    abs_net    = abs(net_change)
-
-    diffs     = np.diff(y)
-    frac_up   = float((diffs > 0).mean())
-    frac_down = float((diffs < 0).mean())
-
-    if frac_up >= monotone_frac and abs_net >= min_net_change:
-        return f"up_{_knee()}"
-    if frac_down >= monotone_frac and abs_net >= min_net_change:
-        return f"down_{_knee()}"
-
-    lo = int(np.floor(peak_window[0] * n))
-    hi = int(np.ceil(peak_window[1] * n))
-    argmax_idx = int(np.argmax(y))
-    argmin_idx = int(np.argmin(y))
-    min_leg    = reversal_fraction * amplitude
-
-    if lo <= argmax_idx <= hi:
-        rise_before = float(y[argmax_idx] - y[0])
-        fall_after  = float(y[argmax_idx] - y[-1])
-        if rise_before >= min_leg and fall_after >= min_leg:
-            return "up-down"
-
-    if lo <= argmin_idx <= hi:
-        fall_before = float(y[0]  - y[argmin_idx])
-        rise_after  = float(y[-1] - y[argmin_idx])
-        if fall_before >= min_leg and rise_after >= min_leg:
-            return "down-up"
-
-    if abs_net >= min_net_change:
-        return f'{"up" if net_change > 0 else "down"}_{_knee()}'
-
-    return "complex"
-
-
-def select_k_gap(Z, k_min=5, k_max=80):
-    """Choose k by the largest gap between successive Ward merge distances."""
-    k_max = min(k_max, len(Z))
-    last_dists = Z[:, 2][-(k_max - 1):][::-1]
-    gaps = np.diff(last_dists)
-    best_k = int(np.argmax(gaps)) + 1 + k_min
-    return max(k_min, min(k_max, best_k))
-
+# ── Trajectory-clustering building blocks live in alphagenome_pytorch.clustering ─
+# (re-exported here for backwards compatibility; import from .clustering in new code)
+from alphagenome_pytorch.clustering import (  # noqa: F401
+    prepare_trajectories, filter_to_split, smooth_trajectory_gp,
+    smooth_all_trajectories, classify_cluster_shape, select_k_gap,
+)
 
 def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
                        n_clusters, out_dir, prefix, label, random_seed=42):

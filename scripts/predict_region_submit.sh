@@ -72,7 +72,7 @@ DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 # PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=132kb_encode_intersect_usage_pc_traj_human_mouse_rat_rabbit_opossum
+RUN=lora_32_human_mouse_rat_rabbit_opossum
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=region_preds_${TIMESTAMP}
 

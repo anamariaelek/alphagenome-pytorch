@@ -33,6 +33,16 @@ Usage:
         --pretrained-weights model.pth \\
         --lora-rank 8
 
+    # LoRA fine-tuning, also fully unfreezing the encoder/decoder conv
+    # towers and output embedders (in addition to LoRA-adapted attention,
+    # splice heads, and species embeddings)
+    python scripts/finetune_splice.py --mode lora \\
+        --genome hg38.fa \\
+        --annotation-parquet splice_annotation.parquet \\
+        --train-bed train.bed --val-bed val.bed \\
+        --pretrained-weights model.pth \\
+        --train-components encoder,decoder,embedder_128bp,embedder_1bp
+
     # Full fine-tuning (all parameters)
     python scripts/finetune_splice.py --mode full \\
         --genome hg38.fa \\
@@ -149,6 +159,7 @@ DEFAULTS = {
     "lora_alpha": 16,
     "lora_targets": "q_proj,v_proj",
     "train_species_embeddings": True,
+    "train_components": "",
     # Training
     "epochs": 10,
     "batch_size": 1,
@@ -167,6 +178,18 @@ DEFAULTS = {
     "save_every": 1,
     # Output
     "output_dir": "finetuning_output",
+}
+
+# Model components (top-level AlphaGenome attributes) that --train-components
+# may unfreeze in addition to whatever the selected --mode already trains.
+TRAINABLE_COMPONENTS = {
+    "encoder",         # SequenceEncoder: DNA embedder + down-sampling conv blocks
+    "tower",           # TransformerTower: attention/pair-update/MLP blocks
+    "decoder",         # SequenceDecoder: up-sampling conv blocks
+    "embedder_128bp",  # OutputEmbedder for the 128bp resolution
+    "embedder_1bp",    # OutputEmbedder for the 1bp resolution
+    "embedder_pair",   # OutputPair embedder feeding the contact-map head
+    "organism_embed",  # Top-level organism/species embedding table
 }
 
 
@@ -296,6 +319,19 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=DEFAULTS["train_species_embeddings"],
         help="Whether to train organism/species embedding tables",
+    )
+    model_grp.add_argument(
+        "--train-components",
+        type=str,
+        default=DEFAULTS["train_components"],
+        help=(
+            "Comma-separated list of additional model components to fully "
+            "fine-tune (unfreeze all their parameters), on top of whatever "
+            "the selected --mode already trains (heads, LoRA-adapted "
+            "attention, species embeddings). Only applies in 'linear-probe' "
+            "and 'lora' modes ('full' already trains everything). Valid "
+            f"names: {', '.join(sorted(TRAINABLE_COMPONENTS))}"
+        ),
     )
 
     # Training arguments
@@ -429,6 +465,7 @@ def parse_args() -> argparse.Namespace:
         "lora_alpha",
         "lora_targets",
         "train_species_embeddings",
+        "train_components",
         "dtype",
         "gradient_checkpointing",
         "epochs",
@@ -898,6 +935,42 @@ def create_model(
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
+    # Optionally unfreeze additional components on top of the selected mode
+    # (heads / LoRA-adapted attention / species embeddings). No-op for
+    # 'full' mode, where every parameter is already trainable.
+    train_components_str = getattr(args, "train_components", "") or ""
+    extra_train_components = [c.strip() for c in train_components_str.split(",") if c.strip()]
+    if extra_train_components:
+        invalid = [c for c in extra_train_components if c not in TRAINABLE_COMPONENTS]
+        if invalid:
+            raise ValueError(
+                f"Invalid --train-components entries: {invalid}. "
+                f"Valid names: {sorted(TRAINABLE_COMPONENTS)}"
+            )
+        if args.mode != "full":
+            component_map = {
+                "encoder": model.encoder,
+                "tower": model.tower,
+                "decoder": model.decoder,
+                "embedder_128bp": model.embedder_128bp,
+                "embedder_1bp": model.embedder_1bp,
+                "embedder_pair": model.embedder_pair,
+                "organism_embed": model.organism_embed,
+            }
+            seen_params = {id(p) for p in trainable_params}
+            for name in extra_train_components:
+                module = component_map[name]
+                n_added = 0
+                for p in module.parameters():
+                    p.requires_grad = True
+                    if id(p) not in seen_params:
+                        trainable_params.append(p)
+                        seen_params.add(id(p))
+                        n_added += 1
+                print(f"Also fine-tuning component '{name}' ({n_added:,} additional params)")
+        else:
+            print(f"--train-components ignored in 'full' mode (all parameters already trainable)")
+
     model = model.to(device)
     model_module = model
     # Extract usage_heads dict from model for training loop compatibility
@@ -1069,6 +1142,7 @@ def main() -> None:
         "lora_alpha": args.lora_alpha if args.mode == "lora" else None,
         "lora_targets": args.lora_targets if args.mode == "lora" else None,
         "train_species_embeddings": args.train_species_embeddings,
+        "train_components": args.train_components,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,

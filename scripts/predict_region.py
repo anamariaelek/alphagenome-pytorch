@@ -79,6 +79,14 @@ SEQ_LEN_DEFAULT = 131_072
 sys.path.insert(0, str(Path(__file__).parent))
 import evaluate_splice as ev  # noqa: E402
 
+# SpliceSiteAnnotation/SpliceSiteUsageIndex are only imported lazily inside
+# evaluate_splice.py's own main(), so they aren't attributes of `ev` — import
+# them directly from their real source instead.
+from alphagenome_pytorch.extensions.finetuning.splice_datasets import (  # noqa: E402
+    SpliceSiteAnnotation,
+    SpliceSiteUsageIndex,
+)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -649,11 +657,11 @@ def process_organism(
         organism_label = spec["name"]
 
         print(f"[{spec['name']}] Loading annotation from {spec['annotation_parquet']} ...")
-        annotation = ev.SpliceSiteAnnotation(spec["annotation_parquet"])
+        annotation = SpliceSiteAnnotation(spec["annotation_parquet"])
 
         if spec.get("usage_parquet") and not args.skip_usage:
             print(f"[{spec['name']}] Loading usage index from {spec['usage_parquet']} ...")
-            usage_index = ev.SpliceSiteUsageIndex(
+            usage_index = SpliceSiteUsageIndex(
                 spec["usage_parquet"],
                 min_coverage=args.min_coverage,
                 usage_coord_base=0,
