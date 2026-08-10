@@ -212,6 +212,28 @@ class SpliceSiteUsageIndex:
     def condition_labels(self) -> dict[str, int]:
         return self._condition_labels
 
+    @property
+    def tissue_cond_groups(self) -> list[list[int]]:
+        """Condition indices grouped by tissue, each ordered by timepoint.
+
+        Passed to :func:`splice_usage_loss` so the trajectory/delta terms measure
+        *within-tissue* temporal dynamics (a developmental trajectory) rather than
+        a single correlation over all tissues concatenated.
+        """
+        idx_to_name = {v: k for k, v in self._condition_labels.items()}
+        def _timepoint(cond_idx: int) -> int:
+            # condition labels look like "Brain_1"; sort each tissue by the timepoint
+            name = idx_to_name.get(cond_idx, "")
+            try:
+                return int(name.rsplit("_", 1)[1])
+            except (IndexError, ValueError):
+                return cond_idx
+        groups = []
+        for tissue in sorted(self._tissue_to_cond_indices):
+            idxs = sorted(self._tissue_to_cond_indices[tissue], key=_timepoint)
+            groups.append(idxs)
+        return groups
+
     def query(
         self, chrom: str, positions: np.ndarray
     ) -> tuple[list[int], list[np.ndarray], list[np.ndarray]]:
@@ -362,10 +384,12 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         sequence_length: int = 131_072,
         organism_index: int = 0,
         max_sites: int = 1024,
+        lazy_genome: bool = True,
     ) -> None:
         # Defer heavy import to avoid hard dep at module import time
         from alphagenome_pytorch.extensions.finetuning.datasets import (
             CachedGenome,
+            LazyFastaGenome,
             _ensure_genomic_deps,
         )
         from alphagenome_pytorch.utils.sequence import sequence_to_onehot
@@ -386,11 +410,19 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         self.chrom_names: list[str] = sorted(chromosomes)
         self._chrom_to_idx: dict[str, int] = {c: i for i, c in enumerate(self.chrom_names)}
 
-        # Genome backend – pass chromosome set to avoid loading the full genome
+        # Genome backend. From a FASTA path, default to the lazy backend, which reads
+        # only chromosome sizes at startup and fetches windows on demand — avoiding the
+        # slow whole-chromosome load + one-hot encoding that CachedGenome does (which is
+        # wasteful here since training only touches the BED's windows). Pass
+        # ``lazy_genome=False`` to force the whole-chromosome cache, or pass a prebuilt
+        # CachedGenome instance directly to share it across splits.
         if isinstance(genome, str) or isinstance(genome, Path):
-            self._cached_genome = CachedGenome(str(genome), chromosomes=chromosomes)
+            if lazy_genome:
+                self._cached_genome = LazyFastaGenome(str(genome), chromosomes=chromosomes)
+            else:
+                self._cached_genome = CachedGenome(str(genome), chromosomes=chromosomes)
         else:
-            self._cached_genome = genome  # CachedGenome passed directly
+            self._cached_genome = genome  # prebuilt CachedGenome / LazyFastaGenome
 
         half = sequence_length // 2
         chrom_sizes = self._cached_genome.chrom_sizes

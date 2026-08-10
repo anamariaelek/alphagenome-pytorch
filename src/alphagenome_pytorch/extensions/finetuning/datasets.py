@@ -128,6 +128,72 @@ class CachedGenome:
                           f"Available: {list(self._cache.keys())}")
 
 
+class LazyFastaGenome:
+    """Lazy genome backend: reads only chromosome sizes at startup (from the ``.fai``
+    index) and fetches each region on demand via pyfaidx — no whole-chromosome load
+    or one-hot encoding up front.
+
+    Drop-in replacement for :class:`CachedGenome` (same ``chrom_sizes`` attribute and
+    ``fetch(chrom, start, end)`` method). Prefer this when you only need a subset of
+    windows (e.g. splice-site training on a BED), where caching entire chromosomes is
+    the dominant startup cost. The pyfaidx handle is opened lazily and dropped on
+    pickling, so it is safe to share across DataLoader worker processes.
+
+    Args:
+        fasta_path: Path to the genome FASTA (a ``.fai`` index is created if missing).
+        chromosomes: Accepted for interface compatibility with ``CachedGenome``; not
+            needed here since nothing is pre-loaded.
+        cache_windows: If True, cache each fetched (chrom, start, end) window so
+            repeated epochs reuse it (caches only the windows actually used, not whole
+            chromosomes). Default False (lowest memory, startup stays instant).
+    """
+
+    def __init__(self, fasta_path: str, chromosomes: set[str] | None = None,
+                 cache_windows: bool = False):
+        _ensure_genomic_deps()
+        self.fasta_path = str(fasta_path)
+        self.cache_windows = cache_windows
+        self._fasta = None
+        self._win_cache: dict[tuple[str, int, int], np.ndarray] = {}
+
+        # Read sizes from the faidx index only — no sequence is loaded/encoded here.
+        fasta = pyfaidx.Fasta(self.fasta_path)
+        try:
+            self.chrom_sizes: dict[str, int] = {ref: len(fasta[ref]) for ref in fasta.keys()}
+        finally:
+            fasta.close()
+
+    @property
+    def fasta(self):
+        # Opened lazily so each DataLoader worker gets its own handle after fork.
+        if self._fasta is None:
+            _ensure_genomic_deps()
+            self._fasta = pyfaidx.Fasta(self.fasta_path)
+        return self._fasta
+
+    def fetch(self, chrom: str, start: int, end: int, copy: bool = True) -> np.ndarray:
+        """One-hot encode the region ``[start, end)`` on demand (shape (end-start, 4))."""
+        if self.cache_windows:
+            key = (chrom, start, end)
+            arr = self._win_cache.get(key)
+            if arr is None:
+                arr = sequence_to_onehot(str(self.fasta[chrom][start:end]))
+                self._win_cache[key] = arr
+            return arr.copy() if copy else arr
+        return sequence_to_onehot(str(self.fasta[chrom][start:end]))
+
+    def __getstate__(self):
+        # Drop the unpicklable pyfaidx handle (and the per-worker window cache) so the
+        # dataset can be sent to worker processes; both are reopened/rebuilt lazily.
+        state = self.__dict__.copy()
+        state["_fasta"] = None
+        state["_win_cache"] = {}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+
 class CachedBigWig:
     """Memory-cached BigWig for fast signal retrieval.
 
