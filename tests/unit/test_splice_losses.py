@@ -110,7 +110,7 @@ class TestSpliceUsageLoss:
         usage_values = torch.zeros(B, max_sites, n_cond)
         usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
 
-        loss = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
+        loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         assert loss.item() == 0.0
 
     def test_single_valid_observation(self):
@@ -129,7 +129,7 @@ class TestSpliceUsageLoss:
         usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
         usage_mask[0, 0, 0] = True     # only (batch=0, site=0, cond=0) observed
 
-        loss = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
+        loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         # BCE(0.9, 1.0) = -log(0.9) ≈ 0.105
         assert loss.item() > 0.0
         assert torch.isfinite(loss)
@@ -139,8 +139,9 @@ class TestSpliceUsageLoss:
         from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
 
         B, S, n_cond, max_sites = 1, 100, 1, 2
-        # Use a value close to 1 (valid sigmoid range)
-        predictions = torch.full((B, S, n_cond), 0.999)
+        # predictions are raw LOGITS (the loss applies sigmoid internally); a large
+        # positive logit -> prob ~1, so target=0 gives a high BCE.
+        predictions = torch.full((B, S, n_cond), 7.0)
 
         usage_positions = torch.full((B, max_sites), -1, dtype=torch.long)
         usage_positions[0, 0] = 50
@@ -148,8 +149,8 @@ class TestSpliceUsageLoss:
         usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
         usage_mask[0, 0, 0] = True
 
-        loss = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
-        # BCE(0.999, 0) = -log(1 - 0.999) = -log(0.001) ≈ 6.9
+        loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
+        # BCE_with_logits(7.0, 0) = softplus(7.0) ≈ 7.0
         assert loss.item() > 3.0
 
     def test_gradient_flows_through_usage_loss(self):
@@ -165,7 +166,7 @@ class TestSpliceUsageLoss:
         usage_mask[0, 0, :] = True
         usage_mask[0, 1, 0] = True
 
-        loss = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
+        loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         loss.backward()
         assert predictions.grad is not None
 
@@ -179,7 +180,7 @@ class TestSpliceUsageLoss:
         usage_values = torch.zeros(B, max_sites, n_cond)
         usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
 
-        loss = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
+        loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         assert loss.item() == 0.0
         # should not raise on backward
         loss.backward()

@@ -71,14 +71,14 @@ pretrained_weights: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/che
 # ---------------------------------------------------------------------------
 # Training mode: linear-probe | lora | full
 # ---------------------------------------------------------------------------
-mode: full
+mode: lora
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
 sequence_length: 131072    # used lengths: 131072 196608 524288
 max_sites: 1024
-cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
+cache_genome: false        # false (default): lazy on-demand FASTA reads (fast startup, low RAM). true: load whole genome into RAM (~12 GB for hg38; slow startup)
 # Set coordinate base for usage parquet
 # 1 = Spliser default (1-based coordinates) — use this unless you explicitly converted to 0-based
 # 0 = already converted to 0-based coordinates
@@ -113,7 +113,7 @@ lora_targets: q_proj,v_proj
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 4
+batch_size: 6
 gradient_accumulation_steps: 32   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
@@ -124,14 +124,28 @@ lr_schedule: cosine              # cosine | constant
 cls_weight: 1.0
 usage_weight: 1.0
 
-# Dictionary of usage weights
-#   bce: weight for BCE on absolute usage
-#   delta_mse: weight for MSE on deviation from mean
-#   trajectory_pearson: weight for 1 - PearsonR on the concatenated condition trajectory
+# Dictionary of usage loss component weights. Trajectory terms are computed PER-TISSUE
+# over that tissue's developmental timepoints (not all conditions concatenated), so they
+# capture within-tissue dynamics rather than tissue-level offsets.
+#   bce:                BCE on absolute usage (level).
+#   delta_mse:          MSE on per-(site,tissue) mean-centered trajectories (shape, unweighted).
+#   trajectory_shape:   per-(site,tissue) centered-MSE, weighted by true amplitude so dynamic
+#                       sites dominate (recommended shape term).
+#   trajectory_pearson: 1 - PearsonR per (site,tissue) over its timepoints.
+#   traj_smooth:        second-difference smoothness penalty on the predicted per-tissue curve.
+# train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
 usage_loss_weights:
   bce: 1.0
   delta_mse: 0.0
+  trajectory_shape: 1.0      # try ~0.5-1.0 to teach developmental shape
   trajectory_pearson: 0.0
+  traj_smooth: 0.0           # try ~0.05-0.1 for smoother predicted trajectories
+
+# BCE-only warm-up: for the first N epochs (1-indexed) the shape/pearson/smoothness
+# terms are DISABLED (pure BCE); they switch on at full strength from epoch N+1.
+# N=2 -> epochs 1-2 BCE only, shape from epoch 3. 0 = no warm-up. The per-tissue
+# Pearson (traj_r / train_usage_trajectory_corr) is still logged during warm-up.
+usage_traj_warmup_epochs: 2
 
 # Gradient clipping (0 to disable)
 max_grad_norm: 1.0 
@@ -155,7 +169,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: full_human_mouse_rat_rabbit_opossum        # defaults to timestamp
+run_name: lora_32_traj_human_mouse_rat_rabbit_opossum        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

@@ -76,6 +76,7 @@ class SpliceTrainMetrics:
     usage_bce_loss: float | None = None
     usage_delta_loss: float | None = None
     usage_trajectory_loss: float | None = None
+    usage_trajectory_corr: float | None = None  # mean per-tissue temporal Pearson
     species_metrics: dict[int, dict[str, float]] = field(default_factory=dict)
     n_batches: int = 0
     n_usage_valid_pairs: int = 0  # total (position, condition) pairs with observed usage
@@ -101,8 +102,19 @@ def train_epoch_splice(
     max_grad_norm: float = 1.0,
     usage_delta_from_mean: bool = False,
     usage_loss_weights: dict | None = None,
+    tissue_cond_groups: "list | dict | None" = None,
+    usage_traj_warmup_epochs: int = 0,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
+
+    ``tissue_cond_groups`` groups condition indices by tissue (each ordered by
+    timepoint) so the trajectory/delta usage-loss terms measure *within-tissue*
+    developmental dynamics. Pass a ``list[list[int]]`` for single-species training
+    or a ``dict[organism_index, list[list[int]]]`` for multi-species.
+
+    ``usage_traj_warmup_epochs`` linearly ramps the shape/pearson/smoothness loss
+    weights from 0 to their configured values over the first N epochs (0 = off), so
+    the level (BCE) is learned before the shape term is applied at full strength.
 
     The model trunk is run with ``embeddings_only=True`` to extract 1 bp NCL
     embeddings, which are then passed to both heads.
@@ -156,14 +168,33 @@ def train_epoch_splice(
     usage_bce_sum = 0.0
     usage_delta_sum = 0.0
     usage_traj_sum = 0.0
+    usage_tcorr_sum = 0.0
     n_usage_bce_batches = 0
     n_usage_delta_batches = 0
     n_usage_traj_batches = 0
+    n_usage_tcorr_batches = 0
     step = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
 
     optimizer.zero_grad()
+
+    # BCE-only warm-up: for the first N (1-indexed) epochs the shape/pearson/smoothness
+    # terms are DISABLED (weight 0, pure BCE); they switch on at full strength from
+    # epoch N+1. usage_traj_warmup_epochs <= 0 means no warm-up.
+    _TRAJ_KEYS = ("trajectory_shape", "trajectory_pearson", "traj_smooth")
+    _traj_scale = 1.0
+    if usage_loss_weights and usage_traj_warmup_epochs and usage_traj_warmup_epochs > 0:
+        _traj_scale = 0.0 if epoch <= usage_traj_warmup_epochs else 1.0
+        epoch_usage_weights = {k: (v * _traj_scale if k in _TRAJ_KEYS else v)
+                               for k, v in usage_loss_weights.items()}
+    else:
+        epoch_usage_weights = usage_loss_weights
+
+    def _groups_for(org: int):
+        if isinstance(tissue_cond_groups, dict):
+            return tissue_cond_groups.get(org)
+        return tissue_cond_groups
 
     epoch_start = time.perf_counter()
     step_start  = time.perf_counter()
@@ -224,7 +255,8 @@ def train_epoch_splice(
                         usage_vals,
                         usage_mask,
                         delta_from_mean=usage_delta_from_mean,
-                        usage_loss_weights=usage_loss_weights,
+                        usage_loss_weights=epoch_usage_weights,
+                        tissue_cond_groups=_groups_for(int(org_idx[0].item())),
                     )
 
                     if "bce_loss" in usage_corr:
@@ -236,6 +268,10 @@ def train_epoch_splice(
                     if "trajectory_loss" in usage_corr:
                         usage_traj_sum += usage_corr["trajectory_loss"]
                         n_usage_traj_batches += 1
+                    _tc = usage_corr.get("trajectory_corr")
+                    if _tc is not None and math.isfinite(_tc):
+                        usage_tcorr_sum += _tc
+                        n_usage_tcorr_batches += 1
 
                 total_loss = total_loss + usage_weight * usage_loss_val
             if not torch.isfinite(total_loss):
@@ -290,13 +326,19 @@ def train_epoch_splice(
                 usage_bce = usage_corr.get("bce_loss")
                 usage_delta = usage_corr.get("delta_loss")
                 usage_traj = usage_corr.get("trajectory_loss")
+                usage_tcorr = usage_corr.get("trajectory_corr")
                 usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_bce is not None else ""
                 usage_delta_str = f" usage_mse_delta={usage_delta:.4f}" if usage_delta is not None else ""
                 usage_traj_str = f" usage_traj={usage_traj:.4f}" if usage_traj is not None else ""
+                _traj_configured = bool(usage_loss_weights) and any(
+                    float(usage_loss_weights.get(k, 0.0)) != 0.0 for k in _TRAJ_KEYS)
+                if _traj_configured and _traj_scale == 0.0:
+                    usage_traj_str += " [traj warmup: BCE-only]"
+                usage_tcorr_str = f" traj_r={usage_tcorr:.3f}" if usage_tcorr is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" +
-                    usage_bce_str + usage_delta_str + usage_traj_str +
+                    usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str +
                     f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
                 )
                 # Add to logger
@@ -314,6 +356,9 @@ def train_epoch_splice(
                     log_metrics["train_usage_mse_delta_loss"] = usage_delta
                 if usage_traj is not None:
                     log_metrics["train_usage_trajectory_loss"] = usage_traj
+                if usage_tcorr is not None:
+                    log_metrics["train_usage_trajectory_corr"] = usage_tcorr
+                    log_metrics["train_usage_traj_weight_scale"] = _traj_scale
                 if logger is not None:
                     logger.log_step(log_metrics)
                 step_start = time.perf_counter()
@@ -347,6 +392,8 @@ def train_epoch_splice(
         metrics.usage_delta_loss = usage_delta_sum / n_usage_delta_batches
     if n_usage_traj_batches > 0:
         metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
+    if n_usage_tcorr_batches > 0:
+        metrics.usage_trajectory_corr = usage_tcorr_sum / n_usage_tcorr_batches
 
     # Warn when usage head is present but received zero gradient signal.
     # This typically means there are no matching (position, condition) pairs
@@ -386,6 +433,7 @@ def validate_splice(
     use_amp: bool = True,
     usage_delta_from_mean: bool = False,
     usage_loss_weights: dict | None = None,
+    tissue_cond_groups: "list | dict | None" = None,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -420,9 +468,11 @@ def validate_splice(
     usage_bce_sum = 0.0
     usage_delta_sum = 0.0
     usage_traj_sum = 0.0
+    usage_tcorr_sum = 0.0
     n_usage_bce_batches = 0
     n_usage_delta_batches = 0
     n_usage_traj_batches = 0
+    n_usage_tcorr_batches = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
 
@@ -471,6 +521,8 @@ def validate_splice(
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 logits = usage_out["logits"]
+                _groups = (tissue_cond_groups.get(batch_org)
+                           if isinstance(tissue_cond_groups, dict) else tissue_cond_groups)
                 usage_loss_val, usage_corr = splice_usage_loss(
                     logits,
                     usage_pos,
@@ -478,6 +530,7 @@ def validate_splice(
                     usage_mask,
                     delta_from_mean=usage_delta_from_mean,
                     usage_loss_weights=usage_loss_weights,
+                    tissue_cond_groups=_groups,
                 )
 
                 if "bce_loss" in usage_corr:
@@ -489,6 +542,10 @@ def validate_splice(
                 if "trajectory_loss" in usage_corr:
                     usage_traj_sum += usage_corr["trajectory_loss"]
                     n_usage_traj_batches += 1
+                _tc = usage_corr.get("trajectory_corr")
+                if _tc is not None and math.isfinite(_tc):
+                    usage_tcorr_sum += _tc
+                    n_usage_tcorr_batches += 1
 
             total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -503,11 +560,17 @@ def validate_splice(
                 "loss": 0.0,
                 "cls_loss": 0.0,
                 "usage_loss": 0.0,
+                "traj_corr": 0.0,
+                "n_traj_corr": 0.0,
                 "n_batches": 0.0,
             }
         species_sums[batch_org]["loss"] += total_loss.item()
         species_sums[batch_org]["cls_loss"] += cls_loss_val.item()
         species_sums[batch_org]["usage_loss"] += usage_loss_val.item()
+        _tc = usage_corr.get("trajectory_corr")
+        if _tc is not None and math.isfinite(_tc):
+            species_sums[batch_org]["traj_corr"] += _tc
+            species_sums[batch_org]["n_traj_corr"] += 1.0
         species_sums[batch_org]["n_batches"] += 1.0
         
         # Periodic memory cleanup in validation (RAM + GPU)
@@ -531,15 +594,20 @@ def validate_splice(
         metrics.usage_delta_loss = usage_delta_sum / n_usage_delta_batches
     if n_usage_traj_batches > 0:
         metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
+    if n_usage_tcorr_batches > 0:
+        metrics.usage_trajectory_corr = usage_tcorr_sum / n_usage_tcorr_batches
 
     for org_idx, sums in species_sums.items():
         n_batches = sums["n_batches"]
         if n_batches > 0:
-            metrics.species_metrics[org_idx] = {
+            sm = {
                 "val_loss": sums["loss"] / n_batches,
                 "val_cls_loss": sums["cls_loss"] / n_batches,
                 "val_usage_loss": sums["usage_loss"] / n_batches,
             }
+            if sums["n_traj_corr"] > 0:
+                sm["val_usage_trajectory_corr"] = sums["traj_corr"] / sums["n_traj_corr"]
+            metrics.species_metrics[org_idx] = sm
 
     # No correlation logging
 

@@ -92,6 +92,10 @@ def splice_usage_loss(
     delta_from_mean: bool = False,
     usage_loss_weights: dict[str, float] | None = None,
     return_vals: bool = False,
+    tissue_cond_groups: list[list[int]] | None = None,
+    usage_coverage: Tensor | None = None,
+    traj_min_timepoints: int = 3,
+    traj_var_floor: float = 1e-3,
 ) -> tuple:
     """Masked loss for per-condition splice-site usage.
 
@@ -170,52 +174,71 @@ def splice_usage_loss(
         total_loss = (predictions * 0.0).sum()
         metrics_dict = {"correlation": float("nan"), "n_valid": int(n_valid)}
 
-        bce_w = float(usage_loss_weights.get("bce", 0.0))
-        delta_w = float(usage_loss_weights.get("delta_mse", 0.0))
-        traj_w = float(usage_loss_weights.get("trajectory_pearson", 0.0))
+        bce_w    = float(usage_loss_weights.get("bce", 0.0))
+        delta_w  = float(usage_loss_weights.get("delta_mse", 0.0))
+        pear_w   = float(usage_loss_weights.get("trajectory_pearson", 0.0))
+        shape_w  = float(usage_loss_weights.get("trajectory_shape", 0.0))
+        smooth_w = float(usage_loss_weights.get("traj_smooth", 0.0))
 
         gathered_sigmoid = torch.sigmoid(gathered)
 
+        # Per-tissue condition groups isolate WITHIN-tissue temporal dynamics; without them
+        # the "trajectory"/"delta" terms collapse to a single all-conditions group, which is
+        # dominated by between-tissue level differences (the legacy behaviour).
+        groups = tissue_cond_groups or [list(range(n_conditions))]
+
         if bce_w != 0.0:
             bce_loss = F.binary_cross_entropy_with_logits(
-                gathered[final_mask],
-                usage_values[final_mask],
-                reduction="mean",
+                gathered[final_mask], usage_values[final_mask], reduction="mean",
             )
             total_loss = total_loss + bce_w * bce_loss
             metrics_dict["bce_loss"] = bce_loss.item()
-            pred_vals = gathered_sigmoid[final_mask].detach()
-            true_vals = usage_values[final_mask]
-            if pred_vals.numel() > 1:
-                metrics_dict["correlation"] = torch.corrcoef(torch.stack([pred_vals, true_vals]))[0, 1].item()
-            else:
-                metrics_dict["correlation"] = float("nan")
+
+        # pooled correlation (level+tissue; kept for backwards-compatible logging)
+        pred_vals = gathered_sigmoid[final_mask].detach()
+        true_vals = usage_values[final_mask]
+        if pred_vals.numel() > 1:
+            metrics_dict["correlation"] = torch.corrcoef(torch.stack([pred_vals, true_vals]))[0, 1].item()
 
         if delta_w != 0.0:
-            n_obs = final_mask.sum(-1, keepdim=True).float().clamp(min=1)
-            mean_preds = (gathered_sigmoid * final_mask).sum(-1, keepdim=True) / n_obs
-            mean_targets = (usage_values * final_mask).sum(-1, keepdim=True) / n_obs
-            delta_preds = gathered_sigmoid - mean_preds
-            delta_targets = usage_values - mean_targets
-            delta_loss = F.mse_loss(
-                delta_preds[final_mask],
-                delta_targets[final_mask],
-                reduction="mean",
-            )
+            delta_loss = _per_tissue_delta_mse(
+                gathered_sigmoid, usage_values, final_mask, groups)
             total_loss = total_loss + delta_w * delta_loss
             metrics_dict["delta_loss"] = delta_loss.item()
 
-        if traj_w != 0.0:
-            traj_loss, traj_metrics = _trajectory_pearson_loss(
-                gathered_sigmoid, usage_values, final_mask
-            )
-            total_loss = total_loss + traj_w * traj_loss
-            metrics_dict["trajectory_loss"] = traj_loss.item()
-            metrics_dict.update(traj_metrics)
+        if shape_w != 0.0:
+            shape_loss, shape_metrics = _per_tissue_shape_loss(
+                gathered_sigmoid, usage_values, final_mask, groups,
+                coverage=usage_coverage, min_tp=traj_min_timepoints, var_floor=traj_var_floor)
+            total_loss = total_loss + shape_w * shape_loss
+            metrics_dict["trajectory_loss"] = shape_loss.item()
+            metrics_dict.update(shape_metrics)
+
+        if pear_w != 0.0:
+            pear_loss, pear_metrics = _per_tissue_pearson_loss(
+                gathered_sigmoid, usage_values, final_mask, groups,
+                min_tp=traj_min_timepoints, var_floor=traj_var_floor)
+            total_loss = total_loss + pear_w * pear_loss
+            metrics_dict.setdefault("trajectory_loss", pear_loss.item())
+            metrics_dict.update(pear_metrics)
+
+        if smooth_w != 0.0:
+            smooth_loss = _per_tissue_smoothness(gathered_sigmoid, groups)
+            total_loss = total_loss + smooth_w * smooth_loss
+            metrics_dict["smooth_loss"] = smooth_loss.item()
+
+        # Always report the within-tissue temporal Pearson as a monitoring metric,
+        # even when no shape term is weighted (this is the number that actually
+        # reflects trajectory learning, unlike the pooled 'correlation').
+        if "trajectory_corr" not in metrics_dict and tissue_cond_groups is not None:
+            with torch.no_grad():
+                _, _pm = _per_tissue_pearson_loss(
+                    gathered_sigmoid, usage_values, final_mask, groups,
+                    min_tp=traj_min_timepoints, var_floor=traj_var_floor)
+            metrics_dict["trajectory_corr"] = _pm.get("trajectory_corr", float("nan"))
+            metrics_dict["n_trajectory_sites"] = _pm.get("n_trajectory_sites", 0)
 
         if return_vals:
-            pred_vals = gathered_sigmoid[final_mask].detach()
-            true_vals = usage_values[final_mask]
             return total_loss, metrics_dict, pred_vals, true_vals
         return total_loss, metrics_dict
 
@@ -241,36 +264,100 @@ def splice_usage_loss(
     return loss, metrics_dict
 
 
-def _trajectory_pearson_loss(
-    predictions: Tensor,
-    targets: Tensor,
-    mask: Tensor,
-) -> tuple[Tensor, dict[str, float]]:
-    """Compute a per-site Pearson-R trajectory loss over observed conditions."""
-    flat_predictions = predictions.reshape(-1, predictions.shape[-1])
-    flat_targets = targets.reshape(-1, targets.shape[-1])
-    flat_mask = mask.reshape(-1, mask.shape[-1])
+def _tissue_centered(pred: Tensor, tgt: Tensor, m: Tensor, idx: list[int]):
+    """Slice one tissue's conditions and mean-center pred/target over its observed
+    timepoints. Returns (dp, dt, mm, n) — masked centered deviations and obs counts,
+    all shaped (B, max_sites, T_tissue) / (B, max_sites)."""
+    p = pred[..., idx]
+    t = tgt[..., idx]
+    mm = m[..., idx].to(pred.dtype)
+    n = mm.sum(-1)                                   # (B, sites)
+    denom = n.clamp(min=1).unsqueeze(-1)
+    mu_p = (p * mm).sum(-1, keepdim=True) / denom
+    mu_t = (t * mm).sum(-1, keepdim=True) / denom
+    dp = (p - mu_p) * mm
+    dt = (t - mu_t) * mm
+    return dp, dt, mm, n
 
-    site_losses = []
-    site_corrs = []
 
-    for pred_site, true_site, site_mask in zip(flat_predictions, flat_targets, flat_mask):
-        if int(site_mask.sum().item()) < 2:
+def _per_tissue_delta_mse(pred, tgt, mask, groups) -> Tensor:
+    """MSE on per-(site,tissue) mean-centered trajectories, over observed timepoints.
+    Isolates temporal shape from tissue-level offsets (unlike a global-mean delta)."""
+    se_sum = (pred * 0.0).sum()
+    n_sum = pred.new_zeros(())
+    for idx in groups:
+        dp, dt, mm, _ = _tissue_centered(pred, tgt, mask, idx)
+        se_sum = se_sum + ((dp - dt) ** 2 * mm).sum()
+        n_sum = n_sum + mm.sum()
+    return se_sum / n_sum.clamp(min=1.0)
+
+
+def _per_tissue_shape_loss(pred, tgt, mask, groups, coverage=None,
+                           min_tp: int = 3, var_floor: float = 1e-3
+                           ) -> tuple[Tensor, dict[str, float]]:
+    """Per-(site,tissue) centered-MSE shape loss, weighted by the true trajectory's
+    amplitude (so dynamic sites dominate) and, optionally, mean read coverage."""
+    num = (pred * 0.0).sum()
+    wsum = pred.new_zeros(())
+    n_traj = 0
+    for idx in groups:
+        dp, dt, mm, n = _tissue_centered(pred, tgt, mask, idx)
+        denom = n.clamp(min=1)
+        se = ((dp - dt) ** 2).sum(-1) / denom               # (B, sites) per-traj MSE
+        var_t = (dt ** 2).sum(-1) / denom                   # true temporal variance
+        ok = (n >= min_tp) & (var_t > var_floor)
+        w = ok.to(pred.dtype) * var_t.clamp(min=0).sqrt()   # weight by true amplitude
+        if coverage is not None:
+            cov = coverage[..., idx].to(pred.dtype)
+            w = w * (cov * mm).sum(-1) / denom              # mean coverage over obs tps
+        num = num + (se * w).sum()
+        wsum = wsum + w.sum()
+        n_traj += int(ok.sum().item())
+    loss = num / wsum.clamp(min=1e-6)
+    return loss, {"n_trajectory_sites": n_traj}
+
+
+def _per_tissue_pearson_loss(pred, tgt, mask, groups,
+                             min_tp: int = 3, var_floor: float = 1e-3, eps: float = 1e-8
+                             ) -> tuple[Tensor, dict[str, float]]:
+    """1 - Pearson r per (site, tissue) over its timepoints, averaged. Vectorised."""
+    losses = []
+    corrs = []
+    for idx in groups:
+        dp, dt, mm, n = _tissue_centered(pred, tgt, mask, idx)
+        var_p = (dp ** 2).sum(-1)
+        var_t = (dt ** 2).sum(-1)
+        # Regularise the norms with var_floor *inside* the sqrt so a flat prediction
+        # (var_p -> 0) yields r -> 0 with a bounded gradient (a bare eps blows up).
+        denom = (var_p + var_floor).sqrt() * (var_t + var_floor).sqrt()
+        r = (dp * dt).sum(-1) / denom                                 # (B, sites)
+        # Require only a non-flat TARGET (a flat prediction against a dynamic target
+        # should be *penalised*, r -> 0, not skipped).
+        ok = (n >= min_tp) & (var_t > var_floor)
+        if ok.any():
+            losses.append((1.0 - r)[ok])
+            corrs.append(r[ok].detach())
+    if not losses:
+        return (pred * 0.0).sum(), {"trajectory_corr": float("nan"), "n_trajectory_sites": 0}
+    loss = torch.cat(losses).mean()
+    corr_mean = torch.cat(corrs).mean().item()
+    return loss, {"trajectory_corr": corr_mean, "n_trajectory_sites": int(sum(l.numel() for l in losses))}
+
+
+def _per_tissue_smoothness(pred, groups) -> Tensor:
+    """Second-difference smoothness penalty on each predicted per-tissue trajectory.
+    Groups must be timepoint-ordered. Applied to all predicted timepoints (a prior,
+    independent of which are observed)."""
+    terms = []
+    for idx in groups:
+        if len(idx) < 3:
             continue
-
-        pred_vals = pred_site[site_mask]
-        true_vals = true_site[site_mask]
-        corr = metrics.pearson_r(pred_vals, true_vals, dim=0)
-        site_losses.append(1.0 - corr)
-        site_corrs.append(corr.detach())
-
-    if not site_losses:
-        zero = (predictions * 0.0).sum()
-        return zero, {"trajectory_corr": float("nan"), "n_trajectory_sites": 0}
-
-    loss = torch.stack(site_losses).mean()
-    corr_mean = torch.stack(site_corrs).mean().item()
-    return loss, {"trajectory_corr": corr_mean, "n_trajectory_sites": len(site_losses)}
+        p = pred[..., idx]
+        d2 = p[..., 2:] - 2.0 * p[..., 1:-1] + p[..., :-2]
+        terms.append((d2 ** 2).mean())
+    if not terms:
+        return (pred * 0.0).sum()
+    return torch.stack(terms).mean()
 
 
 def compute_splice_class_weights(

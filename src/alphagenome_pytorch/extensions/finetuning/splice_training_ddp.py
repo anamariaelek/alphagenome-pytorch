@@ -106,6 +106,7 @@ def train_epoch_splice(
     max_grad_norm: float = 1.0,
     usage_delta_from_mean: bool = False,
     usage_loss_weights: dict | None = None,
+    tissue_cond_groups: "list | dict | None" = None,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -216,6 +217,8 @@ def train_epoch_splice(
                     usage_mask = batch["usage_mask"].to(device)
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
+                    _groups = (tissue_cond_groups.get(int(org_idx[0].item()))
+                               if isinstance(tissue_cond_groups, dict) else tissue_cond_groups)
                     usage_loss_val, _ = splice_usage_loss(
                         usage_out["logits"],
                         usage_pos,
@@ -223,6 +226,7 @@ def train_epoch_splice(
                         usage_mask,
                         delta_from_mean=usage_delta_from_mean,
                         usage_loss_weights=usage_loss_weights,
+                        tissue_cond_groups=_groups,
                     )
                     total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -341,6 +345,7 @@ def validate_splice(
     use_amp: bool = True,
     usage_delta_from_mean: bool = False,
     usage_loss_weights: dict | None = None,
+    tissue_cond_groups: "list | dict | None" = None,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -416,6 +421,8 @@ def validate_splice(
                 usage_mask = batch["usage_mask"].to(device)
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
+                _groups = (tissue_cond_groups.get(int(org_idx[0].item()))
+                           if isinstance(tissue_cond_groups, dict) else tissue_cond_groups)
                 usage_loss_val, _ = splice_usage_loss(
                     usage_out["logits"],
                     usage_pos,
@@ -423,6 +430,7 @@ def validate_splice(
                     usage_mask,
                     delta_from_mean=usage_delta_from_mean,
                     usage_loss_weights=usage_loss_weights,
+                    tissue_cond_groups=_groups,
                 )
                 total_loss = total_loss + usage_weight * usage_loss_val
 

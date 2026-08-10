@@ -570,6 +570,10 @@ def parse_args() -> argparse.Namespace:
         usage_loss_weights = config_data["usage_loss_weights"]
     args.usage_loss_weights = usage_loss_weights
 
+    # Epochs over which to linearly ramp the trajectory/shape/smoothness loss weights
+    # (0 = apply at full strength from epoch 0).
+    args.usage_traj_warmup_epochs = int(config_data.get("usage_traj_warmup_epochs", 0) or 0)
+
     args.species_specs = species_specs
     return args
 
@@ -603,6 +607,7 @@ def create_datasets(args: argparse.Namespace, rank: int):
     train_datasets: list = []
     val_datasets: list = []
     species_n_conditions: dict[int, int] = {}  # organism_index → n_conditions
+    tissue_cond_groups_by_org: dict[int, list] = {}  # organism_index → per-tissue condition groups
 
     for spec in args.species_specs:
         name = spec["name"]
@@ -621,7 +626,9 @@ def create_datasets(args: argparse.Namespace, rank: int):
             print_rank0(f"  [{name}] observed_conditions_only={args.observed_conditions_only} (True=only observed, False=unobserved as 0)", rank)
             cond = usage_index.n_conditions
             species_n_conditions[spec["organism_index"]] = cond
-            print_rank0(f"  [{name}] Usage conditions: {cond}", rank)
+            tissue_cond_groups_by_org[spec["organism_index"]] = usage_index.tissue_cond_groups
+            print_rank0(f"  [{name}] Usage conditions: {cond} "
+                        f"({len(usage_index.tissue_cond_groups)} tissue groups for trajectory loss)", rank)
 
         genome = CachedGenome(spec["genome"]) if args.cache_genome else spec["genome"]
 
@@ -661,7 +668,7 @@ def create_datasets(args: argparse.Namespace, rank: int):
             f"Combined — Train: {len(train_dataset):,}  Val: {len(val_dataset):,}", rank
         )
 
-    return train_dataset, val_dataset, species_n_conditions
+    return train_dataset, val_dataset, species_n_conditions, tissue_cond_groups_by_org
 
 
 def create_dataloaders(
@@ -1046,7 +1053,7 @@ def main() -> None:
         resume_path = Path(args.resume)
 
     # Create datasets
-    train_dataset, val_dataset, species_n_conditions = create_datasets(args, 0)
+    train_dataset, val_dataset, species_n_conditions, tissue_cond_groups_by_org = create_datasets(args, 0)
 
     # Set rank and world_size for single-process (no DDP)
     rank = 0
@@ -1282,6 +1289,8 @@ def main() -> None:
                 max_grad_norm=args.max_grad_norm,
                 usage_delta_from_mean=args.usage_delta_from_mean,
                 usage_loss_weights=args.usage_loss_weights,
+                tissue_cond_groups=tissue_cond_groups_by_org,
+                usage_traj_warmup_epochs=getattr(args, "usage_traj_warmup_epochs", 0),
             )
 
             if handler.preempted:
@@ -1301,6 +1310,7 @@ def main() -> None:
                 use_amp=use_amp,
                 usage_delta_from_mean=args.usage_delta_from_mean,
                 usage_loss_weights=args.usage_loss_weights,
+                tissue_cond_groups=tissue_cond_groups_by_org,
             )
 
             if torch.cuda.is_available():
@@ -1329,9 +1339,11 @@ def main() -> None:
             train_bce = getattr(train_metrics, "usage_bce_loss", None)
             train_delta = getattr(train_metrics, "usage_delta_loss", None)
             train_traj = getattr(train_metrics, "usage_trajectory_loss", None)
+            train_tcorr = getattr(train_metrics, "usage_trajectory_corr", None)
             val_bce = getattr(val_metrics, "usage_bce_loss", None)
             val_delta = getattr(val_metrics, "usage_delta_loss", None)
             val_traj = getattr(val_metrics, "usage_trajectory_loss", None)
+            val_tcorr = getattr(val_metrics, "usage_trajectory_corr", None)
             summary = (
                 f"Epoch {epoch}: "
                 f"train_loss={train_loss:.4f}  "
@@ -1343,7 +1355,8 @@ def main() -> None:
                 f"lr={current_lr:.2e}\n"
                 f"  Timing: {format_time(epoch_elapsed)} ({format_time(train_metrics.elapsed_s)} train + {format_time(val_metrics.elapsed_s)} val)"
             )
-            if any(v is not None for v in (train_bce, train_delta, train_traj, val_bce, val_delta, val_traj)):
+            if any(v is not None for v in (train_bce, train_delta, train_traj, train_tcorr,
+                                           val_bce, val_delta, val_traj, val_tcorr)):
                 summary += "\n  [usage breakdown]"
                 train_parts = []
                 if train_bce is not None:
@@ -1352,6 +1365,8 @@ def main() -> None:
                     train_parts.append(f"train_delta_loss={train_delta:.4f}")
                 if train_traj is not None:
                     train_parts.append(f"train_trajectory_loss={train_traj:.4f}")
+                if train_tcorr is not None:
+                    train_parts.append(f"train_trajectory_corr={train_tcorr:.3f}")
                 if train_parts:
                     summary += "\n    " + "  ".join(train_parts)
 
@@ -1362,6 +1377,8 @@ def main() -> None:
                     val_parts.append(f"val_delta_loss={val_delta:.4f}")
                 if val_traj is not None:
                     val_parts.append(f"val_trajectory_loss={val_traj:.4f}")
+                if val_tcorr is not None:
+                    val_parts.append(f"val_trajectory_corr={val_tcorr:.3f}")
                 if val_parts:
                     summary += "\n    " + "  ".join(val_parts)
             print(summary)
@@ -1379,12 +1396,16 @@ def main() -> None:
                 extra["train_delta_loss"] = train_delta
             if train_traj is not None:
                 extra["train_trajectory_loss"] = train_traj
+            if train_tcorr is not None:
+                extra["train_trajectory_corr"] = train_tcorr
             if val_bce is not None:
                 extra["val_bce_loss"] = val_bce
             if val_delta is not None:
                 extra["val_delta_loss"] = val_delta
             if val_traj is not None:
                 extra["val_trajectory_loss"] = val_traj
+            if val_tcorr is not None:
+                extra["val_trajectory_corr"] = val_tcorr
             if val_metrics.species_metrics:
                 for org_idx, species_vals in sorted(val_metrics.species_metrics.items()):
                     species_name = species_name_by_org.get(org_idx, f"org_{org_idx}")

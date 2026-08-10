@@ -32,7 +32,6 @@ species:
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/mouse/fold0/valid.bed
     organism_index: 1
 
-
 organism_embedding_init:
   0: 0   # new organism 0 from pretrained organism 0
   1: 1   # new organism 1 from pretrained organism 1
@@ -52,7 +51,7 @@ mode: lora
 # ---------------------------------------------------------------------------
 sequence_length: 131072
 max_sites: 1024
-cache_genome: false        # set true to load genome into RAM (~12 GB for hg38)
+cache_genome: false        # false (default): lazy on-demand FASTA reads (fast startup, low RAM). true: load whole genome into RAM (~12 GB for hg38; slow startup)
 # Set coordinate base for usage parquet
 # 1 = Spliser default (1-based coordinates) — use this unless you explicitly converted to 0-based
 # 0 = already converted to 0-based coordinates
@@ -91,14 +90,28 @@ lr_schedule: cosine              # cosine | constant
 cls_weight: 1.0
 usage_weight: 1.0
 
-# Dictionary of usage weights
-#   bce: weight for BCE on absolute usage
-#   delta_mse: weight for MSE on deviation from mean
-#   trajectory_pearson: weight for 1 - PearsonR on the concatenated condition trajectory
+# Dictionary of usage loss component weights. Trajectory terms are computed PER-TISSUE
+# over that tissue's developmental timepoints (not all conditions concatenated), so they
+# capture within-tissue dynamics rather than tissue-level offsets.
+#   bce:                BCE on absolute usage (level).
+#   delta_mse:          MSE on per-(site,tissue) mean-centered trajectories (shape, unweighted).
+#   trajectory_shape:   per-(site,tissue) centered-MSE, weighted by true amplitude so dynamic
+#                       sites dominate (recommended shape term).
+#   trajectory_pearson: 1 - PearsonR per (site,tissue) over its timepoints.
+#   traj_smooth:        second-difference smoothness penalty on the predicted per-tissue curve.
+# train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
 usage_loss_weights:
   bce: 1.0
   delta_mse: 0.0
+  trajectory_shape: 0.0      # try ~0.5-1.0 to teach developmental shape
   trajectory_pearson: 0.0
+  traj_smooth: 0.0           # try ~0.05-0.1 for smoother predicted trajectories
+
+# BCE-only warm-up: for the first N epochs (1-indexed) the shape/pearson/smoothness
+# terms are DISABLED (pure BCE); they switch on at full strength from epoch N+1.
+# N=2 -> epochs 1-2 BCE only, shape from epoch 3. 0 = no warm-up. The per-tissue
+# Pearson (traj_r / train_usage_trajectory_corr) is still logged during warm-up.
+usage_traj_warmup_epochs: 0
 
 # Gradient clipping (0 to disable)
 max_grad_norm: 1.0
