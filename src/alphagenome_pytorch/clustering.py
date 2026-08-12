@@ -33,6 +33,14 @@ SHAPE_COLORS = {
     # Biphasic
     "up-down":       "#1f77b4",   # blue
     "down-up":       "#ff7f0e",   # orange
+    # High-baseline dynamics (stays in the high band but still moves)
+    "high_up":       "#1b9e77",   # teal-green
+    "high_down":     "#d95f02",   # burnt orange
+    "high_var":      "#7570b3",   # slate purple
+    # Low-baseline dynamics (stays in the low band but still moves)
+    "low_up":        "#66c2a5",   # light teal
+    "low_down":      "#fc8d62",   # light orange
+    "low_var":       "#b3a2c7",   # light purple
     # Flat
     "flat_high":     "#9467bd",
     "flat_mid_high": "#d8c8e8",
@@ -40,15 +48,18 @@ SHAPE_COLORS = {
     "flat_mid_low":  "#c6b2da",
     "flat_low":      "#c5b0d5",
     # No clear pattern
-    "complex":       "#7f7f7f",
+    "noisy":         "#7f7f7f",
+    "complex":       "#7f7f7f",   # legacy alias (kept so old outputs still colour)
 }
 
 SHAPE_ORDER = [
     "up_early",   "up_late",   "up_mid",
     "down_early", "down_late", "down_mid",
     "up-down", "down-up",
+    "high_up", "high_down", "high_var",
+    "low_up", "low_down", "low_var",
     "flat_high", "flat_mid_high", "flat_mid", "flat_mid_low", "flat_low",
-    "complex",
+    "noisy",
 ]
 
 
@@ -549,15 +560,41 @@ def classify_cluster_shape(mean_traj,
                            monotone_frac=0.65,
                            peak_window=(0.25, 0.75),
                            reversal_fraction=0.30,
+                           biphasic_abs_leg=0.15,
                            min_net_change=0.12,
-                           knee_frac=0.65,
+                           knee_frac=0.60,
                            flat_high=0.80,
                            flat_low=0.20,
-                           level_window=3):
+                           level_window=3,
+                           strict_updown=True,
+                           updown_low=0.35,
+                           updown_high=0.65,
+                           updown_min_change=0.30,
+                           label_high_range=True,
+                           high_base_min=0.55,
+                           low_base_max=0.45,
+                           high_dir_change=0.15):
     """Classify a cluster's mean trajectory into one of 14 shape labels
-    (see ``SHAPE_ORDER``). Decision tree: flat_* -> monotone up/down
-    {early/late/mid} -> biphasic up-down/down-up -> net-direction fallback ->
-    complex."""
+    (see ``SHAPE_ORDER``).
+
+    Strict decision tree (``strict_updown=True``, default), by *baseline* then change:
+      1. ``flat_*`` — amplitude < ``amplitude_threshold`` (sub-labelled by mean level).
+      2. **High baseline** (``min(y) >= high_base_min``, stays in the high band):
+         ``high_up`` / ``high_down`` if the net change exceeds ``high_dir_change``,
+         else ``high_var``.
+      3. **Low baseline** (``max(y) <= low_base_max``, stays in the low band):
+         ``low_up`` / ``low_down`` / ``low_var`` (symmetric to high).
+      4. **Mid range**, only when the change is large (amplitude *and* ``|net|`` ≥
+         ``updown_min_change``): biphasic ``up-down`` / ``down-up``, else a directional
+         ``up_{early|late|mid}`` / ``down_{early|late|mid}`` (knee timing from
+         ``knee_frac``).
+      5. Otherwise ``noisy`` — weak, small, or ambiguous changes are deliberately not
+         over-called as trends (historically ``up_early`` was heavily over-annotated).
+
+    ``label_high_range`` toggles the high/low baseline categories (steps 2–3). Set
+    ``strict_updown=False`` for the legacy permissive behaviour (any
+    ``monotone_frac``-consistent direction with ``|net| >= min_net_change``, plus a
+    net-direction fallback)."""
     from scipy.ndimage import uniform_filter1d
 
     y = uniform_filter1d(np.asarray(mean_traj, float),
@@ -595,33 +632,65 @@ def classify_cluster_shape(mean_traj,
     frac_up   = float((diffs > 0).mean())
     frac_down = float((diffs < 0).mean())
 
-    if frac_up >= monotone_frac and abs_net >= min_net_change:
-        return f"up_{_knee()}"
-    if frac_down >= monotone_frac and abs_net >= min_net_change:
-        return f"down_{_knee()}"
-
+    # Biphasic detection (shared): a mid-trajectory peak (up-down) or valley (down-up)
+    # with both legs large enough. Each leg must clear BOTH a relative floor
+    # (reversal_fraction x amplitude) and an absolute floor (biphasic_abs_leg) — the
+    # absolute floor separates a clean reversal (both legs substantial) from a shallow
+    # one-sided wiggle (one tiny leg), which stays 'noisy'.
     lo = int(np.floor(peak_window[0] * n))
     hi = int(np.ceil(peak_window[1] * n))
     argmax_idx = int(np.argmax(y))
     argmin_idx = int(np.argmin(y))
-    min_leg    = reversal_fraction * amplitude
+    min_leg    = max(reversal_fraction * amplitude, biphasic_abs_leg)
 
-    if lo <= argmax_idx <= hi:
-        rise_before = float(y[argmax_idx] - y[0])
-        fall_after  = float(y[argmax_idx] - y[-1])
-        if rise_before >= min_leg and fall_after >= min_leg:
-            return "up-down"
+    def _is_up_down():
+        return (lo <= argmax_idx <= hi
+                and float(y[argmax_idx] - y[0]) >= min_leg
+                and float(y[argmax_idx] - y[-1]) >= min_leg)
 
-    if lo <= argmin_idx <= hi:
-        fall_before = float(y[0]  - y[argmin_idx])
-        rise_after  = float(y[-1] - y[argmin_idx])
-        if fall_before >= min_leg and rise_after >= min_leg:
-            return "down-up"
+    def _is_down_up():
+        return (lo <= argmin_idx <= hi
+                and float(y[0]  - y[argmin_idx]) >= min_leg
+                and float(y[-1] - y[argmin_idx]) >= min_leg)
 
+    if strict_updown:
+        ymin, ymax = float(np.min(y)), float(np.max(y))
+
+        # 1) Biphasic reversal — a clean mid peak / valley (both legs clear the relative
+        #    AND absolute leg floors). Checked first so a real reversal is labelled
+        #    up-down / down-up even when it sits inside the high or low band.
+        if _is_up_down(): return "up-down"
+        if _is_down_up(): return "down-up"
+
+        # 2) Baseline dynamics — the trajectory is confined to (mostly) one band but
+        #    still moves. Labelled by net direction: <name>_up / _down when |net| >=
+        #    high_dir_change, else <name>_var. (label_high_range gates the naming.)
+        if label_high_range and ymin >= high_base_min:              # stays high
+            if net_change >= high_dir_change:  return "high_up"
+            if net_change <= -high_dir_change: return "high_down"
+            return "high_var"
+        if label_high_range and ymax <= low_base_max:               # stays low
+            if net_change >= high_dir_change:  return "low_up"
+            if net_change <= -high_dir_change: return "low_down"
+            return "low_var"
+
+        # 3) Mid-range directional trend — only when the change is large (amplitude AND
+        #    |net| >= updown_min_change). Weak or ambiguous mid changes -> noisy.
+        if amplitude >= updown_min_change:
+            if net_change >=  updown_min_change: return f"up_{_knee()}"
+            if net_change <= -updown_min_change: return f"down_{_knee()}"
+        return "noisy"
+
+    # ── Permissive (legacy) behaviour ────────────────────────────────────────────
+    if frac_up >= monotone_frac and abs_net >= min_net_change:
+        return f"up_{_knee()}"
+    if frac_down >= monotone_frac and abs_net >= min_net_change:
+        return f"down_{_knee()}"
+    if _is_up_down(): return "up-down"
+    if _is_down_up(): return "down-up"
     if abs_net >= min_net_change:
         return f'{"up" if net_change > 0 else "down"}_{_knee()}'
-
-    return "complex"
+    return "noisy"
 
 
 def select_k_gap(Z, k_min=5, k_max=80):

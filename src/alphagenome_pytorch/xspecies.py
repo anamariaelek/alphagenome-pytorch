@@ -291,7 +291,10 @@ def classify_traj(vec, min_timepoints=5, tps=TPS):
 
 
 def is_dynamic_shape(s):
-    return bool(s) and not s.startswith("flat") and s != "complex"
+    # up_*/down_*/biphasic/high_up/high_down/low_up/low_down are dynamic; flat_*,
+    # high_var, low_var, noisy (and legacy 'complex') are not confident trends.
+    return bool(s) and not s.startswith("flat") and s not in (
+        "complex", "noisy", "high_var", "low_var")
 
 
 def role(shape, amplitude, dynamic_shapes=DYNAMIC_SHAPES, flat_shapes=FLAT_SHAPES,

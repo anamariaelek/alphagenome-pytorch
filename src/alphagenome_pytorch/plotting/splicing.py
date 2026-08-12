@@ -1486,9 +1486,15 @@ from alphagenome_pytorch.clustering import (  # noqa: F401
 )
 
 def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
-                       n_clusters, out_dir, prefix, label, random_seed=42):
+                       n_clusters, out_dir, prefix, label, random_seed=42,
+                       heatmap_height=9.0):
     """Save the clustering heatmap (``<prefix>_heatmap.png``) and the per-cluster
-    shape-profile grid (``<prefix>_profiles.png``)."""
+    shape-profile grid (``<prefix>_profiles.png``).
+
+    ``heatmap_height`` caps the heatmap figure height (inches). The heatmap shows one
+    row per site via ``imshow`` (which rescales to the axes), so a fixed compact height
+    is used instead of scaling with the number of sites — otherwise large datasets
+    produce absurdly tall figures."""
     import os
     import matplotlib.gridspec as gridspec
 
@@ -1527,7 +1533,8 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
             row_ranges.append((k, rc, rc + nr))
         rc += nr
 
-    fig = plt.figure(figsize=(10.5, max(5, len(fsort) * 0.005)))
+    # Compact, capped height (imshow rescales the site rows to the axes regardless).
+    fig = plt.figure(figsize=(10.5, float(heatmap_height)))
     gs  = gridspec.GridSpec(2, 3, width_ratios=[0.05, 0.02, 0.93],
                             height_ratios=[0.05, 0.95], hspace=0.15, wspace=0.02)
     ax_cb  = fig.add_subplot(gs[0, 2])
@@ -1549,11 +1556,15 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
 
     ax_str.set_xlim(0, 1); ax_str.set_ylim(len(fsplit), 0); ax_str.axis("off")
     ax_lbl.set_xlim(0, 1); ax_lbl.set_ylim(len(fsplit), 0); ax_lbl.axis("off")
+    # Only label clusters thick enough to be legible at the compact height, so the
+    # C# labels don't pile up over the many thin mid clusters.
+    _min_label_rows = 0.012 * len(fsplit)
     for k, y0, y1 in row_ranges:
         ax_str.add_patch(plt.Rectangle((0, y0), 1, y1 - y0,
                                         color=cc[k-1], ec="none"))
-        ax_lbl.text(1.0, (y0+y1)/2, f"C{k}", ha="right", va="center",
-                    fontsize=8, fontweight="bold", color=cc[k-1])
+        if (y1 - y0) >= _min_label_rows:
+            ax_lbl.text(1.0, (y0+y1)/2, f"C{k}", ha="right", va="center",
+                        fontsize=8, fontweight="bold", color=cc[k-1])
 
     cb = plt.colorbar(im, cax=ax_cb, orientation="horizontal")
     cb.set_label("SSE", fontsize=8)

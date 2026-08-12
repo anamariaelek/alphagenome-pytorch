@@ -182,6 +182,7 @@ def annotate(species, tissue, args):
 
     out = sites.copy()
     out["Chromosome"] = out["Chromosome"].astype(str)
+    out["_ridx"] = np.arange(len(out))          # row index into feat_pred/feat_true
     out["pred_cluster"] = pc
     out["pred_shape"] = pd.Series(pc).map(c2s).to_numpy()
     out["obs_cluster"] = tc                                    # observed traj, same pipeline
@@ -202,13 +203,19 @@ def annotate(species, tissue, args):
     out["same_cluster_ref"] = out["pred_cluster"] == out["ref_cluster"]
     out["same_shape_ref"] = out["pred_shape"] == out["ref_shape"]
 
+    # GP-smoothed predicted / observed features, aligned to the final parquet row order
+    # (via _ridx, so they survive the ref_meta merge). Saved for downstream plotting.
+    order = out["_ridx"].to_numpy()
+    os.makedirs(args.output, exist_ok=True)
+    np.save(os.path.join(args.output, f"{prefix}_pred_gp_features.npy"), feat_pred[order])
+    np.save(os.path.join(args.output, f"{prefix}_obs_gp_features.npy"), feat_true[order])
+
     cols = ["Chromosome", "Position", "Strand",
             "ref_cluster", "ref_shape", "obs_cluster", "obs_shape",
             "pred_cluster", "pred_shape",
             "same_cluster", "same_shape", "same_cluster_ref", "same_shape_ref",
             "pred_centroid_dist", "obs_centroid_dist", "n_obs"]
     out = out[cols]
-    os.makedirs(args.output, exist_ok=True)
     out.to_parquet(out_path, index=False)
     log.info("%s/%s: %s sites | pred-vs-obs: same_shape=%.3f same_cluster=%.3f | "
              "pred-vs-ref: same_shape=%.3f | obs-vs-ref: same_shape=%.3f -> %s",

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python /tmp/patch_eval.py)",
+      "Bash(python /tmp/patch_clust.py)"
+    ]
+  }
+}

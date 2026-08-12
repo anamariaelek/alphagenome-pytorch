@@ -160,8 +160,37 @@ def parse_args():
                    help="Min fraction of steps in one direction for monotone "
                         "classification. Default: 0.65")
     g.add_argument("--reversal-fraction", type=float, default=0.30,
-                   help="Min size of each leg (as fraction of amplitude) for "
-                        "up-down/down-up classification. Default: 0.30")
+                   help="Min size of each biphasic leg as a fraction of amplitude. "
+                        "Default: 0.30")
+    g.add_argument("--biphasic-abs-leg", type=float, default=0.15,
+                   help="Absolute min size of EACH biphasic leg (separates a clean "
+                        "up-down/down-up reversal from a shallow one-sided wiggle, "
+                        "which stays 'noisy'). Default: 0.15")
+    g.add_argument("--strict-updown", action=argparse.BooleanOptionalAction, default=True,
+                   help="Only label up/down when the cluster mean clearly spans "
+                        "low->high (or high->low): start <= --updown-low, end >= "
+                        "--updown-high, |net| >= --updown-min-change. Weak/mid-range "
+                        "changes stay 'complex' instead of being over-called (e.g. "
+                        "inflated up_early). Use --no-strict-updown for the legacy "
+                        "permissive behaviour. Default: on.")
+    g.add_argument("--updown-low", type=float, default=0.35,
+                   help="Strict up/down: start (for up) / end (for down) must be "
+                        "<= this 'low' band. Default: 0.35")
+    g.add_argument("--updown-high", type=float, default=0.65,
+                   help="Strict up/down: end (for up) / start (for down) must be "
+                        ">= this 'high' band. Default: 0.65")
+    g.add_argument("--updown-min-change", type=float, default=0.30,
+                   help="Strict mid-range up/down: min amplitude AND |net change|. "
+                        "Default: 0.30")
+    g.add_argument("--high-base-min", type=float, default=0.55,
+                   help="Strict: min(y) >= this => high-baseline cluster "
+                        "(high_up/high_down/high_var). Default: 0.55")
+    g.add_argument("--low-base-max", type=float, default=0.45,
+                   help="Strict: max(y) <= this => low-baseline cluster "
+                        "(low_up/low_down/low_var). Default: 0.45")
+    g.add_argument("--high-dir-change", type=float, default=0.15,
+                   help="Strict: net change to call a high-/low-baseline cluster "
+                        "directional (_up/_down) rather than _var. Default: 0.15")
 
     # Output
     g = p.add_argument_group("Output")
@@ -172,6 +201,9 @@ def parse_args():
                         "if empty.")
     g.add_argument("--save-plots", action="store_true",
                    help="Save heatmap and cluster profile plots.")
+    g.add_argument("--heatmap-height", type=float, default=9.0,
+                   help="Heatmap figure height in inches (compact, capped; the site "
+                        "rows are rescaled to fit). Default: 9.0")
 
     return p.parse_args()
 
@@ -303,6 +335,14 @@ def main():
             knee_frac=args.knee_frac,
             flat_high=args.flat_high,
             flat_low=args.flat_low,
+            strict_updown=args.strict_updown,
+            updown_low=args.updown_low,
+            high_base_min=args.high_base_min,
+            low_base_max=args.low_base_max,
+            high_dir_change=args.high_dir_change,
+            biphasic_abs_leg=args.biphasic_abs_leg,
+            updown_high=args.updown_high,
+            updown_min_change=args.updown_min_change,
         )
 
     log.info("%-8s  %-16s  %8s", "Cluster", "Shape", "N sites")
@@ -357,7 +397,8 @@ def main():
         log.info("=== Saving plots ===")
         save_cluster_plots(features_v, cluster_labels, cluster_shapes,
                            n_clusters, args.output, prefix, label,
-                           random_seed=args.random_seed)
+                           random_seed=args.random_seed,
+                           heatmap_height=args.heatmap_height)
 
     log.info("=== Done ===")
     return 0
