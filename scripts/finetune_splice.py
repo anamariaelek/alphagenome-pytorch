@@ -574,6 +574,10 @@ def parse_args() -> argparse.Namespace:
     # (0 = apply at full strength from epoch 0).
     args.usage_traj_warmup_epochs = int(config_data.get("usage_traj_warmup_epochs", 0) or 0)
 
+    # Fraction of GPU memory this process may use (1.0 = no cap; <1.0 applies
+    # torch.cuda.set_per_process_memory_fraction). Useful to leave headroom / share a GPU.
+    args.cuda_memory_fraction = float(config_data.get("cuda_memory_fraction", 1.0) or 1.0)
+
     args.species_specs = species_specs
     return args
 
@@ -1024,6 +1028,12 @@ def main() -> None:
 
     # Single-process/single-GPU only
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Optionally cap this process to a fraction of the GPU's memory (1.0 = no cap).
+    if device.type == 'cuda' and 0.0 < args.cuda_memory_fraction < 1.0:
+        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device.index or 0)
+        total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+        print(f"CUDA memory fraction: {args.cuda_memory_fraction:.2f} "
+              f"(~{args.cuda_memory_fraction * total_gb:.1f} / {total_gb:.1f} GB)")
     import random
     import numpy as np
     if args.seed is not None:

@@ -259,23 +259,28 @@ def train_epoch_splice(
                         tissue_cond_groups=_groups_for(int(org_idx[0].item())),
                     )
 
-                    if "bce_loss" in usage_corr:
-                        usage_bce_sum += usage_corr["bce_loss"]
-                        n_usage_bce_batches += 1
-                    if "delta_loss" in usage_corr:
-                        usage_delta_sum += usage_corr["delta_loss"]
-                        n_usage_delta_batches += 1
-                    if "trajectory_loss" in usage_corr:
-                        usage_traj_sum += usage_corr["trajectory_loss"]
-                        n_usage_traj_batches += 1
-                    _tc = usage_corr.get("trajectory_corr")
-                    if _tc is not None and math.isfinite(_tc):
-                        usage_tcorr_sum += _tc
-                        n_usage_tcorr_batches += 1
-
                 total_loss = total_loss + usage_weight * usage_loss_val
             if not torch.isfinite(total_loss):
                 continue
+
+            # Only accumulate breakdown stats for batches that actually
+            # contributed to the update — otherwise a single skipped batch
+            # with a non-finite component (e.g. bce_loss) would poison the
+            # running sum with NaN for the rest of the epoch, even though
+            # the optimizer correctly skipped it above.
+            if "bce_loss" in usage_corr and math.isfinite(usage_corr["bce_loss"]):
+                usage_bce_sum += usage_corr["bce_loss"]
+                n_usage_bce_batches += 1
+            if "delta_loss" in usage_corr and math.isfinite(usage_corr["delta_loss"]):
+                usage_delta_sum += usage_corr["delta_loss"]
+                n_usage_delta_batches += 1
+            if "trajectory_loss" in usage_corr and math.isfinite(usage_corr["trajectory_loss"]):
+                usage_traj_sum += usage_corr["trajectory_loss"]
+                n_usage_traj_batches += 1
+            _tc = usage_corr.get("trajectory_corr")
+            if _tc is not None and math.isfinite(_tc):
+                usage_tcorr_sum += _tc
+                n_usage_tcorr_batches += 1
 
             # Scale for accumulation
             (total_loss / accumulation_steps).backward()
@@ -548,6 +553,14 @@ def validate_splice(
                     n_usage_tcorr_batches += 1
 
             total_loss = total_loss + usage_weight * usage_loss_val
+
+        if not torch.isfinite(total_loss):
+            print(
+                f"  WARNING: Non-finite validation loss at batch {batch_idx+1} "
+                f"(organism {batch_org}) — excluding from val metrics"
+            )
+            del batch
+            continue
 
         metrics.loss += total_loss.item()
         metrics.cls_loss += cls_loss_val.item()

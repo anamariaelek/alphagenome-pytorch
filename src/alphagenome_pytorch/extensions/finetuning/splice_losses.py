@@ -161,6 +161,29 @@ def splice_usage_loss(
     valid_site_exp = valid_site_mask.unsqueeze(-1)       # (B, max_sites, 1)
     final_mask = usage_mask & valid_site_exp             # (B, max_sites, n_cond)
 
+    # Defensive: drop any "observed" pair whose target is non-finite (e.g. a
+    # degenerate SSE = NaN that slipped through the source data's coverage
+    # filter). A single such entry would otherwise poison the whole batch's
+    # BCE loss (and any downstream per-tissue trajectory terms) with NaN.
+    finite_target_mask = torch.isfinite(usage_values)
+    if not finite_target_mask.all():
+        n_bad_targets = int((~finite_target_mask & final_mask).sum())
+        if n_bad_targets > 0:
+            print(f"  WARNING: {n_bad_targets} observed usage target(s) are non-finite (NaN/Inf SSE) — excluding from loss")
+        final_mask = final_mask & finite_target_mask
+
+    # Separately flag non-finite *predictions* at observed positions — this
+    # indicates the model itself produced inf/NaN logits (e.g. attention
+    # overflow from weight drift during full/partial unfreezing), which is a
+    # training-instability signal distinct from a bad target value and
+    # deserves a louder, distinguishable warning.
+    finite_pred_mask = torch.isfinite(gathered)
+    if not finite_pred_mask.all():
+        n_bad_preds = int((~finite_pred_mask & final_mask).sum())
+        if n_bad_preds > 0:
+            print(f"  WARNING: {n_bad_preds} model prediction(s) are non-finite (inf/NaN logits) at observed usage positions — likely weight/activation instability, not a data issue")
+        final_mask = final_mask & finite_pred_mask
+
     n_valid = final_mask.sum()
     if n_valid == 0:
         # No observations in this batch — return zero loss with gradient and empty metrics dict

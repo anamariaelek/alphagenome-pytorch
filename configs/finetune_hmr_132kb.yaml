@@ -131,6 +131,9 @@ max_grad_norm: 1.0
 num_workers: 2
 use_amp: true              # set false to disable AMP
 compile: true              # torch.compile for fused kernels
+# Fraction of GPU memory this process may use (1.0 = no cap). Set <1.0 to leave
+# headroom or share the GPU (applies torch.cuda.set_per_process_memory_fraction).
+cuda_memory_fraction: 1.0
 
 # ---------------------------------------------------------------------------
 # Logging
