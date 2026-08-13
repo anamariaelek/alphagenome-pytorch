@@ -1,4 +1,4 @@
-# Splicing notebooks
+# Splicing finetuning
 
 This document describes the workflow of splicing project: preparing
 splice-site usage data, finetuning AlphaGenome on it, evaluating predictions,
@@ -16,34 +16,34 @@ the full reference.
 ## Workflow order
 
 ```
-splice_usage_data.ipynb                         (explore/prep the ground-truth usage data)
+notebooks/splice_usage_data.ipynb
         │
 scripts/finetune_splice.py
         │
-scripts/evaluate_splice.py         (generates predictions_*.npz / usage_*.npz per species)
+scripts/evaluate_splice.py
         │
-        ├─► splice_model_eval.ipynb                      (classification + usage accuracy)
-        │     ├─► splice_genomic_overlap.ipynb               (accuracy by genomic feature)
-        │     └─► splice_developmental_dynamics.ipynb       (accuracy by trajectory shape)
+        ├─► notebooks/splice_model_eval.ipynb
+        │     ├─► notebooks/splice_genomic_overlap.ipynb
+        │     └─► notebooks/splice_developmental_dynamics.ipynb
         │
-        ├─► splice_model_eval_compare_lora.ipynb                    (LoRA rank comparison)
-        ├─► splice_model_eval_compare_multi_species.ipynb (species-combination comparison)
+        ├─► notebooks/splice_model_eval_compare_lora.ipynb
+        ├─► notebooks/splice_model_eval_compare_multi_species.ipynb
         │
 scripts/cluster_trajectories.py
         │
-        ├─► splice_trajectory_clustering.ipynb
+        ├─► notebooks/splice_trajectory_clustering.ipynb
         │
 scripts/cluster_predictions.py    
         │ 
-        ├─► splice_prediction_clustering.ipynb
+        ├─► notebooks/splice_prediction_clustering.ipynb
         │        
 scripts/liftover_splice_hal.py 
         │ 
-        ├─► splice_cross_species_usage.ipynb
-        ├─► splice_cross_species_usage_trajectory.ipynb
-        ├─► splice_cross_species_divergence.ipynb
+        ├─► notebooks/splice_cross_species_usage.ipynb
+        ├─► notebooks/splice_cross_species_usage_trajectory.ipynb
+        ├─► notebooks/splice_cross_species_divergence.ipynb
         │
-splice_attributions.ipynb
+notebooks/splice_attributions.ipynb
 ```
 
 ## Data preparation
