@@ -126,7 +126,10 @@ class SpliceSiteUsageIndex:
     """In-memory index of per-condition splice-site usage values.
 
     Loads a Spliser ``_usage.parquet`` file, applies coverage filters, then
-    builds a lookup dictionary keyed by ``(chromosome, position)``.
+    builds a numpy-based columnar index for fork-safe lookups in DataLoader
+    workers.  Reading from numpy arrays does not trigger CPython reference-count
+    updates, eliminating the copy-on-write page-duplication that the previous
+    Python-dict representation caused in persistent worker processes.
 
     Args:
         usage_parquet: Path to the ``_usage.parquet`` file produced by
@@ -139,8 +142,10 @@ class SpliceSiteUsageIndex:
         alpha_min: Optional minimum ``Alpha`` count.
         usage_coord_base: Coordinate base in the parquet (1 or 0).
             Use ``1`` for Spliser output, which is 1-based.
-            Use ``0`` for 0-based coordinates (e.g. if you already post-processed the Spliser output to convert to 0-based).
-        observed_conditions_only: If ``True``, usage targets will only be returned for conditions with observed coverage.
+            Use ``0`` for 0-based coordinates (e.g. if you already
+            post-processed the Spliser output to convert to 0-based).
+        observed_conditions_only: If ``True``, usage targets will only be
+            returned for conditions with observed coverage.
     """
 
     def __init__(
@@ -168,43 +173,111 @@ class SpliceSiteUsageIndex:
         self.n_conditions: int = len(self._condition_labels)
         self.observed_conditions_only = observed_conditions_only
         none_class = self._class_labels.get("None", 4)
-        
-        # Map condition indices to Tissues
-        # Assumes condition labels are formatted like "Tissue_Timepoint" (e.g., "Brain_1", "Brain_2")
+
+        # Small Python dicts kept for the tissue_cond_groups property and
+        # observed_conditions_only masking.  These are tiny (~n_conditions
+        # entries) so CoW pressure from reading them in workers is negligible.
         self._tissue_to_cond_indices: dict[str, list[int]] = {}
         self._cond_idx_to_tissue: dict[int, str] = {}
-        
+
         for cond_name, cond_idx in self._condition_labels.items():
-            tissue = cond_name.split("_")[0]  # Extracts "Brain" from "Brain_1"
+            tissue = cond_name.split("_")[0]
             self._tissue_to_cond_indices.setdefault(tissue, []).append(cond_idx)
             self._cond_idx_to_tissue[cond_idx] = tissue
 
-        # Load usage data
+        # ── Load and filter parquet ───────────────────────────────────────────
         df = pd.read_parquet(usage_parquet)
-
-        # Filter: exclude "None" class
         df = df[df["Label"] != none_class].copy()
-        
-        # Apply coverage thresholds
         if min_coverage is not None:
             df = df[df["Alpha"] + df["Beta"] >= min_coverage]
         if alpha_min is not None:
             df = df[df["Alpha"] >= alpha_min]
-
         if usage_coord_base == 1:
-            df["Position"] = df["Position"] - 1  # → 0-based
-
+            df["Position"] = df["Position"] - 1
         df["Chromosome"] = df["Chromosome"].astype(str)
 
-        # Build lookup: (chrom, pos) → [(condition_idx, sse), ...]
-        self._lookup: dict[tuple[str, int], list[tuple[int, float]]] = {}
-        for row in df.itertuples(index=False):
-            key = (str(row.Chromosome), int(row.Position))
-            entry = (int(row.Condition), float(row.SSE))
-            self._lookup.setdefault(key, []).append(entry)
+        # ── Encode chromosomes as small integers ──────────────────────────────
+        all_chroms = sorted(df["Chromosome"].unique())
+        # Small dict: ~25 entries (one per chromosome).
+        self._chrom_to_id: dict[str, int] = {c: i for i, c in enumerate(all_chroms)}
 
+        df["_chrom_id"] = df["Chromosome"].map(self._chrom_to_id).astype(np.int32)
+        df["Condition"] = df["Condition"].astype(np.int32)
+        df["SSE"] = df["SSE"].astype(np.float32)
+        df["Position"] = df["Position"].astype(np.int64)
+
+        # ── Sort into (chrom_id, position, condition) order ───────────────────
+        df = df.sort_values(["_chrom_id", "Position", "Condition"]).reset_index(drop=True)
+
+        n_rows = len(df)
+
+        # Flat entries arrays — the actual data, stored as C buffers.
+        # Numpy reads from these buffers without touching any Python ob_refcnt,
+        # making them copy-on-write safe in forked worker processes.
+        self._entry_cond_indices: np.ndarray = df["Condition"].to_numpy(dtype=np.int32)
+        self._entry_sse_values: np.ndarray = df["SSE"].to_numpy(dtype=np.float32)
+
+        # ── Build site-level index (CSR-style) ────────────────────────────────
+        # One row per unique (chrom_id, position) pair; stores the slice [start,
+        # start+count) into the flat entries arrays for that site.
+        if n_rows > 0:
+            chrom_ids_arr = df["_chrom_id"].to_numpy(dtype=np.int32)
+            positions_arr = df["Position"].to_numpy(dtype=np.int64)
+
+            # Detect where a new (chrom_id, position) group begins
+            new_site = np.empty(n_rows, dtype=bool)
+            new_site[0] = True
+            new_site[1:] = (chrom_ids_arr[1:] != chrom_ids_arr[:-1]) | (
+                positions_arr[1:] != positions_arr[:-1]
+            )
+            site_starts = np.where(new_site)[0]  # int64 indices
+
+            self._site_chrom_ids: np.ndarray = chrom_ids_arr[site_starts].astype(np.int32)
+            self._site_positions: np.ndarray = positions_arr[site_starts].astype(np.int64)
+            self._site_entry_starts: np.ndarray = site_starts.astype(np.int64)
+
+            counts = np.empty(len(site_starts), dtype=np.int32)
+            counts[:-1] = (site_starts[1:] - site_starts[:-1]).astype(np.int32)
+            counts[-1] = np.int32(n_rows - site_starts[-1])
+            self._site_entry_counts: np.ndarray = counts
+        else:
+            self._site_chrom_ids = np.empty(0, dtype=np.int32)
+            self._site_positions = np.empty(0, dtype=np.int64)
+            self._site_entry_starts = np.empty(0, dtype=np.int64)
+            self._site_entry_counts = np.empty(0, dtype=np.int32)
+
+        # ── Numpy structures for observed_conditions_only masking ─────────────
+        # Precomputed CSR arrays so the masking path in query() is also numpy-
+        # based and avoids heavy Python-object iteration per site.
+        if observed_conditions_only:
+            all_tissues = sorted(self._tissue_to_cond_indices.keys())
+            self._n_tissues: int = len(all_tissues)
+            tissue_to_id = {t: i for i, t in enumerate(all_tissues)}
+
+            # cond_tissue_id[c] = tissue integer id for condition c (or -1)
+            cond_tissue_id = np.full(self.n_conditions, -1, dtype=np.int32)
+            for cond_name, cond_idx in self._condition_labels.items():
+                tid = tissue_to_id.get(cond_name.split("_")[0], -1)
+                if 0 <= cond_idx < self.n_conditions:
+                    cond_tissue_id[cond_idx] = tid
+            self._cond_tissue_id: np.ndarray = cond_tissue_id
+
+            # CSR: tissue_id → flat list of condition indices
+            tissue_lists = [
+                np.array(sorted(self._tissue_to_cond_indices[t]), dtype=np.int32)
+                for t in all_tissues
+            ]
+            self._tissue_cond_flat: np.ndarray = (
+                np.concatenate(tissue_lists) if tissue_lists else np.empty(0, dtype=np.int32)
+            )
+            starts = np.zeros(len(all_tissues) + 1, dtype=np.int32)
+            for i, lst in enumerate(tissue_lists):
+                starts[i + 1] = starts[i] + len(lst)
+            self._tissue_cond_starts: np.ndarray = starts
+
+        n_sites = len(self._site_positions)
         print(
-            f"SpliceSiteUsageIndex: loaded {len(self._lookup):,} sites, "
+            f"SpliceSiteUsageIndex: loaded {n_sites:,} sites, "
             f"{self.n_conditions} conditions from {usage_parquet.name}"
         )
 
@@ -250,58 +323,74 @@ class SpliceSiteUsageIndex:
             - ``values``: per-site float32 array of shape (n_conditions,) with
               SSE values (0.0 for unobserved conditions).
             - ``masks``: per-site bool array of shape (n_conditions,) with
-                            True only for observed conditions when
-                            ``observed_conditions_only=True``; otherwise True for all
-                            conditions so that unobserved conditions are treated as value=0.
+              True only for observed conditions when
+              ``observed_conditions_only=True``; otherwise True for all
+              conditions so that unobserved conditions are treated as value=0.
         """
-        site_positions: list[int] = []
+        out_positions: list[int] = []
         values_list: list[np.ndarray] = []
         masks_list: list[np.ndarray] = []
 
-        for pos in positions:
-            key = (chrom, int(pos))
-            entries = self._lookup.get(key)
-            if not entries:
-                continue
+        if len(positions) == 0:
+            return out_positions, values_list, masks_list
+
+        chrom_id = self._chrom_to_id.get(chrom)
+        if chrom_id is None:
+            return out_positions, values_list, masks_list
+
+        # Slice site arrays to this chromosome only
+        chrom_lo = int(np.searchsorted(self._site_chrom_ids, chrom_id, side="left"))
+        chrom_hi = int(np.searchsorted(self._site_chrom_ids, chrom_id, side="right"))
+        if chrom_lo >= chrom_hi:
+            return out_positions, values_list, masks_list
+
+        chrom_pos = self._site_positions[chrom_lo:chrom_hi]          # view, no copy
+        chrom_starts = self._site_entry_starts[chrom_lo:chrom_hi]    # view, no copy
+        chrom_counts = self._site_entry_counts[chrom_lo:chrom_hi]    # view, no copy
+
+        # Locate all queried positions in one vectorised searchsorted call
+        positions_arr = np.asarray(positions, dtype=np.int64)
+        idxs = np.searchsorted(chrom_pos, positions_arr, side="left")
+
+        for i in range(len(positions_arr)):
+            pos = positions_arr[i]
+            idx = idxs[i]
+            if idx >= len(chrom_pos) or chrom_pos[idx] != pos:
+                continue  # position not in index
+
+            entry_start = int(chrom_starts[idx])
+            entry_count = int(chrom_counts[idx])
+            cond_idx = self._entry_cond_indices[entry_start : entry_start + entry_count]
+            sse_val = self._entry_sse_values[entry_start : entry_start + entry_count]
+
+            # Filter to valid condition range
+            valid = (cond_idx >= 0) & (cond_idx < self.n_conditions)
+            valid_conds = cond_idx[valid]
 
             vals = np.zeros(self.n_conditions, dtype=np.float32)
-            
-            # If observed_conditions_only is True, default everything to False (masked out)
-            # If False, default everything to True (standard behavior)
-            mask = np.zeros(self.n_conditions, dtype=bool) if self.observed_conditions_only else np.ones(self.n_conditions, dtype=bool)
-            
-            # Track which tissues have at least one observation for this specific genomic site
-            observed_tissues_for_site = set()
-            observed_cond_indices = []
+            vals[valid_conds] = sse_val[valid]
 
-            # First pass: Fill values and identify which conditions/tissues are observed
-            for cond_idx, sse in entries:
-                if 0 <= cond_idx < self.n_conditions:
-                    vals[cond_idx] = sse
-                    observed_cond_indices.append(cond_idx)
+            if not self.observed_conditions_only:
+                mask = np.ones(self.n_conditions, dtype=bool)
+            else:
+                mask = np.zeros(self.n_conditions, dtype=bool)
+                # Tissues with at least one observed condition for this site
+                obs_tids = set(self._cond_tissue_id[valid_conds].tolist())
+                obs_tids.discard(-1)
+                # Unobserved tissues: set all their conditions to True (biological zero)
+                for tid in range(self._n_tissues):
+                    if tid not in obs_tids:
+                        ts = int(self._tissue_cond_starts[tid])
+                        te = int(self._tissue_cond_starts[tid + 1])
+                        mask[self._tissue_cond_flat[ts:te]] = True
+                # Observed conditions: set exactly those to True
+                mask[valid_conds] = True
 
-                    if self.observed_conditions_only:
-                        tissue = self._cond_idx_to_tissue.get(cond_idx)
-                        if tissue:
-                            observed_tissues_for_site.add(tissue)
-
-            # Second pass: Refine masking logic if observed_conditions_only is activated
-            if self.observed_conditions_only:
-                # 1. For any tissue that has NO observed points at all, treat all its timepoints as True (Value=0)
-                for tissue, cond_indices in self._tissue_to_cond_indices.items():
-                    if tissue not in observed_tissues_for_site:
-                        for idx in cond_indices:
-                            mask[idx] = True  # Tell loss function to evaluate these biological 0s
-                
-                # 2. For tissues that DO have observations, only set True for the exact observed timepoints
-                for idx in observed_cond_indices:
-                    mask[idx] = True  # Keeps the actual data points visible, drops unobserved missing timepoints
-
-            site_positions.append(int(pos))
+            out_positions.append(int(pos))
             values_list.append(vals)
             masks_list.append(mask)
 
-        return site_positions, values_list, masks_list
+        return out_positions, values_list, masks_list
 
 
 def _load_intervals_from_bed(
