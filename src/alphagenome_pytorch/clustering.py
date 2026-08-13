@@ -2,9 +2,9 @@
 
 Data preparation, GP smoothing, cluster-shape classification, k-selection, and
 assignment of new (e.g. predicted) trajectories to an existing reference
-clustering. Extracted from ``alphagenome_pytorch.plotting.splicing`` (which now
-re-exports these names for backwards compatibility) so clustering logic lives
-independently of the plotting utilities.
+clustering. Kept independent of ``alphagenome_pytorch.plotting.splicing``, which
+only holds the matching plot function (``save_cluster_plots``) and imports the
+constants it needs (``T_GRID``, ``SHAPE_COLORS``, ``SHAPE_ORDER``) from here.
 """
 
 import os

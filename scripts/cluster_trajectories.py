@@ -7,9 +7,10 @@ regression + Ward-linkage hierarchical clustering, then annotate each cluster
 with a shape label (up_early, down_late, flat_high, …).
 
 The reusable building blocks (data prep, GP smoothing, shape classification,
-k-selection, plotting) live in ``alphagenome_pytorch.plotting.splicing`` so they
-are shared with the splice_trajectory_clustering / splice_trajectory_type_eval
-notebooks. This script is the command-line driver around them.
+k-selection) live in ``alphagenome_pytorch.clustering``, and the plotting helper
+in ``alphagenome_pytorch.plotting.splicing``, so they are shared with the
+splice_trajectory_clustering notebook. This script is the command-line driver
+around them.
 
 Outputs
 -------

@@ -1,11 +1,13 @@
 """Plotting utilities for splicing data.
 """
 
+import os
 import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import ticker
 from matplotlib.ticker import MaxNLocator
 import logging
 
@@ -218,10 +220,8 @@ CHR_SIZES = {
 }
 
 
-# ── Trajectory-clustering constants live in alphagenome_pytorch.clustering ──────
-from alphagenome_pytorch.clustering import (  # noqa: F401  (re-exported for back-compat)
-    T_GRID, SHAPE_COLORS, SHAPE_ORDER,
-)
+# Trajectory-clustering constants used by save_cluster_plots() below.
+from alphagenome_pytorch.clustering import T_GRID, SHAPE_COLORS, SHAPE_ORDER
 
 def _normalize_tissue_subset(tissue_subset):
     """Return a de-duplicated list of tissue names or None."""
@@ -1472,18 +1472,656 @@ def plot_usage_density(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Genomic-overlap category plots
+# (paired loading/computation functions live in alphagenome_pytorch.evaluation.splicing)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _short_feature_label(category):
+    """Shorten a ';'-joined GTF feature-overlap category for axis labels."""
+    return (category
+        .replace('five_prime_utr', "5'UTR")
+        .replace('three_prime_utr', "3'UTR")
+        .replace("CDS;exon", "exon;CDS")
+        .replace("CDS;5'UTR", "5'UTR;CDS")
+        .replace("CDS;3'UTR", "3'UTR;CDS")
+        .replace(';', ' | ')
+    )
+
+
+def plot_auprc_by_category_all_species(species_dfs, sorted_cats, min_positives=0, fig_size=(6, 5), out_dir=None):
+    """Per-class AUPRC (top row) and n_positives (bottom row) bars, one column per species."""
+    colors = CLASS_COLORS
+    class_names = CLASS_LABELS
+    bar_width = 0.2
+    offsets = np.linspace(-1.5 * bar_width, 1.5 * bar_width, 4)
+    labels = [_short_feature_label(c) for c in sorted_cats]
+    x = np.arange(len(sorted_cats))
+
+    species_list = list(species_dfs.keys())
+    n_species = len(species_list)
+    fig, axes = plt.subplots(
+        2, n_species,
+        figsize=(fig_size[0] * n_species, fig_size[1]),
+        gridspec_kw={'height_ratios': [1, 1]}
+    )
+    if n_species == 1:
+        axes = axes[:, np.newaxis]
+    fig.subplots_adjust(hspace=0.08, wspace=0.35)
+
+    for col, sp in enumerate(species_list):
+        auprc_df = species_dfs[sp]
+        auprc_df = auprc_df[auprc_df['n_positives'] > min_positives]
+        ax1, ax2 = axes[0, col], axes[1, col]
+
+        for ci in range(4):
+            sub = auprc_df[auprc_df['class_label'] == ci].set_index('category')
+            y = [sub.loc[cat, 'auprc'] if cat in sub.index else np.nan for cat in sorted_cats]
+            ax1.bar(x + offsets[ci], y, width=bar_width, color=colors[ci], label=class_names[ci])
+
+        ax1.set_title(sp.capitalize(), fontsize=12, fontweight='normal', pad=6)
+        ax1.set_ylim(0, 1.05)
+        ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.2))
+        ax1.grid(axis='y', linewidth=0.5, linestyle='--')
+        ax1.spines[['top', 'right']].set_visible(False)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([])
+        ax1.set_xlim(-0.5, len(sorted_cats) - 0.5)
+        if col == 0:
+            ax1.set_ylabel('AUPRC', fontsize=11)
+        else:
+            ax1.set_yticklabels([])
+        if col == n_species - 1:
+            ax1.legend(fontsize=8, framealpha=0.7, loc='lower left',
+                       bbox_to_anchor=(1.02, 0), borderaxespad=0)
+
+        for ci in range(4):
+            sub = auprc_df[auprc_df['class_label'] == ci].set_index('category')
+            counts = [sub.loc[cat, 'n_positives'] if cat in sub.index else 0 for cat in sorted_cats]
+            ax2.bar(x + offsets[ci], counts, width=bar_width, color=colors[ci])
+
+        ax2.grid(axis='y', linewidth=0.5, linestyle='--')
+        ax2.spines[['top', 'right']].set_visible(False)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(labels, rotation=25, ha='right', fontsize=10)
+        ax2.set_xlim(-0.5, len(sorted_cats) - 0.5)
+        if col == 0:
+            ax2.set_ylabel('N sites', fontsize=11)
+            ax2.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f'{int(v):,}'))
+        else:
+            ax2.set_yticklabels([])
+
+    if out_dir is not None:
+        plt.savefig(os.path.join(out_dir, 'auprc_by_category_all_species.png'), bbox_inches='tight', dpi=150)
+    plt.show()
+
+
+def plot_auprc_by_category_all_species_summary(species_dfs, sorted_cats, min_positives=0, fig_size=(6, 5), colors_cats=None, out_dir=None):
+    """Median AUPRC across classes (top row) and total sites (bottom row), one column per species."""
+    labels = [_short_feature_label(c) for c in sorted_cats]
+    x = np.arange(len(sorted_cats))
+
+    species_list = list(species_dfs.keys())
+    n_species = len(species_list)
+    fig, axes = plt.subplots(
+        2, n_species,
+        figsize=(fig_size[0] * n_species, fig_size[1]),
+        gridspec_kw={'height_ratios': [1, 1]}
+    )
+    if n_species == 1:
+        axes = axes[:, np.newaxis]
+    fig.subplots_adjust(hspace=0.08, wspace=0.35)
+
+    for col, sp in enumerate(species_list):
+        auprc_df = species_dfs[sp]
+        auprc_df = auprc_df[auprc_df['n_positives'] > min_positives]
+        ax1, ax2 = axes[0, col], axes[1, col]
+
+        summary = (auprc_df[auprc_df['category'].isin(sorted_cats)]
+            .groupby('category')
+            .agg(median_auprc=('auprc', 'median'), total_sites=('n_positives', 'sum'))
+        )
+
+        y       = [summary.loc[cat, 'median_auprc'] if cat in summary.index else np.nan for cat in sorted_cats]
+        counts  = [summary.loc[cat, 'total_sites']  if cat in summary.index else 0       for cat in sorted_cats]
+
+        if colors_cats is not None:
+            bar_colors = [colors_cats.get(cat, '#378ADD') for cat in sorted_cats]
+        else:
+            bar_colors = ['#378ADD'] * len(sorted_cats)
+        ax1.bar(x, y, color=bar_colors, width=0.6)
+        ax1.set_title(sp.capitalize(), fontsize=12, fontweight='normal', pad=6)
+        ax1.set_ylim(0, 1.05)
+        ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.2))
+        ax1.grid(axis='y', linewidth=0.5, linestyle='--')
+        ax1.spines[['top', 'right']].set_visible(False)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([])
+        if col == 0:
+            ax1.set_ylabel('AUPRC', fontsize=11)
+        else:
+            ax1.set_yticklabels([])
+
+        if colors_cats is not None:
+            bar_colors = [colors_cats.get(cat, '#AAAAAA') for cat in sorted_cats]
+        else:
+            bar_colors = ["#AAAAAA"] * len(sorted_cats)
+        ax2.bar(x, counts, color=bar_colors, width=0.6)
+        ax2.grid(axis='y', linewidth=0.5, linestyle='--')
+        ax2.spines[['top', 'right']].set_visible(False)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(labels, rotation=25, ha='right', fontsize=10)
+        if col == 0:
+            ax2.set_ylabel('Total sites', fontsize=11)
+            ax2.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f'{int(v):,}'))
+        else:
+            ax2.set_yticklabels([])
+
+    if out_dir is not None:
+        plt.savefig(os.path.join(out_dir, 'auprc_by_category_all_species_summary.png'), bbox_inches='tight', dpi=150)
+    plt.show()
+
+
+def plot_pearson_r_by_category_all_species(species_dfs, sorted_cats, min_positives=0, fig_size=(6, 5), colors_cats=None, out_dir=None):
+    """Median usage Pearson r (top row) and total sites (bottom row), one column per species."""
+    labels = [_short_feature_label(c) for c in sorted_cats]
+    x = np.arange(len(sorted_cats))
+
+    species_list = list(species_dfs.keys())
+    n_species = len(species_list)
+    fig, axes = plt.subplots(
+        2, n_species,
+        figsize=(fig_size[0] * n_species, fig_size[1]),
+        gridspec_kw={'height_ratios': [1, 1]}
+    )
+    if n_species == 1:
+        axes = axes[:, np.newaxis]
+    fig.subplots_adjust(hspace=0.08, wspace=0.35)
+
+    for col, sp in enumerate(species_list):
+        pearson_r_df = species_dfs[sp]
+        pearson_r_df = pearson_r_df[pearson_r_df['n_sites'] > min_positives]
+        ax1, ax2 = axes[0, col], axes[1, col]
+
+        summary = (pearson_r_df[pearson_r_df['category'].isin(sorted_cats)]
+            .groupby('category')
+            .agg(median_pearson_r=('pearson_r', 'median'), total_sites=('n_sites', 'sum'))
+        )
+
+        y       = [summary.loc[cat, 'median_pearson_r'] if cat in summary.index else np.nan for cat in sorted_cats]
+        counts  = [summary.loc[cat, 'total_sites']  if cat in summary.index else 0       for cat in sorted_cats]
+
+        if colors_cats is not None:
+            bar_colors = [colors_cats.get(cat, '#378ADD') for cat in sorted_cats]
+        else:
+            bar_colors = ['#378ADD'] * len(sorted_cats)
+        ax1.bar(x, y, color=bar_colors, width=0.6)
+        ax1.set_title(sp.capitalize(), fontsize=12, fontweight='normal', pad=6)
+        ax1.set_ylim(0, 1.05)
+        ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.2))
+        ax1.grid(axis='y', linewidth=0.5, linestyle='--')
+        ax1.spines[['top', 'right']].set_visible(False)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([])
+        if col == 0:
+            ax1.set_ylabel('Pearson r', fontsize=11)
+        else:
+            ax1.set_yticklabels([])
+
+        if colors_cats is not None:
+            bar_colors = [colors_cats.get(cat, '#AAAAAA') for cat in sorted_cats]
+        else:
+            bar_colors = ["#AAAAAA"] * len(sorted_cats)
+        ax2.bar(x, counts, color=bar_colors, width=0.6)
+        ax2.grid(axis='y', linewidth=0.5, linestyle='--')
+        ax2.spines[['top', 'right']].set_visible(False)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(labels, rotation=25, ha='right', fontsize=10)
+        if col == 0:
+            ax2.set_ylabel('Total sites', fontsize=11)
+            ax2.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f'{int(v):,}'))
+        else:
+            ax2.set_yticklabels([])
+
+    if out_dir is not None:
+        plt.savefig(os.path.join(out_dir, 'pearson_r_by_category_all_species_summary.png'), bbox_inches='tight', dpi=150)
+    plt.show()
+
+
+def plot_splice_site_usage_by_tissue(
+    df_all,
+    site_coords,
+    data_config,
+    tissue_order=None,
+    tissue_colors=None,
+    figsize=None,
+    title=None,
+    verbose=False,
+):
+    """
+    Plot splice site dynamics with one tissue per subplot for a single site.
+    Displays both true (solid line) and predicted (dotted line) usage.
+
+    Args:
+        df_all: DataFrame with splice site data (species, chromosome, position, strand,
+                condition columns, true_usage, pred_usage)
+        site_coords: Site coordinate string. Format: "species chrom:pos[:strand]" (e.g., "mouse 1:15188:+")
+                     Strand is optional; if not specified, all strands included.
+        data_config: Config dict with condition_labels mapping for each species
+        tissue_order: List of tissues in desired order
+        tissue_colors: Dict mapping tissue names to colors
+        figsize: Tuple of (width, height) or None for auto
+        title: Figure title (auto-generated if None)
+        verbose: If True, print condition information
+
+    Returns:
+        matplotlib Figure object
+    """
+    parts = site_coords.strip().split()
+    if len(parts) != 2:
+        raise ValueError(f"Invalid coordinate format '{site_coords}'. Expected 'species chrom:pos[:strand]'")
+
+    species = parts[0].lower()
+    chrom_pos_strand = parts[1].split(':')
+
+    if len(chrom_pos_strand) < 2 or len(chrom_pos_strand) > 3:
+        raise ValueError(f"Invalid chrom:pos[:strand] format in '{site_coords}'")
+
+    chrom = chrom_pos_strand[0]
+    try:
+        pos = int(chrom_pos_strand[1])
+    except ValueError:
+        raise ValueError(f"Invalid position in '{site_coords}'")
+
+    mask = (df_all['species'] == species) & (df_all['chromosome'] == str(chrom)) & (df_all['position'] == pos)
+    df_site = df_all[mask].copy()
+
+    if df_site.empty:
+        raise ValueError(f"No data found for {species} {chrom}:{pos}")
+
+    cond_col = next((c for c in df_site.columns if "cond" in c.lower()), None)
+    if cond_col is None:
+        raise ValueError(f"No condition column found for {species} {chrom}:{pos}")
+
+    if tissue_order is None:
+        tissue_order = TISSUE_ORDER
+    if tissue_colors is None:
+        tissue_colors = TISSUE_COLORS
+
+    tissue_list = []
+    timepoint_list = []
+
+    for idx, row in df_site.iterrows():
+        cond_idx = row[cond_col]
+        cond_labels = data_config.get(species, {})
+        idx_to_name = {v: k for k, v in cond_labels.items()}
+        cond_name = idx_to_name.get(int(cond_idx), None)
+
+        if cond_name:
+            tissue = cond_name.rsplit('_', 1)[0] if '_' in cond_name else cond_name
+            try:
+                tp = int(cond_name.rsplit('_', 1)[1])
+            except (IndexError, ValueError):
+                tp = None
+            tissue_list.append(tissue)
+            timepoint_list.append(tp)
+        else:
+            tissue_list.append(None)
+            timepoint_list.append(None)
+
+    df_site['tissue'] = tissue_list
+    df_site['timepoint'] = timepoint_list
+    df_site = df_site.dropna(subset=['tissue', 'timepoint'])
+    df_site['timepoint'] = df_site['timepoint'].astype(int)
+
+    tissues = tissue_order
+    all_tps = sorted(df_site['timepoint'].unique())
+
+    if not tissues:
+        raise ValueError(f"No valid tissue-timepoint combinations found for {species} {chrom}:{pos}")
+
+    if verbose:
+        print(f"\n{species} {chrom}:{pos}")
+        print(f"  Total data points: {len(df_site)}")
+        print(f"  Tissues present: {', '.join(tissues)}")
+        print(f"  Timepoints: {', '.join(map(str, all_tps))}")
+
+    n_tissues = len(tissues)
+    n_cols = min(3, n_tissues)
+    n_rows = (n_tissues + n_cols - 1) // n_cols
+
+    if figsize is None:
+        figsize = (n_cols * 5, n_rows * 4)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+
+    for tissue_idx, tissue in enumerate(tissues):
+        ax = axes[tissue_idx]
+
+        tissue_data = df_site[df_site['tissue'] == tissue]
+        color = tissue_colors.get(tissue, '#808080')
+
+        if tissue_data.empty:
+            ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=11, color='lightgrey')
+            ax.grid(axis='y', alpha=0.3, linestyle='--')
+            ax.set_xlim(all_tps[0] - 0.5, all_tps[-1] + 0.5)
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_xlabel('Timepoint', fontsize=10)
+            ax.set_ylabel('Usage', fontsize=10)
+            ax.set_title(f'{tissue}', fontsize=11)
+            continue
+
+        for metric_type, linestyle, marker, label in [
+            ('true_usage', '-', 'o', 'True'),
+            ('pred_usage', '--', 'x', 'Predicted')
+        ]:
+            grouped = tissue_data.groupby('timepoint')[metric_type].agg(['mean', 'std', 'count']).reset_index()
+            grouped['std'] = grouped['std'].fillna(0)
+
+            x_coords = grouped['timepoint']
+
+            ax.fill_between(
+                x_coords,
+                grouped['mean'] - grouped['std'],
+                grouped['mean'] + grouped['std'],
+                color=color,
+                alpha=0.12,
+                linewidth=0
+            )
+
+            ax.plot(x_coords, grouped['mean'],
+                    color=color, linewidth=1.5,
+                    linestyle=linestyle,
+                    marker=marker, markersize=4,
+                    alpha=0.7, zorder=2, label=label)
+
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        ax.set_xlim(all_tps[0] - 0.5, all_tps[-1] + 0.5)
+        ax.set_ylim(-0.05, 1.05)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+        ax.set_xlabel('Timepoint', fontsize=10)
+        ax.set_ylabel('Usage', fontsize=10)
+        ax.set_title(f'{tissue}', fontsize=11)
+
+    for idx in range(n_tissues, len(axes)):
+        axes[idx].set_visible(False)
+
+    handles = [
+        plt.Line2D([0], [0], color='black', linewidth=1.5, linestyle='-', marker='o', markersize=4, label='True'),
+        plt.Line2D([0], [0], color='black', linewidth=1.5, linestyle='--', marker='x', markersize=4, label='Predicted')
+    ]
+    fig.legend(handles=handles, loc='upper right', fontsize=10, framealpha=0.9)
+
+    if title is None:
+        title = f'{species} {chrom}:{pos}'
+    fig.suptitle(title, fontsize=14, y=0.995)
+
+    plt.tight_layout()
+
+    return fig
+
+
+def plot_splice_site_dynamics_from_usage_results(
+    usage_results,
+    site_coords,
+    metric='both',  # 'both' plots true (solid) + pred (dotted)
+    species_order=None,
+    tissue_order=None,
+    tissue_colors=None,
+    figsize=None,
+    title=None,
+    jitter=0.0,
+    verbose=False,
+):
+    """Plot true/predicted usage trajectories directly from the raw ``usage_results``
+    dict produced by the usage-prediction parsing step (per-site chr_pos/tissues/
+    timepoints/trues/preds arrays), rather than from a merged DataFrame."""
+    if isinstance(site_coords, str):
+        site_coords = [site_coords]
+
+    if tissue_order is None:
+        tissue_order = TISSUE_ORDER
+    if tissue_colors is None:
+        tissue_colors = TISSUE_COLORS
+    if species_order is None:
+        species_order = list(usage_results.keys())
+
+    # Build/cache per-species dataframe from usage_results
+    sp_df_cache = {}
+    for sp, sp_data in usage_results.items():
+        chr_pos = np.asarray(sp_data['chr_pos']).astype(str)
+        cond_ids = np.asarray(sp_data['cond_ids'])
+        tissues = np.asarray(sp_data['tissues'])
+        timepoints = np.asarray(sp_data['timepoints'])
+        trues = np.asarray(sp_data['trues'], dtype=float)
+        preds = np.asarray(sp_data['preds'], dtype=float)
+
+        split = np.char.partition(chr_pos, ':')
+        chrom = split[:, 0]
+        pos = split[:, 2].astype(int)
+
+        df_sp = pd.DataFrame({
+            'Species': sp,
+            'Chromosome': chrom,
+            'Position': pos,
+            'condition': cond_ids,
+            'tissue': tissues,
+            'timepoint': pd.to_numeric(timepoints, errors='coerce'),
+            'true': trues,
+            'pred': preds,
+        }).dropna(subset=['timepoint'])
+        df_sp['timepoint'] = df_sp['timepoint'].astype(int)
+        df_sp['SSE'] = (df_sp['pred'] - df_sp['true']) ** 2
+        df_sp['abs_error'] = np.abs(df_sp['pred'] - df_sp['true'])
+
+        sp_df_cache[sp] = df_sp
+
+    # Parse coordinates
+    site_filters = []
+    for coord in site_coords:
+        parts = coord.strip().split()
+        if len(parts) != 2:
+            print(f"Warning: Invalid coordinate format '{coord}'. Expected 'species chrom:pos' or 'species chrom:start-end'")
+            continue
+
+        species = parts[0].lower()
+        if species not in sp_df_cache:
+            print(f"Warning: Species '{species}' not found in usage_results")
+            continue
+
+        cparts = parts[1].split(':')
+        if len(cparts) < 2:
+            print(f"Warning: Invalid coordinate '{coord}'")
+            continue
+
+        chrom = cparts[0]
+        pos_or_range = cparts[1]
+
+        if '-' in pos_or_range:
+            try:
+                start, end = map(int, pos_or_range.split('-'))
+            except ValueError:
+                print(f"Warning: Invalid range in '{coord}'")
+                continue
+
+            df_sp = sp_df_cache[species]
+            mask = (
+                (df_sp['Chromosome'] == str(chrom)) &
+                (df_sp['Position'] >= start) &
+                (df_sp['Position'] <= end)
+            )
+            positions = sorted(df_sp.loc[mask, 'Position'].unique())
+            if len(positions) == 0:
+                print(f"Warning: No sites found in range {coord}")
+                continue
+
+            for p in positions:
+                site_filters.append((species, str(chrom), int(p)))
+            print(f"Found {len(positions)} sites in {coord}")
+        else:
+            try:
+                pos = int(pos_or_range)
+            except ValueError:
+                print(f"Warning: Invalid position in '{coord}'")
+                continue
+            site_filters.append((species, str(chrom), pos))
+
+    if not site_filters:
+        print("No valid site coordinates provided")
+        return None
+
+    sp_rank = {sp: i for i, sp in enumerate(species_order)}
+    site_filters = sorted(site_filters, key=lambda x: (sp_rank.get(x[0], 10**9), x[1], x[2]))
+
+    n_sites = len(site_filters)
+    n_cols = min(3, n_sites)
+    n_rows = (n_sites + n_cols - 1) // n_cols
+
+    if figsize is None:
+        figsize = (n_cols * 5, n_rows * 4)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+
+    all_tissues_found = set()
+
+    valid_metrics = {'SSE', 'true', 'pred', 'abs_error', 'both'}
+    metric_col = metric if metric in valid_metrics else 'both'
+    if metric not in valid_metrics:
+        print(f"Warning: metric '{metric}' not recognized. Using 'both'.")
+
+    for site_idx, (species, chrom, pos) in enumerate(site_filters):
+        ax = axes[site_idx]
+        df_site = sp_df_cache[species]
+        df_site = df_site[(df_site['Chromosome'] == chrom) & (df_site['Position'] == pos)].copy()
+
+        if df_site.empty:
+            ax.text(0.5, 0.5, f'No data\n{species} {chrom}:{pos}', ha='center', va='center', transform=ax.transAxes)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            continue
+
+        tissues_here = [t for t in tissue_order if t in df_site['tissue'].values]
+        all_tissues_found.update(tissues_here)
+
+        all_tps = sorted(df_site['timepoint'].unique())
+
+        if verbose:
+            print(f"\n{species} {chrom}:{pos}")
+            print(f"  Total data points: {len(df_site)}")
+            print(f"  Tissues present: {', '.join(tissues_here)}")
+            print(f"  Timepoints: {', '.join(map(str, all_tps))}")
+
+        n_tissues = len(tissues_here)
+        if jitter > 0 and n_tissues > 1:
+            tissue_offsets = {
+                tissue: jitter * (i - (n_tissues - 1) / 2) / (n_tissues - 1)
+                for i, tissue in enumerate(tissues_here)
+            }
+        else:
+            tissue_offsets = {tissue: 0.0 for tissue in tissues_here}
+
+        for tissue in tissues_here:
+            tissue_data = df_site[df_site['tissue'] == tissue]
+            color = tissue_colors.get(tissue, '#808080')
+
+            if metric_col == 'both':
+                grouped = tissue_data.groupby('timepoint')[['true', 'pred']].agg(['mean', 'std']).reset_index()
+                grouped[('true', 'std')] = grouped[('true', 'std')].fillna(0)
+                grouped[('pred', 'std')] = grouped[('pred', 'std')].fillna(0)
+                x_coords = grouped['timepoint'] + tissue_offsets[tissue]
+
+                # true: solid
+                ax.plot(
+                    x_coords, grouped[('true', 'mean')],
+                    color=color, linewidth=2, linestyle='-',
+                    marker='o', markersize=3, alpha=0.95, zorder=3
+                )
+                # pred: dotted
+                ax.plot(
+                    x_coords, grouped[('pred', 'mean')],
+                    color=color, linewidth=2, linestyle=':',
+                    marker='o', markersize=3, alpha=0.95, zorder=3
+                )
+            else:
+                grouped = tissue_data.groupby('timepoint')[metric_col].agg(['mean', 'std']).reset_index()
+                grouped['std'] = grouped['std'].fillna(0)
+                x_coords = grouped['timepoint'] + tissue_offsets[tissue]
+
+                ax.fill_between(
+                    x_coords,
+                    grouped['mean'] - grouped['std'],
+                    grouped['mean'] + grouped['std'],
+                    color=color,
+                    alpha=0.1,
+                    linewidth=0
+                )
+                ax.plot(
+                    x_coords, grouped['mean'],
+                    color=color, linewidth=2, marker='o', markersize=4,
+                    alpha=0.9, zorder=2
+                )
+
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        if len(all_tps) > 0:
+            ax.set_xlim(all_tps[0] - 0.5, all_tps[-1] + 0.5)
+
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+        if metric_col in ('true', 'pred', 'abs_error', 'both'):
+            ax.set_ylim(-0.05, 1.05)
+
+        ax.set_xlabel('Timepoint', fontsize=10)
+        ax.set_ylabel('Usage' if metric_col == 'both' else metric_col, fontsize=10)
+        ax.set_title(f'{species} {chrom}:{pos}', fontsize=11)
+
+    for idx in range(n_sites, len(axes)):
+        axes[idx].set_visible(False)
+
+    # Tissue color legend
+    if all_tissues_found:
+        legend_tissues = [t for t in tissue_order if t in all_tissues_found]
+        tissue_handles = [
+            plt.Line2D([0], [0], color=tissue_colors.get(t, '#808080'),
+                       linewidth=2, marker='o', markersize=4, label=t)
+            for t in legend_tissues
+        ]
+        fig.legend(
+            handles=tissue_handles, loc='center left', bbox_to_anchor=(1.0, 0.6),
+            fontsize=10, framealpha=0.9, title='Tissue'
+        )
+
+    # Line-style legend (only for true/pred mode)
+    if metric_col == 'both':
+        style_handles = [
+            plt.Line2D([0], [0], color='black', linewidth=2, linestyle='-', label='True'),
+            plt.Line2D([0], [0], color='black', linewidth=2, linestyle=':', label='Predicted'),
+        ]
+        fig.legend(
+            handles=style_handles, loc='center left', bbox_to_anchor=(1.0, 0.35),
+            fontsize=10, framealpha=0.9, title='Line type'
+        )
+
+    if title is None:
+        if metric_col == 'both':
+            title = 'True (solid) and Predicted (dotted) usage dynamics' if n_sites == 1 else f'True/Predicted dynamics for {n_sites} splice sites'
+        else:
+            title = f'{metric_col} dynamics across tissues' if n_sites == 1 else f'{metric_col} dynamics for {n_sites} splice sites'
+    fig.suptitle(title, fontsize=14, y=0.995)
+
+    plt.tight_layout(rect=[0, 0, 0.85, 1] if all_tissues_found else None)
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Developmental splice-trajectory clustering pipeline
 # (moved from scripts/cluster_trajectories.py so the script and the
 #  splice_trajectory_clustering / splice_trajectory_type_eval notebooks share them)
 # ══════════════════════════════════════════════════════════════════════════════
 
-
-# ── Trajectory-clustering building blocks live in alphagenome_pytorch.clustering ─
-# (re-exported here for backwards compatibility; import from .clustering in new code)
-from alphagenome_pytorch.clustering import (  # noqa: F401
-    prepare_trajectories, filter_to_split, smooth_trajectory_gp,
-    smooth_all_trajectories, classify_cluster_shape, select_k_gap,
-)
 
 def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
                        n_clusters, out_dir, prefix, label, random_seed=42,
