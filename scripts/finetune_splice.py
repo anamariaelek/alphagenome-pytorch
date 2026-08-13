@@ -710,7 +710,7 @@ def create_dataloaders(
         pin_memory=True,
         collate_fn=collate_splice,
         prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0,
+        persistent_workers=False,  # workers restart each epoch, clearing FASTA/CoW state
     )
 
     return train_loader, val_loader, train_sampler, val_sampler
@@ -1446,7 +1446,10 @@ def main() -> None:
                     wandb_run_id=logger.wandb_run_id,
                     **usage_extra,
                 )
-                # Also save numbered checkpoint for this best epoch
+                print(f"  Saved best model (val_loss={val_loss:.4f})")
+
+            # Save numbered checkpoint every save_every epochs (regardless of whether it's best)
+            if epoch % args.save_every == 0:
                 save_checkpoint(
                     path=output_dir / f"epoch_{epoch:02d}.pth",
                     epoch=epoch,
@@ -1461,7 +1464,7 @@ def main() -> None:
                     wandb_run_id=logger.wandb_run_id,
                     **usage_extra,
                 )
-                print(f"  Saved best model (val_loss={val_loss:.4f})")
+                print(f"  Saved epoch_{epoch:02d}.pth (val_loss={val_loss:.4f})")
             
             # Aggressive cleanup at the end of each epoch to prevent RAM accumulation
             import gc
