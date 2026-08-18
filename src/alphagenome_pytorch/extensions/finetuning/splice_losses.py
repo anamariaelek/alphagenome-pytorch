@@ -96,6 +96,7 @@ def splice_usage_loss(
     usage_coverage: Tensor | None = None,
     traj_min_timepoints: int = 3,
     traj_var_floor: float = 1e-3,
+    traj_exc_floor: float = 0.10,
 ) -> tuple:
     """Masked loss for per-condition splice-site usage.
 
@@ -112,10 +113,14 @@ def splice_usage_loss(
         When *usage_loss_weights* is provided, the loss can combine multiple
         components in a single call. Supported keys are:
 
-        - ``bce``: BCE on absolute usage values.
-        - ``delta_mse``: MSE on deviation from the per-site mean.
-        - ``trajectory_pearson``: ``1 - PearsonR`` over each site's observed
-            condition trajectory, averaged across sites.
+        - ``bce``: BCE on absolute usage values (level) — every observed site.
+        - ``delta_mse``: per-(site,tissue) centered MSE (trajectory *magnitude*),
+            restricted to trajectories whose true shape clears the ``trajectory
+            excursion`` filter (see :func:`_trajectory_excursion`) — i.e. sites
+            that are genuinely dynamic rather than flat, noisy, or a single
+            outlier timepoint.
+        - ``trajectory_pearson``: ``1 - PearsonR`` per (site,tissue) (trajectory
+            *direction*), restricted to the same excursion-filtered trajectories.
 
         Missing keys default to ``0.0`` when a weight dictionary is passed.
 
@@ -197,11 +202,9 @@ def splice_usage_loss(
         total_loss = (predictions * 0.0).sum()
         metrics_dict = {"correlation": float("nan"), "n_valid": int(n_valid)}
 
-        bce_w    = float(usage_loss_weights.get("bce", 0.0))
-        delta_w  = float(usage_loss_weights.get("delta_mse", 0.0))
-        pear_w   = float(usage_loss_weights.get("trajectory_pearson", 0.0))
-        shape_w  = float(usage_loss_weights.get("trajectory_shape", 0.0))
-        smooth_w = float(usage_loss_weights.get("traj_smooth", 0.0))
+        bce_w  = float(usage_loss_weights.get("bce", 0.0))
+        delta_w = float(usage_loss_weights.get("delta_mse", 0.0))
+        pear_w = float(usage_loss_weights.get("trajectory_pearson", 0.0))
 
         gathered_sigmoid = torch.sigmoid(gathered)
 
@@ -224,40 +227,29 @@ def splice_usage_loss(
             metrics_dict["correlation"] = torch.corrcoef(torch.stack([pred_vals, true_vals]))[0, 1].item()
 
         if delta_w != 0.0:
-            delta_loss = _per_tissue_delta_mse(
-                gathered_sigmoid, usage_values, final_mask, groups)
+            delta_loss, delta_metrics = _per_tissue_delta_mse(
+                gathered_sigmoid, usage_values, final_mask, groups,
+                coverage=usage_coverage, min_tp=traj_min_timepoints, exc_floor=traj_exc_floor)
             total_loss = total_loss + delta_w * delta_loss
             metrics_dict["delta_loss"] = delta_loss.item()
-
-        if shape_w != 0.0:
-            shape_loss, shape_metrics = _per_tissue_shape_loss(
-                gathered_sigmoid, usage_values, final_mask, groups,
-                coverage=usage_coverage, min_tp=traj_min_timepoints, var_floor=traj_var_floor)
-            total_loss = total_loss + shape_w * shape_loss
-            metrics_dict["trajectory_loss"] = shape_loss.item()
-            metrics_dict.update(shape_metrics)
+            metrics_dict.update(delta_metrics)
 
         if pear_w != 0.0:
             pear_loss, pear_metrics = _per_tissue_pearson_loss(
                 gathered_sigmoid, usage_values, final_mask, groups,
-                min_tp=traj_min_timepoints, var_floor=traj_var_floor)
+                min_tp=traj_min_timepoints, var_floor=traj_var_floor, exc_floor=traj_exc_floor)
             total_loss = total_loss + pear_w * pear_loss
             metrics_dict.setdefault("trajectory_loss", pear_loss.item())
             metrics_dict.update(pear_metrics)
 
-        if smooth_w != 0.0:
-            smooth_loss = _per_tissue_smoothness(gathered_sigmoid, groups)
-            total_loss = total_loss + smooth_w * smooth_loss
-            metrics_dict["smooth_loss"] = smooth_loss.item()
-
         # Always report the within-tissue temporal Pearson as a monitoring metric,
-        # even when no shape term is weighted (this is the number that actually
+        # even when no trajectory term is weighted (this is the number that actually
         # reflects trajectory learning, unlike the pooled 'correlation').
         if "trajectory_corr" not in metrics_dict and tissue_cond_groups is not None:
             with torch.no_grad():
                 _, _pm = _per_tissue_pearson_loss(
                     gathered_sigmoid, usage_values, final_mask, groups,
-                    min_tp=traj_min_timepoints, var_floor=traj_var_floor)
+                    min_tp=traj_min_timepoints, var_floor=traj_var_floor, exc_floor=traj_exc_floor)
             metrics_dict["trajectory_corr"] = _pm.get("trajectory_corr", float("nan"))
             metrics_dict["n_trajectory_sites"] = _pm.get("n_trajectory_sites", 0)
 
@@ -303,23 +295,74 @@ def _tissue_centered(pred: Tensor, tgt: Tensor, m: Tensor, idx: list[int]):
     return dp, dt, mm, n
 
 
-def _per_tissue_delta_mse(pred, tgt, mask, groups) -> Tensor:
-    """MSE on per-(site,tissue) mean-centered trajectories, over observed timepoints.
-    Isolates temporal shape from tissue-level offsets (unlike a global-mean delta)."""
-    se_sum = (pred * 0.0).sum()
-    n_sum = pred.new_zeros(())
-    for idx in groups:
-        dp, dt, mm, _ = _tissue_centered(pred, tgt, mask, idx)
-        se_sum = se_sum + ((dp - dt) ** 2 * mm).sum()
-        n_sum = n_sum + mm.sum()
-    return se_sum / n_sum.clamp(min=1.0)
+def _masked_median_filter(x: Tensor, mask: Tensor, win: int = 5) -> Tensor:
+    """Median-filter ``x`` along its last axis (positions are assumed timepoint-
+    ordered; real gaps between observed timepoints are ignored — a window spans
+    ``win`` *observed-or-not* positions, not ``win`` timepoints of elapsed time).
+
+    Only positions where ``mask`` is True participate as neighbors, so an isolated
+    1-2 point noisy spike is outvoted by its (masked-valid) neighbors rather than
+    distorting the filtered value — unlike a boxcar/mean filter, which would spread
+    the outlier's damage into its neighbors instead of rejecting it.
+
+    ``x``, ``mask``: same shape ``(..., T)``. Returns filtered ``x``, shape ``(..., T)``;
+    positions with zero valid neighbors in their window return 0.
+
+    ``win`` is capped at ``T`` (kept odd) — otherwise every position's window would
+    span the entire (short) sequence, flattening even a clean trend to its own
+    median (e.g. a 3-point ``[0.0, 0.5, 1.0]`` trend filtered at ``win=5`` collapses
+    to all-zero deviation from baseline).
+    """
+    T = x.shape[-1]
+    win = max(1, min(win, T if T % 2 == 1 else T - 1))
+    half = win // 2
+    x_nan = torch.where(mask.bool(), x, torch.full_like(x, float("nan")))
+    x_pad = F.pad(x_nan, (half, half), mode="constant", value=float("nan"))
+    windows = x_pad.unfold(-1, win, 1)                      # (..., T, win)
+    n_valid = (~torch.isnan(windows)).sum(-1)
+    filt = torch.nanmedian(windows, dim=-1).values
+    return torch.where(n_valid > 0, filt, torch.zeros_like(filt))
 
 
-def _per_tissue_shape_loss(pred, tgt, mask, groups, coverage=None,
-                           min_tp: int = 3, var_floor: float = 1e-3
-                           ) -> tuple[Tensor, dict[str, float]]:
-    """Per-(site,tissue) centered-MSE shape loss, weighted by the true trajectory's
-    amplitude (so dynamic sites dominate) and, optionally, mean read coverage."""
+def _trajectory_excursion(dt: Tensor, mm: Tensor, denom: Tensor, win: int = 5) -> Tensor:
+    """Max deviation from baseline of the median-filtered (``win``-point) centered
+    trajectory ``dt``, shape ``(..., T) -> (...)``.
+
+    Baseline is the mean of the FILTERED sequence, not the raw mean already baked
+    into ``dt`` — a single outlier timepoint pulls the raw mean along with it, so
+    measuring excursion against that raw-mean baseline would still overstate an
+    outlier's excursion even after the point itself is filtered out of the max/min
+    (recentering around the filtered sequence's own mean avoids this). The median
+    filter (not a mean/boxcar filter, which would only dilute an outlier rather
+    than reject it) makes this robust to isolated 1-2 point noisy timepoints while
+    still catching genuine monotonic trends *and* biphasic up-down/down-up swings
+    that return close to their starting value (which a plain start-vs-end
+    net-change statistic would incorrectly zero out).
+    """
+    dt_filt = _masked_median_filter(dt, mm, win=win)
+    mu_filt = (dt_filt * mm).sum(-1, keepdim=True) / denom.unsqueeze(-1)
+    dt_filt_c = dt_filt - mu_filt                        # recenter on the filtered mean
+    big = torch.finfo(dt.dtype).max / 4
+    exc_max = torch.where(mm.bool(), dt_filt_c, torch.full_like(dt_filt_c, -big)).max(-1).values
+    exc_min = torch.where(mm.bool(), dt_filt_c, torch.full_like(dt_filt_c, big)).min(-1).values
+    return torch.maximum(exc_max, -exc_min)
+
+
+def _per_tissue_delta_mse(pred, tgt, mask, groups, coverage=None,
+                          min_tp: int = 3, exc_floor: float = 0.10, median_win: int = 5,
+                          ) -> tuple[Tensor, dict[str, float]]:
+    """Per-(site,tissue) centered-MSE loss (trajectory *magnitude*), restricted to
+    trajectories whose true shape shows a genuine excursion from its own baseline
+    (see :func:`_trajectory_excursion`) — as opposed to (a) noise/wobble with no
+    net movement, or (b) an isolated 1-2 point measurement spike — and weighted
+    *equally* across all such eligible trajectories (not by amplitude), so a
+    handful of extreme-amplitude sites can't dominate a batch's gradient.
+
+    Sites that don't clear the excursion filter (the overwhelming majority — most
+    sites are flat) contribute nothing: this is deliberate, not a bug — a plain
+    unfiltered centered-MSE over *all* sites is dominated by the flat majority and
+    never learns real trajectory magnitude for the dynamic minority.
+    """
     num = (pred * 0.0).sum()
     wsum = pred.new_zeros(())
     n_traj = 0
@@ -327,9 +370,10 @@ def _per_tissue_shape_loss(pred, tgt, mask, groups, coverage=None,
         dp, dt, mm, n = _tissue_centered(pred, tgt, mask, idx)
         denom = n.clamp(min=1)
         se = ((dp - dt) ** 2).sum(-1) / denom               # (B, sites) per-traj MSE
-        var_t = (dt ** 2).sum(-1) / denom                   # true temporal variance
-        ok = (n >= min_tp) & (var_t > var_floor)
-        w = ok.to(pred.dtype) * var_t.clamp(min=0).sqrt()   # weight by true amplitude
+
+        excursion = _trajectory_excursion(dt, mm, denom, win=median_win)
+        ok = (n >= min_tp) & (excursion > exc_floor)
+        w = ok.to(pred.dtype)                                # equal weight per eligible site
         if coverage is not None:
             cov = coverage[..., idx].to(pred.dtype)
             w = w * (cov * mm).sum(-1) / denom              # mean coverage over obs tps
@@ -341,22 +385,34 @@ def _per_tissue_shape_loss(pred, tgt, mask, groups, coverage=None,
 
 
 def _per_tissue_pearson_loss(pred, tgt, mask, groups,
-                             min_tp: int = 3, var_floor: float = 1e-3, eps: float = 1e-8
+                             min_tp: int = 3, var_floor: float = 1e-3, eps: float = 1e-8,
+                             exc_floor: float = 0.10, median_win: int = 5,
                              ) -> tuple[Tensor, dict[str, float]]:
-    """1 - Pearson r per (site, tissue) over its timepoints, averaged. Vectorised."""
+    """1 - Pearson r per (site, tissue) over its timepoints, averaged. Vectorised.
+
+    Eligibility uses the same median-filtered excursion gate as
+    :func:`_per_tissue_delta_mse` (see :func:`_trajectory_excursion`), so noisy/
+    wobbly/outlier-corrupted "flat" trajectories don't get penalised (r -> 0) as if
+    they were flat *predictions* against genuinely dynamic targets. ``var_floor`` is
+    unrelated to eligibility — it only regularises the correlation's denominator so
+    a flat *prediction* (``var_p -> 0``) yields a bounded gradient instead of
+    blowing up.
+    """
     losses = []
     corrs = []
     for idx in groups:
         dp, dt, mm, n = _tissue_centered(pred, tgt, mask, idx)
+        denom = n.clamp(min=1)
         var_p = (dp ** 2).sum(-1)
         var_t = (dt ** 2).sum(-1)
         # Regularise the norms with var_floor *inside* the sqrt so a flat prediction
         # (var_p -> 0) yields r -> 0 with a bounded gradient (a bare eps blows up).
-        denom = (var_p + var_floor).sqrt() * (var_t + var_floor).sqrt()
-        r = (dp * dt).sum(-1) / denom                                 # (B, sites)
+        r_denom = (var_p + var_floor).sqrt() * (var_t + var_floor).sqrt()
+        r = (dp * dt).sum(-1) / r_denom                                # (B, sites)
         # Require only a non-flat TARGET (a flat prediction against a dynamic target
         # should be *penalised*, r -> 0, not skipped).
-        ok = (n >= min_tp) & (var_t > var_floor)
+        excursion = _trajectory_excursion(dt, mm, denom, win=median_win)
+        ok = (n >= min_tp) & (excursion > exc_floor)
         if ok.any():
             losses.append((1.0 - r)[ok])
             corrs.append(r[ok].detach())
@@ -365,22 +421,6 @@ def _per_tissue_pearson_loss(pred, tgt, mask, groups,
     loss = torch.cat(losses).mean()
     corr_mean = torch.cat(corrs).mean().item()
     return loss, {"trajectory_corr": corr_mean, "n_trajectory_sites": int(sum(l.numel() for l in losses))}
-
-
-def _per_tissue_smoothness(pred, groups) -> Tensor:
-    """Second-difference smoothness penalty on each predicted per-tissue trajectory.
-    Groups must be timepoint-ordered. Applied to all predicted timepoints (a prior,
-    independent of which are observed)."""
-    terms = []
-    for idx in groups:
-        if len(idx) < 3:
-            continue
-        p = pred[..., idx]
-        d2 = p[..., 2:] - 2.0 * p[..., 1:-1] + p[..., :-2]
-        terms.append((d2 ** 2).mean())
-    if not terms:
-        return (pred * 0.0).sum()
-    return torch.stack(terms).mean()
 
 
 def compute_splice_class_weights(

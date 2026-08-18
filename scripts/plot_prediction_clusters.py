@@ -91,8 +91,14 @@ def main():
             pfx = prefix(sp, organ, args.split)
             feat_path = os.path.join(out_dir, f"{pfx}_pred_gp_features.npy")
 
-            meta = pd.read_parquet(pcp, columns=["Chromosome", "Position", "pred_cluster", "pred_shape"])
+            meta = pd.read_parquet(pcp, columns=["Chromosome", "Position", "pred_cluster",
+                                                  "pred_shape", "ref_cluster"])
             meta["Chromosome"] = meta["Chromosome"].astype(str)
+            # Total size of the FIXED reference clustering predictions were assigned into
+            # (Ward cluster IDs are contiguous 1..N) — used so a given cluster ID gets the
+            # same tab20 color here as in the reference heatmap, even when (as is typical)
+            # not every reference cluster has a nearest predicted trajectory.
+            n_ref_clusters = int(meta["ref_cluster"].max())
 
             if os.path.exists(feat_path):
                 # Preferred: GP-smoothed predicted features (row-aligned to the parquet),
@@ -126,16 +132,16 @@ def main():
                 shape_of = m2.reset_index().drop_duplicates("pred_cluster").set_index("pred_cluster")["pred_shape"].to_dict()
                 src = "raw predicted SSE"
 
-            # Remap assigned reference-cluster ids to a contiguous 1..K over the clusters
-            # that actually received predictions (save_cluster_plots iterates 1..K).
+            # Keep the original reference-cluster IDs (no renumbering) so labels and
+            # colors line up exactly with the reference heatmap/profiles — only the
+            # clusters that actually received a predicted trajectory are plotted.
             present = sorted(pd.unique(pc))
-            remap = {old: i + 1 for i, old in enumerate(present)}
-            labels = np.array([remap[c] for c in pc], dtype=int)
-            cluster_shapes = {remap[old]: shape_of[old] for old in present}
+            cluster_shapes = {old: shape_of[old] for old in present}
 
-            save_cluster_plots(feats, labels, cluster_shapes, len(present), out_dir,
+            save_cluster_plots(feats, pc, cluster_shapes, len(present), out_dir,
                                f"{pfx}_pred", f"{sp}/{organ} [{args.split}] PREDICTED",
-                               heatmap_height=args.heatmap_height)
+                               heatmap_height=args.heatmap_height,
+                               cluster_ids=present, color_denom=n_ref_clusters)
             log.info("  [%s/%s] %s sites, %d clusters (%s) -> %s_pred_{heatmap,profiles}.png",
                      sp, organ, f"{len(feats):,}", len(present), src, pfx)
             n_ok += 1

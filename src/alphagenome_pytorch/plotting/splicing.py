@@ -2125,24 +2125,38 @@ def plot_splice_site_dynamics_from_usage_results(
 
 def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
                        n_clusters, out_dir, prefix, label, random_seed=42,
-                       heatmap_height=9.0):
+                       heatmap_height=9.0, cluster_ids=None, color_denom=None):
     """Save the clustering heatmap (``<prefix>_heatmap.png``) and the per-cluster
     shape-profile grid (``<prefix>_profiles.png``).
 
     ``heatmap_height`` caps the heatmap figure height (inches). The heatmap shows one
     row per site via ``imshow`` (which rescales to the axes), so a fixed compact height
     is used instead of scaling with the number of sites — otherwise large datasets
-    produce absurdly tall figures."""
+    produce absurdly tall figures.
+
+    ``cluster_ids`` overrides which cluster IDs to iterate over (default
+    ``range(1, n_clusters + 1)``). Pass the actual reference-cluster IDs when
+    plotting a subset of a larger *fixed* clustering (e.g. predictions assigned
+    by nearest-centroid to a reference Ward clustering) so the ``C#`` labels
+    line up with the reference plot instead of being renumbered 1..k.
+
+    ``color_denom`` overrides the tab20 color denominator (default ``n_clusters``).
+    Pass the *full* reference cluster count so a given cluster ID gets the
+    identical color whether or not every reference cluster is populated in this
+    particular plot (e.g. predictions covering only 65 of 80 reference clusters
+    still color cluster 74 the same as the 80-cluster reference plot does)."""
     import os
     import matplotlib.gridspec as gridspec
 
-    cc = [plt.cm.tab20(k / n_clusters) for k in range(n_clusters)]
+    cluster_ids = list(cluster_ids) if cluster_ids is not None else list(range(1, n_clusters + 1))
+    denom = color_denom or n_clusters
+    color_of = lambda k: plt.cm.tab20(((k - 1) % denom) / denom)
     rng = np.random.default_rng(random_seed)
 
     # ── Heatmap ──────────────────────────────────────────────────────────────
-    n_per = [(cluster_labels == k).sum() for k in range(1, n_clusters + 1)]
+    n_per = [(cluster_labels == k).sum() for k in cluster_ids]
     order = []
-    for k in range(1, n_clusters + 1):
+    for k in cluster_ids:
         idx_k = np.where(cluster_labels == k)[0]
         ctr   = features_v[cluster_labels == k].mean(axis=0)
         d     = np.linalg.norm(features_v[idx_k] - ctr, axis=1)
@@ -2154,10 +2168,10 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
     blocks = []
     bk     = []
     s      = 0
-    for k, nc in enumerate(n_per, 1):
+    for i, (k, nc) in enumerate(zip(cluster_ids, n_per)):
         blocks.append(fsort[s:s + nc])
         bk.append(k)
-        if k != n_clusters:
+        if i != len(cluster_ids) - 1:
             blocks.append(np.full((GAP, fsort.shape[1]), np.nan))
             bk.append(None)
         s += nc
@@ -2189,7 +2203,8 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
     ax_ht.set_xticks(range(len(T_GRID)))
     ax_ht.set_xticklabels([str(int(t)) for t in T_GRID], fontsize=8)
     ax_ht.set_yticks([])
-    ax_ht.set_title(f"GP SSE  |  {label}  |  {len(fsort):,} sites  |  k={n_clusters}",
+    k_lbl = f"k={len(cluster_ids)}" if denom == len(cluster_ids) else f"k={len(cluster_ids)}/{denom}"
+    ax_ht.set_title(f"GP SSE  |  {label}  |  {len(fsort):,} sites  |  {k_lbl}",
                     fontsize=10)
 
     ax_str.set_xlim(0, 1); ax_str.set_ylim(len(fsplit), 0); ax_str.axis("off")
@@ -2199,10 +2214,10 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
     _min_label_rows = 0.012 * len(fsplit)
     for k, y0, y1 in row_ranges:
         ax_str.add_patch(plt.Rectangle((0, y0), 1, y1 - y0,
-                                        color=cc[k-1], ec="none"))
+                                        color=color_of(k), ec="none"))
         if (y1 - y0) >= _min_label_rows:
             ax_lbl.text(1.0, (y0+y1)/2, f"C{k}", ha="right", va="center",
-                        fontsize=8, fontweight="bold", color=cc[k-1])
+                        fontsize=8, fontweight="bold", color=color_of(k))
 
     cb = plt.colorbar(im, cax=ax_cb, orientation="horizontal")
     cb.set_label("SSE", fontsize=8)
@@ -2217,15 +2232,16 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
     # ── Cluster profiles (ordered by shape, then descending mean SSE) ─────────
     _shape_rank = {s: i for i, s in enumerate(SHAPE_ORDER)}
     _sorted_clusters = sorted(
-        range(1, n_clusters + 1),
+        cluster_ids,
         key=lambda k: (
             _shape_rank.get(cluster_shapes[k], len(SHAPE_ORDER)),
             -float(features_v[cluster_labels == k].mean()),
         ),
     )
 
-    n_cols = min(5, n_clusters)
-    n_rows = (n_clusters + n_cols - 1) // n_cols
+    K = len(cluster_ids)
+    n_cols = min(5, K)
+    n_rows = (K + n_cols - 1) // n_cols
     fig2, axes2 = plt.subplots(n_rows, n_cols,
                                figsize=(n_cols * 3, n_rows * 2.5),
                                squeeze=False, sharey=True)
@@ -2258,8 +2274,8 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
         ax.grid(alpha=0.3)
         ax.tick_params(labelsize=7)
 
-    for k in range(n_clusters, n_rows * n_cols):
-        axes2[k // n_cols, k % n_cols].set_visible(False)
+    for idx in range(K, n_rows * n_cols):
+        axes2[idx // n_cols, idx % n_cols].set_visible(False)
 
     fig2.suptitle(f"Cluster shapes (ordered by shape)  |  {label}", fontsize=11, y=1.01)
     plt.tight_layout()

@@ -216,3 +216,50 @@ class TestSpliceUsageLoss:
 
         assert shaped_loss.item() < flat_loss.item()
         assert flat_metrics["trajectory_corr"] <= shaped_metrics["trajectory_corr"]
+
+    def test_delta_mse_penalizes_magnitude_on_dynamic_trajectory(self):
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, n_cond, max_sites = 1, 64, 3, 1
+        usage_positions = torch.tensor([[12]])
+        usage_values = torch.tensor([[[0.0, 0.5, 1.0]]])  # clearly dynamic trajectory
+        usage_mask = torch.ones(B, max_sites, n_cond, dtype=torch.bool)
+
+        exact_logits = torch.zeros(B, S, n_cond)
+        exact_logits[0, 12, :] = torch.logit(usage_values[0, 0, :].clamp(1e-4, 1 - 1e-4))
+
+        wrong_magnitude = torch.zeros(B, S, n_cond)
+        wrong_magnitude[0, 12, :] = torch.logit(torch.tensor([0.45, 0.5, 0.55]))  # right shape, tiny magnitude
+
+        exact_loss, exact_metrics = splice_usage_loss(
+            exact_logits, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"delta_mse": 1.0},
+        )
+        wrong_loss, _ = splice_usage_loss(
+            wrong_magnitude, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"delta_mse": 1.0},
+        )
+
+        assert exact_loss.item() < wrong_loss.item()
+        assert exact_metrics["n_trajectory_sites"] == 1
+
+    def test_delta_mse_ignores_flat_and_noisy_trajectories(self):
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, n_cond, max_sites = 1, 64, 9, 2
+        usage_positions = torch.tensor([[12, 20]])
+        # site 0: near-flat/wobbly (should be excluded); site 1: single-outlier spike (should
+        # also be excluded even though its raw variance/range is large).
+        usage_values = torch.tensor([[
+            [0.50, 0.48, 0.51, 0.49, 0.50, 0.52, 0.49, 0.50, 0.51],
+            [0.78, 0.80, 0.81, 0.75, 0.05, 0.79, 0.75, 0.67, 0.70],
+        ]])
+        usage_mask = torch.ones(B, max_sites, n_cond, dtype=torch.bool)
+        predictions = torch.zeros(B, S, n_cond)  # arbitrary; loss should be exactly 0 (no eligible sites)
+
+        loss, metrics = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"delta_mse": 1.0},
+        )
+        assert loss.item() == 0.0
+        assert metrics["n_trajectory_sites"] == 0

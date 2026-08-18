@@ -127,23 +127,21 @@ usage_weight: 1.0
 # Dictionary of usage loss component weights. Trajectory terms are computed PER-TISSUE
 # over that tissue's developmental timepoints (not all conditions concatenated), so they
 # capture within-tissue dynamics rather than tissue-level offsets.
-#   bce:                BCE on absolute usage (level).
-#   delta_mse:          MSE on per-(site,tissue) mean-centered trajectories (shape, unweighted).
-#   trajectory_shape:   per-(site,tissue) centered-MSE, weighted by true amplitude so dynamic
-#                       sites dominate (recommended shape term).
-#   trajectory_pearson: 1 - PearsonR per (site,tissue) over its timepoints.
-#   traj_smooth:        second-difference smoothness penalty on the predicted per-tissue curve.
+#   bce:                BCE on absolute usage (level) -- every observed site.
+#   delta_mse:          per-(site,tissue) centered MSE (trajectory magnitude), restricted
+#                       to sites that clear the exc5 excursion filter (genuinely dynamic,
+#                       not flat/noisy/an outlier timepoint); equal-weighted across sites.
+#   trajectory_pearson: 1 - PearsonR per (site,tissue) (trajectory direction), same exc5
+#                       filter as delta_mse.
 # train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
 usage_loss_weights:
   bce: 1.0
-  delta_mse: 0.0
-  trajectory_shape: 1.0      # try ~0.5-1.0 to teach developmental shape
+  delta_mse: 1.0
   trajectory_pearson: 0.0
-  traj_smooth: 0.0           # try ~0.05-0.1 for smoother predicted trajectories
 
-# BCE-only warm-up: for the first N epochs (1-indexed) the shape/pearson/smoothness
+# BCE-only warm-up: for the first N epochs (1-indexed) the delta_mse/trajectory_pearson
 # terms are DISABLED (pure BCE); they switch on at full strength from epoch N+1.
-# N=2 -> epochs 1-2 BCE only, shape from epoch 3. 0 = no warm-up. The per-tissue
+# N=2 -> epochs 1-2 BCE only, trajectory terms from epoch 3. 0 = no warm-up. The per-tissue
 # Pearson (traj_r / train_usage_trajectory_corr) is still logged during warm-up.
 usage_traj_warmup_epochs: 2
 

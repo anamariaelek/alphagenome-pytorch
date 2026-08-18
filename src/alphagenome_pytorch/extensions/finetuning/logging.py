@@ -141,6 +141,8 @@ class TrainingLogger:
         self.csv_file = None
         self.csv_writer = None
         self._csv_fieldnames: list[str] | None = None
+        self._epoch_csv_fieldnames: list[str] | None = None
+        self._epoch_rows: list[dict[str, Any]] = []
 
         # Save config
         if config:
@@ -173,18 +175,54 @@ class TrainingLogger:
             self.wandb = None
 
     def _ensure_csv(self, fieldnames: list[str]) -> None:
-        """Initialize CSV file with headers if not already done."""
+        """Initialize CSV file with headers if not already done.
+
+        On resume (an existing non-empty file), adopts the file's actual on-disk
+        header rather than trusting only this call's metrics keys — otherwise a
+        resumed process whose first logged step has a different key set than the
+        one that originally established the file (e.g. after a code change) would
+        silently misalign every row appended from that point on.
+        """
         if not is_main_process(self.rank):
             return
         if self.csv_writer is None:
-            self._csv_fieldnames = fieldnames
-            # Append mode to support resume
-            write_header = not self.csv_path.exists() or self.csv_path.stat().st_size == 0
+            if self.csv_path.exists() and self.csv_path.stat().st_size > 0:
+                with open(self.csv_path, newline="") as f:
+                    existing_header = next(csv.reader(f), [])
+                self._csv_fieldnames = existing_header or fieldnames
+                write_header = not existing_header
+            else:
+                self._csv_fieldnames = fieldnames
+                write_header = True
             self.csv_file = open(self.csv_path, "a", newline="")
-            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=fieldnames)
+            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=self._csv_fieldnames)
             if write_header:
                 self.csv_writer.writeheader()
             self.csv_file.flush()
+
+    def _grow_csv_header(self, new_fields: list[str]) -> None:
+        """Add newly-seen fields to the CSV header.
+
+        Rewrites the file once (reading back every row written so far and
+        backfilling '' for the new columns on those rows), then reopens the
+        append-mode writer bound to the expanded schema. Only runs the first time
+        each new metric key appears — not on every step — so it stays cheap even
+        for a long, high-frequency step log; the common case (no new keys) is a
+        plain append via the existing writer.
+        """
+        if not is_main_process(self.rank):
+            return
+        self.csv_file.close()
+        with open(self.csv_path, newline="") as f:
+            old_rows = list(csv.DictReader(f))
+        self._csv_fieldnames = self._csv_fieldnames + new_fields
+        with open(self.csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self._csv_fieldnames)
+            writer.writeheader()
+            for row in old_rows:
+                writer.writerow({k: row.get(k, "") for k in self._csv_fieldnames})
+        self.csv_file = open(self.csv_path, "a", newline="")
+        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=self._csv_fieldnames)
 
     def log_step(self, metrics: dict[str, Any]) -> None:
         """Log metrics for a training step.
@@ -205,6 +243,10 @@ class TrainingLogger:
             k for k in sorted(metrics.keys()) if k not in ["step", "timestamp"]
         ]
         self._ensure_csv(fieldnames)
+
+        new_fields = [k for k in fieldnames if k not in self._csv_fieldnames]
+        if new_fields:
+            self._grow_csv_header(new_fields)
 
         # Only write fields that exist in the header
         row = {k: v for k, v in metrics.items() if k in self._csv_fieldnames}
@@ -251,14 +293,41 @@ class TrainingLogger:
         if extra:
             metrics.update(extra)
 
-        # Append to epoch log (scalars only)
+        # Append to epoch log (scalars only). A plain per-call DictWriter (the old
+        # approach) derives fieldnames fresh from *this* epoch's metrics dict every
+        # time — if a later epoch's dict gains a key an earlier one didn't have (e.g.
+        # a trajectory-loss term that only turns nonzero once warm-up ends, or a
+        # per-species validation column that only appears once that species has
+        # data), the row silently gets written with a different field count/order
+        # than the header, corrupting column alignment for the whole file with no
+        # error raised. Instead: track a fieldname list that only ever grows, and
+        # rewrite the file (all rows, backfilling '' for columns a row predates)
+        # whenever a new key appears, so the header always matches every row.
         epoch_log_path = self.output_dir / "epoch_log.csv"
-        file_exists = epoch_log_path.exists()
-        with open(epoch_log_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(metrics)
+        if self._epoch_csv_fieldnames is None:
+            # First call this run: adopt an existing file's header + rows (resume
+            # case) so we keep appending consistently instead of starting fresh.
+            if epoch_log_path.exists() and epoch_log_path.stat().st_size > 0:
+                with open(epoch_log_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    self._epoch_csv_fieldnames = list(reader.fieldnames or [])
+                    self._epoch_rows = [
+                        {k: v for k, v in row.items() if k in self._epoch_csv_fieldnames}
+                        for row in reader
+                    ]
+            else:
+                self._epoch_csv_fieldnames = []
+                self._epoch_rows = []
+
+        new_fields = [k for k in metrics.keys() if k not in self._epoch_csv_fieldnames]
+        if new_fields:
+            self._epoch_csv_fieldnames = self._epoch_csv_fieldnames + new_fields
+
+        self._epoch_rows.append({k: metrics.get(k, "") for k in self._epoch_csv_fieldnames})
+        with open(epoch_log_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self._epoch_csv_fieldnames)
+            writer.writeheader()
+            writer.writerows(self._epoch_rows)
 
         # W&B logging
         if self.use_wandb:

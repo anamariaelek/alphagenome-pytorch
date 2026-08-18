@@ -112,9 +112,9 @@ def train_epoch_splice(
     developmental dynamics. Pass a ``list[list[int]]`` for single-species training
     or a ``dict[organism_index, list[list[int]]]`` for multi-species.
 
-    ``usage_traj_warmup_epochs`` linearly ramps the shape/pearson/smoothness loss
+    ``usage_traj_warmup_epochs`` linearly ramps the delta_mse/trajectory_pearson loss
     weights from 0 to their configured values over the first N epochs (0 = off), so
-    the level (BCE) is learned before the shape term is applied at full strength.
+    the level (BCE) is learned before the trajectory terms are applied at full strength.
 
     The model trunk is run with ``embeddings_only=True`` to extract 1 bp NCL
     embeddings, which are then passed to both heads.
@@ -179,13 +179,16 @@ def train_epoch_splice(
 
     optimizer.zero_grad()
 
-    # BCE-only warm-up: for the first N (1-indexed) epochs the shape/pearson/smoothness
-    # terms are DISABLED (weight 0, pure BCE); they switch on at full strength from
-    # epoch N+1. usage_traj_warmup_epochs <= 0 means no warm-up.
-    _TRAJ_KEYS = ("trajectory_shape", "trajectory_pearson", "traj_smooth")
+    # Trajectory warm-up: for the first N (1-indexed) epochs the delta_mse/
+    # trajectory_pearson weights are linearly ramped from 0 (epoch 1) up to their
+    # configured values, reaching full strength at epoch N+1 — so BCE establishes
+    # the level fit before the trajectory terms reach full gradient pressure,
+    # instead of jumping in at once.
+    # usage_traj_warmup_epochs <= 0 means no warm-up (full strength from epoch 1).
+    _TRAJ_KEYS = ("delta_mse", "trajectory_pearson")
     _traj_scale = 1.0
     if usage_loss_weights and usage_traj_warmup_epochs and usage_traj_warmup_epochs > 0:
-        _traj_scale = 0.0 if epoch <= usage_traj_warmup_epochs else 1.0
+        _traj_scale = min(1.0, max(0.0, (epoch - 1) / usage_traj_warmup_epochs))
         epoch_usage_weights = {k: (v * _traj_scale if k in _TRAJ_KEYS else v)
                                for k, v in usage_loss_weights.items()}
     else:
@@ -337,8 +340,8 @@ def train_epoch_splice(
                 usage_traj_str = f" usage_traj={usage_traj:.4f}" if usage_traj is not None else ""
                 _traj_configured = bool(usage_loss_weights) and any(
                     float(usage_loss_weights.get(k, 0.0)) != 0.0 for k in _TRAJ_KEYS)
-                if _traj_configured and _traj_scale == 0.0:
-                    usage_traj_str += " [traj warmup: BCE-only]"
+                if _traj_configured and _traj_scale < 1.0:
+                    usage_traj_str += f" [traj warmup: scale={_traj_scale:.2f}]"
                 usage_tcorr_str = f" traj_r={usage_tcorr:.3f}" if usage_tcorr is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "

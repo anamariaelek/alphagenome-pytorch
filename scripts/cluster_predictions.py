@@ -32,11 +32,15 @@ Usage
 -----
   # one species/tissue
   python cluster_predictions.py --species human --tissue Brain \\
-      --ref-dir /home/.../gp_splice_usage --output /home/.../pred_clusters
+      --ref-dir /home/.../gp_splice_usage --preds-dir /home/.../preds_all_intersect_protein_coding \\
+      --usage-template /home/.../data/combined_usage_data_{species}.parquet \\
+      --output /home/.../pred_clusters
 
   # all species x tissues found under --ref-dir
   python cluster_predictions.py --species all --tissue all \\
-      --ref-dir /home/.../gp_splice_usage --output /home/.../pred_clusters --n-jobs 16
+      --ref-dir /home/.../gp_splice_usage --preds-dir /home/.../preds_all_intersect_protein_coding \\
+      --usage-template /home/.../data/combined_usage_data_{species}.parquet \\
+      --output /home/.../pred_clusters --n-jobs 16
 """
 
 import os
@@ -80,15 +84,12 @@ def parse_args():
     g.add_argument("--ref-dir", required=True,
                    help="Root of the true-clustering outputs. Per species/tissue the "
                         "files are expected under <ref-dir>/<species>/<Tissue>/.")
-    g.add_argument("--preds-template",
-                   default=("/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/"
-                            "lora_32_human_mouse_rat_rabbit_opossum/"
-                            "preds_intersect_protein_coding/{species}/usage_{species}.parquet"),
-                   help="Predicted-usage parquet path template with {species}.")
-    g.add_argument("--usage-template",
-                   default=("/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/"
-                            "data/combined_usage_data_{species}.parquet"),
-                   help="Combined true-usage parquet template (supplies Strand + Reads).")
+    g.add_argument("--preds-dir", required=True,
+                   help="Root of the predicted-usage parquets, one per species: "
+                        "<preds-dir>/<species>/usage_<species>.parquet.")
+    g.add_argument("--usage-template", required=True,
+                   help="Combined true-usage parquet path template with {species} "
+                        "(supplies Strand + Reads).")
     g.add_argument("--min-timepoints", type=int, default=5)
     g.add_argument("--min-reads", type=int, default=1)
 
@@ -154,7 +155,7 @@ def annotate(species, tissue, args):
              "accuracy = %.3f", f"{len(ref['meta']):,}", len(ref["cluster_ids"]), acc)
 
     # 2. predicted AND observed trajectories, GP-smoothed with the identical transform
-    preds_parquet = args.preds_template.format(species=species)
+    preds_parquet = os.path.join(args.preds_dir, species, f"usage_{species}.parquet")
     usage_parquet = args.usage_template.format(species=species)
     if not os.path.exists(preds_parquet):
         log.warning("%s/%s: predictions not found (%s), skipping", species, tissue, preds_parquet)
