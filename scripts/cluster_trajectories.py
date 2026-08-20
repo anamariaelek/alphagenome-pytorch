@@ -25,11 +25,13 @@ Usage examples
 --------------
   # Human, all tissues, 30 clusters, 16 parallel workers
   python cluster_trajectories.py \\
+      --parquet-path /data/combined_usage_data_{species}.parquet \\
       --species human --n-clusters 30 \\
       --n-jobs 16 --output results/ --save-plots
 
   # All species, Brain only, auto-select k, save plots
   python cluster_trajectories.py \\
+      --parquet-path /data/combined_usage_data_{species}.parquet \\
       --species all --tissue Brain \\
       --auto-k --n-jobs -1 --output results/ --save-plots
 
@@ -86,11 +88,13 @@ def parse_args():
 
     # Data
     g = p.add_argument_group("Data")
-    g.add_argument("--parquet-template",
-                   default=("/home/elek/sds/sd17d003/Anamaria/"
-                            "alphagenome_genomicsxai/data/"
-                            "combined_usage_data_{species}.parquet"),
-                   help="Path template with {species} placeholder, or a direct path.")
+    g.add_argument("--parquet-path", default=None,
+                   help="Path to the combined usage parquet(s) to cluster — either a direct "
+                        "path to one file, or a path containing a {species} placeholder (e.g. "
+                        ".../data/combined_usage_data_{species}.parquet) that's filled in per "
+                        "species (glob-expanded when --species all). Required unless "
+                        "--load-features/--load-sites are used to resume from previously "
+                        "saved GP features.")
     g.add_argument("--species", default="human",
                    help="Species (e.g. human) or 'all' for all species. "
                         "Default: human")
@@ -238,8 +242,11 @@ def main():
         log.info("Loaded %s trajectories × %d timepoints",
                  f"{len(features_v):,}", features_v.shape[1])
     else:
+        if not args.parquet_path:
+            sys.exit("--parquet-path is required (unless resuming with "
+                      "--load-features/--load-sites)")
         sites, sse_wide, reads_wide = prepare_trajectories(
-            args.parquet_template,
+            args.parquet_path,
             species=species, tissue=tissue,
             min_timepoints=args.min_timepoints,
             min_reads=args.min_reads,
@@ -270,6 +277,16 @@ def main():
             log.info("Subsampled to %s trajectories", f"{args.max_sites:,}")
 
         log.info("Final dataset: %s trajectories", f"{len(sites):,}")
+
+        if len(sites) == 0:
+            sys.exit(
+                f"No trajectories to cluster for {label} — see the messages above "
+                f"for why (e.g. too few distinct timepoints available for this "
+                f"species/tissue given --min-timepoints={args.min_timepoints}, or "
+                f"none inside the '{args.split}' split windows). Try a lower "
+                f"--min-timepoints, a different --tissue, or omit "
+                f"--data-config/--split."
+            )
 
         # ── 2. GP smoothing ────────────────────────────────────────────────
         log.info("=== GP smoothing ===")

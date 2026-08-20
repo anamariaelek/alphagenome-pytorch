@@ -479,6 +479,16 @@ def smooth_all_trajectories(sse_wide, reads_wide, t_grid,
     reads_arr = reads_wide.values.astype(float)
     col_tps   = np.array([float(c) for c in sse_wide.columns])
     n_sites   = sse_arr.shape[0]
+    n_t       = len(t_grid)
+
+    if n_sites == 0:
+        log.info("No trajectories to smooth.")
+        return (
+            np.empty((0, n_t), dtype=np.float32),
+            np.empty((0, n_t), dtype=np.float32),
+            np.empty((0,), dtype=np.float64),
+            pd.DataFrame(),
+        )
 
     t0 = time.time()
 

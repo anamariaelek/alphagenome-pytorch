@@ -30,7 +30,7 @@ TISSUE_COLORS = {
     'Testis': '#ff6600'
 }
 
-SPECIES_ORDER = ['human', 'mouse', 'rat', 'rabbit', 'opossum', 'chicken'] # 'macaque'
+SPECIES_ORDER = ['human', 'macaque', 'mouse', 'rat', 'rabbit', 'opossum', 'chicken']
 TISSUE_ORDER = ["Brain", "Midbrain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"]
 
 # The species to process
