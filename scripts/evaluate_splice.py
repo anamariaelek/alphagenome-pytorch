@@ -187,6 +187,27 @@ def parse_args() -> argparse.Namespace:
         help="Evaluate and plot usage separately per tissue (from usage metadata).",
     )
     parser.add_argument(
+        "--trajectory-corr", action="store_true",
+        help="Compute per-site, per-tissue trajectory Pearson r, restricted to "
+             "(site, tissue) trajectories eligible under the same excursion filter "
+             "used by the training-time trajectory loss (splice_losses._per_tissue_"
+             "pearson_loss) -- i.e. genuinely dynamic, not flat/noisy/single-point-"
+             "outlier. Reports overall and per-tissue r, and adds them to metrics.json. "
+             "Combine with --skip-predictions to compute this on already-saved "
+             "predictions without rerunning inference.",
+    )
+    parser.add_argument(
+        "--traj-min-timepoints", type=int, default=3,
+        help="Minimum observed timepoints for a (site, tissue) trajectory to be "
+             "eligible for --trajectory-corr (default: 3, matches training).",
+    )
+    parser.add_argument(
+        "--traj-exc-floor", type=float, default=0.10,
+        help="Minimum median-filtered excursion from baseline for a (site, tissue) "
+             "trajectory to count as genuinely dynamic for --trajectory-corr "
+             "(default: 0.10, matches training).",
+    )
+    parser.add_argument(
         "--observed-conditions-only", action="store_true",
         help="When set, only evaluate usage on conditions observed in the data (and 0s only if no condition in tissue is observed). "
              "Otherwise, evaluate on all conditions (infering 0 usage for unobserved conditions).",
@@ -240,17 +261,67 @@ def resolve_checkpoint(checkpoint_arg: str) -> tuple[Path, Path]:
     return pth, cfg
 
 
-def load_config(cfg_path: Path) -> dict:
+def _rebase_under_home(path_str: str) -> str | None:
+    """If ``path_str`` doesn't exist, try rebasing it onto the current user's home
+    directory via the shared ``.../sds/...`` mount convention. Checkpoints trained
+    under a different account/machine bake in an absolute path (e.g.
+    ``/home/elek/sds/sd17d003/...``) that may not exist here even though the same
+    shared storage is mounted under this account's ``$HOME`` (e.g.
+    ``/home/hd/hd_hd/hd_mf354/sds/sd17d003/...``). Returns the rebased path if it
+    exists, else None.
+    """
+    marker = "/sds/"
+    if marker not in path_str:
+        return None
+    rebased = str(Path.home() / "sds" / path_str.split(marker, 1)[1])
+    return rebased if os.path.exists(rebased) else None
+
+
+def rebase_missing_paths_in_dict(
+    d: dict, path_keys: set[str], logger: logging.Logger | None = None
+) -> dict:
+    """Recursively rewrite paths (matching ``path_keys``) that don't exist on this
+    machine by rebasing them onto the current user's home directory (see
+    ``_rebase_under_home``). Paths that already exist, or that can't be rebased, are
+    left untouched so the eventual "file not found" error still reports a real path.
+    """
+    result = {}
+    for key, value in d.items():
+        if key in path_keys and isinstance(value, str) and value and not os.path.exists(value):
+            rebased = _rebase_under_home(value)
+            if rebased is not None:
+                msg = f"  Path not found, rebased under $HOME: {value} -> {rebased}"
+                (logger.warning if logger else print)(msg)
+                result[key] = rebased
+            else:
+                result[key] = value
+        elif isinstance(value, dict):
+            result[key] = rebase_missing_paths_in_dict(value, path_keys, logger)
+        elif isinstance(value, list):
+            result[key] = [
+                rebase_missing_paths_in_dict(item, path_keys, logger) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(cfg_path: Path, logger: logging.Logger | None = None) -> dict:
     """Load config and expand paths with ~ and $HOME."""
     with open(cfg_path) as f:
         cfg = json.load(f)
-    
+
     # Expand paths in model config
     path_keys = {
         "genome", "annotation_parquet", "usage_parquet",
-        "train_bed", "val_bed", "test_bed"
+        "train_bed", "val_bed", "test_bed", "pretrained_weights",
     }
-    return expand_paths_in_dict(cfg, path_keys)
+    cfg = expand_paths_in_dict(cfg, path_keys)
+    # Rebase any path that's still missing (e.g. a checkpoint trained under a
+    # different account) onto this machine's $HOME before callers try to use it.
+    cfg = rebase_missing_paths_in_dict(cfg, path_keys, logger=logger)
+    return cfg
 
 
 def load_data_config(data_cfg_path: Path, eval_species: list[str]) -> list[dict]:
@@ -718,13 +789,18 @@ def collect_predictions(
     seq_len: int = 131_072,
     skip_usage: bool = False,
     condition_mapping: dict[int, int] | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict, np.ndarray | None]:
+    collect_positions: bool = False,
+) -> tuple[np.ndarray, np.ndarray, dict, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Run inference for one organism.
 
     Args:
         condition_mapping: Optional dict mapping data condition index -> model condition index
                           for cross-species evaluation. When provided, only matched conditions
                           are accumulated.
+        collect_positions: When True, also return the genomic (chrom_idx, position) coordinate
+                          of every returned classification row, computed from each window's
+                          ``window_start``/``chrom_idx`` (so callers can build a tidy per-position
+                          dataframe without re-reading a BED file).
 
     Returns
     -------
@@ -732,7 +808,11 @@ def collect_predictions(
     cls_labels              : (N_masked_positions,)    int64 - only positions where loss_mask=True
     usage_per_cond          : dict  condition_idx -> {'pred': list[float], 'true': list[float]}
     loss_mask_full          : (N_all_positions,) bool - full loss_mask before filtering, or None
-    
+    genomic_pos_full        : (N_masked_positions,) int64 - absolute genomic position per row,
+                               or None unless collect_positions=True
+    chrom_idx_full          : (N_masked_positions,) int32 - chromosome index per row (index into
+                               the dataset's ``chrom_names``), or None unless collect_positions=True
+
     Note:
         If loss_mask is present in batches, only predictions for masked positions
         (gene body regions) are returned. If loss_mask is absent, all positions are returned.
@@ -741,6 +821,8 @@ def collect_predictions(
     all_cls_probs: list[np.ndarray] = []
     all_cls_labels: list[np.ndarray] = []
     all_loss_masks: list[np.ndarray] = []
+    all_genomic_pos: list[np.ndarray] = []
+    all_chrom_idx_pos: list[np.ndarray] = []
     usage_per_cond: dict[int, dict[str, list[float]]] = {}
 
     # Usage head for this organism (may be None if not available)
@@ -787,10 +869,19 @@ def collect_predictions(
 
         all_cls_probs.append(cls_probs.cpu().numpy().reshape(-1, 5))
         all_cls_labels.append(batch["classification_labels"].numpy().reshape(-1))
-        
+
         # Collect loss_mask if present (for gene body filtering)
         if "loss_mask" in batch:
             all_loss_masks.append(batch["loss_mask"].numpy().reshape(-1))
+
+        if collect_positions:
+            win_starts_b = batch["window_start"].numpy().astype(np.int64)  # (B,)
+            chrom_idx_b = batch["chrom_idx"].numpy().astype(np.int32)      # (B,)
+            pos_offsets = np.arange(cls_probs.shape[1], dtype=np.int64)    # (S,)
+            genomic = win_starts_b[:, None] + pos_offsets[None, :]         # (B, S)
+            chrom_b = np.repeat(chrom_idx_b[:, None], pos_offsets.size, axis=1)  # (B, S)
+            all_genomic_pos.append(genomic.reshape(-1))
+            all_chrom_idx_pos.append(chrom_b.reshape(-1))
 
         if usage_preds is not None and "usage_positions" in batch and not skip_usage:
             _accumulate_usage(
@@ -806,19 +897,26 @@ def collect_predictions(
 
     cls_probs = np.concatenate(all_cls_probs, axis=0)
     cls_labels = np.concatenate(all_cls_labels, axis=0)
-    
+
     # Concatenate loss_mask before filtering
     loss_mask_full = None
+    genomic_pos_full = None
+    chrom_idx_full = None
     if all_loss_masks:
         loss_mask_full = np.concatenate(all_loss_masks, axis=0)
         cls_probs = cls_probs[loss_mask_full]
         cls_labels = cls_labels[loss_mask_full]
-    
+        if collect_positions and all_genomic_pos:
+            genomic_pos_full = np.concatenate(all_genomic_pos, axis=0)[loss_mask_full]
+            chrom_idx_full = np.concatenate(all_chrom_idx_pos, axis=0)[loss_mask_full]
+
     return (
         cls_probs,
         cls_labels,
         usage_per_cond,
         loss_mask_full,
+        genomic_pos_full,
+        chrom_idx_full,
     )
 
 
@@ -1044,6 +1142,185 @@ def compute_usage_metrics_from_stats(usage_stats: dict | None) -> dict:
         "usage_n_conditions_evaluated": int(valid_rs.size),
         "usage_n_conditions_total": int(n.size),
         "usage_n_observations": int(n.sum()),
+    }
+
+
+def _nanmedian_torch_style(windows: np.ndarray) -> np.ndarray:
+    """``nanmedian`` matching torch's convention (used by the training loss), not
+    numpy's: for an *even* count of valid values, torch's ``nanmedian`` returns the
+    LOWER of the two middle values, while numpy's averages them. This isn't
+    cosmetic -- it can flip which side of the exc_floor threshold a borderline
+    trajectory falls on, so eligibility genuinely wouldn't match training without it.
+
+    ``windows``: ``(..., win)``, NaN for out-of-mask/out-of-bounds positions.
+    """
+    sorted_w = np.sort(windows, axis=-1)  # NaNs sort to the end (ascending)
+    n_valid = np.sum(~np.isnan(windows), axis=-1)
+    idx = np.clip((n_valid - 1) // 2, 0, windows.shape[-1] - 1)
+    return np.take_along_axis(sorted_w, idx[..., None], axis=-1).squeeze(-1)
+
+
+def _masked_median_filter_np(x: np.ndarray, mask: np.ndarray, win: int = 5) -> np.ndarray:
+    """Numpy port of splice_losses._masked_median_filter for a 2D ``(N, T)`` batch
+    (N sites, T timepoints). See that function's docstring for the rationale
+    (median, not mean, so an isolated noisy point is outvoted, not diluted).
+
+    ``win`` is capped at ``T`` (kept odd), matching training.
+    """
+    N, T = x.shape
+    win = max(1, min(win, T if T % 2 == 1 else T - 1))
+    half = win // 2
+    x_nan = np.where(mask, x, np.nan)
+    x_pad = np.pad(x_nan, ((0, 0), (half, half)), mode="constant", constant_values=np.nan)
+    windows = np.lib.stride_tricks.sliding_window_view(x_pad, win, axis=1)  # (N, T, win)
+    n_valid = np.sum(~np.isnan(windows), axis=-1)
+    filt = _nanmedian_torch_style(windows)
+    return np.where(n_valid > 0, filt, 0.0)
+
+
+def _trajectory_excursion_np(dt: np.ndarray, mask: np.ndarray, win: int = 5) -> np.ndarray:
+    """Numpy port of splice_losses._trajectory_excursion: max deviation from baseline
+    of the median-filtered, self-recentered trajectory. ``dt``, ``mask``: ``(N, T)``
+    centered-target arrays -> ``(N,)`` excursion per site.
+    """
+    dt_filt = _masked_median_filter_np(dt, mask, win=win)
+    denom = np.clip(mask.sum(axis=1), 1, None).astype(np.float64)
+    mu_filt = (dt_filt * mask).sum(axis=1) / denom
+    dt_filt_c = dt_filt - mu_filt[:, None]
+    big = np.finfo(np.float64).max / 4
+    exc_max = np.where(mask, dt_filt_c, -big).max(axis=1)
+    exc_min = np.where(mask, dt_filt_c, big).min(axis=1)
+    return np.maximum(exc_max, -exc_min)
+
+
+def _site_keys_for(entry: dict) -> list:
+    """Per-observation site identity for grouping conditions into trajectories.
+
+    Freshly accumulated predictions (``_accumulate_usage``) carry parallel
+    ``chrom_idx``/``genomic_pos`` int lists; predictions reloaded from a saved
+    usage NPZ (``load_predictions``) carry a ``site_key`` list of ``"chrom:pos"``
+    strings instead (see ``chr_pos`` in ``save_predictions``). Either is a fine
+    grouping key within a single evaluation run -- they're never compared across
+    sources.
+    """
+    if "site_key" in entry:
+        return list(entry["site_key"])
+    return list(zip(entry["chrom_idx"], entry["genomic_pos"]))
+
+
+def compute_trajectory_correlation(
+    usage_per_cond: dict,
+    idx_to_label: dict[int, str],
+    min_tp: int = 3,
+    exc_floor: float = 0.10,
+    median_win: int = 5,
+) -> dict:
+    """Per-(site, tissue) Pearson r, filtered the same way as the training-time
+    trajectory loss (``splice_losses._per_tissue_pearson_loss``): a (site, tissue)
+    trajectory is scored only if it has >= ``min_tp`` observed timepoints AND its
+    median-filtered excursion from its own baseline exceeds ``exc_floor`` -- i.e.
+    it's genuinely dynamic, not flat, noisy, or a single-point outlier.
+
+    Unlike the training loss (which regularizes the correlation's denominator with
+    ``var_floor`` for gradient stability), this reports the standard Pearson r via
+    ``scipy.stats.pearsonr``, matching this script's other usage-correlation metrics.
+
+    Tissue grouping and timepoint ordering exactly mirror
+    ``SpliceSiteUsageIndex.tissue_cond_groups``: tissue = condition name split on
+    the *first* underscore, timepoint = the integer after the *last* underscore.
+
+    Returns ``{"overall": {...}, "per_tissue": {tissue: {...}, ...}}``, each with
+    ``n_sites_total`` (had >= min_tp observations), ``n_sites_eligible`` (also
+    cleared the excursion gate), ``n_sites_valid_r`` (had nonzero pred/true
+    variance, so r is defined), ``mean_pearson_r``, ``median_pearson_r``.
+    """
+    from scipy.stats import pearsonr
+
+    tissue_to_idx: dict[str, list[int]] = {}
+    for cond_idx, name in idx_to_label.items():
+        tissue = name.split("_")[0]
+        tissue_to_idx.setdefault(tissue, []).append(cond_idx)
+
+    def _timepoint(cond_idx: int) -> int:
+        name = idx_to_label.get(cond_idx, "")
+        try:
+            return int(name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            return cond_idx
+
+    per_tissue: dict[str, dict] = {}
+    all_rs: list[float] = []
+
+    for tissue in sorted(tissue_to_idx):
+        cond_idxs = sorted(
+            (c for c in tissue_to_idx[tissue] if c in usage_per_cond),
+            key=_timepoint,
+        )
+        if len(cond_idxs) < min_tp:
+            continue
+
+        # Pivot the per-condition flat lists into per-site rows: site_key ->
+        # {condition position in this tissue's ordering -> (pred, true)}.
+        site_data: dict = {}
+        for j, c in enumerate(cond_idxs):
+            entry = usage_per_cond[c]
+            keys = _site_keys_for(entry)
+            for k, p, t in zip(keys, entry["pred"], entry["true"]):
+                site_data.setdefault(k, {})[j] = (float(p), float(t))
+
+        if not site_data:
+            continue
+
+        site_keys = list(site_data.keys())
+        N, T = len(site_keys), len(cond_idxs)
+        pred_mat = np.zeros((N, T), dtype=np.float64)
+        true_mat = np.zeros((N, T), dtype=np.float64)
+        mask_mat = np.zeros((N, T), dtype=bool)
+        for i, k in enumerate(site_keys):
+            for j, (p, t) in site_data[k].items():
+                pred_mat[i, j] = p
+                true_mat[i, j] = t
+                mask_mat[i, j] = True
+
+        n_obs = mask_mat.sum(axis=1)
+        denom = np.clip(n_obs, 1, None).astype(np.float64)
+        mu_p = (pred_mat * mask_mat).sum(axis=1) / denom
+        mu_t = (true_mat * mask_mat).sum(axis=1) / denom
+        dp = np.where(mask_mat, pred_mat - mu_p[:, None], 0.0)
+        dt = np.where(mask_mat, true_mat - mu_t[:, None], 0.0)
+
+        # Eligibility is judged on the TRUE trajectory only (a flat prediction
+        # against a genuinely dynamic target should still be scored, not skipped).
+        excursion = _trajectory_excursion_np(dt, mask_mat, win=median_win)
+        eligible = (n_obs >= min_tp) & (excursion > exc_floor)
+        n_eligible = int(eligible.sum())
+
+        rs: list[float] = []
+        for i in np.where(eligible)[0]:
+            m = mask_mat[i]
+            p, t = pred_mat[i, m], true_mat[i, m]
+            if p.std() < 1e-8 or t.std() < 1e-8:
+                continue
+            r, _ = pearsonr(p, t)
+            if np.isfinite(r):
+                rs.append(float(r))
+                all_rs.append(float(r))
+
+        per_tissue[tissue] = {
+            "n_sites_total": int(N),
+            "n_sites_eligible": n_eligible,
+            "n_sites_valid_r": len(rs),
+            "mean_pearson_r": float(np.mean(rs)) if rs else float("nan"),
+            "median_pearson_r": float(np.median(rs)) if rs else float("nan"),
+        }
+
+    return {
+        "overall": {
+            "n_sites_valid_r": len(all_rs),
+            "mean_pearson_r": float(np.mean(all_rs)) if all_rs else float("nan"),
+            "median_pearson_r": float(np.median(all_rs)) if all_rs else float("nan"),
+        },
+        "per_tissue": per_tissue,
     }
 
 
@@ -1489,6 +1766,98 @@ def plot_usage_correlation_by_tissue(
 
 
 # ---------------------------------------------------------------------------
+# Tidy Parquet outputs
+# ---------------------------------------------------------------------------
+
+def load_condition_labels(usage_parquet: str | None) -> dict[int, str]:
+    """condition index -> 'Tissue_Timepoint' label, from the usage parquet's sibling json."""
+    if not usage_parquet:
+        return {}
+    meta_path = Path(usage_parquet).with_suffix(".json")
+    if not meta_path.exists():
+        return {}
+    with open(meta_path) as f:
+        meta = json.load(f)
+    return {int(v): k for k, v in meta.get("condition_labels", {}).items()}
+
+
+def build_classification_dataframe(
+    chrom_names: list[str],
+    chrom_idx: np.ndarray,
+    genomic_pos: np.ndarray,
+    cls_labels: np.ndarray,
+    cls_probs: np.ndarray,
+):
+    """Tidy per-position classification dataframe: one row per evaluated (masked) position,
+    with Chromosome/Position plus the per-class probabilities and predicted label.
+
+    Mirrors the ``predictions_<species>.parquet`` previously built by hand in
+    ``splice_model_eval.ipynb``, but derives genomic coordinates directly from each
+    window's ``window_start``/``chrom_idx`` instead of re-reading a BED file.
+    """
+    import pandas as pd
+    names = np.asarray(chrom_names, dtype=object)
+    df = pd.DataFrame({
+        "Chromosome": names[chrom_idx],
+        "Position": genomic_pos.astype(np.int64),
+        "class_label": cls_labels.astype(np.int64),
+    })
+    for i in range(cls_probs.shape[1]):
+        df[f"prob_{i}"] = cls_probs[:, i].astype(np.float32)
+    df["predicted_class_label"] = cls_probs.argmax(axis=1).astype(np.int64)
+    return df
+
+
+def build_usage_dataframe(
+    usage_per_cond: dict,
+    chrom_names: list[str] | None,
+    species_name: str,
+    idx_to_label: dict[int, str],
+):
+    """Tidy per-(site, condition) usage dataframe: Species, Chromosome, Position, SSE_true,
+    SSE_pred, Condition_Name, Tissue, Timepoint. Mirrors the ``usage_<species>.parquet``
+    previously built by hand (e.g. ``ensure_pred_parquet`` in
+    ``splice_cross_species_usage_trajectory.ipynb``). Returns None if no genomic coordinates
+    were collected (e.g. older cached usage arrays without ``genomic_pos``/``chrom_idx``).
+    """
+    import pandas as pd
+    if chrom_names is None:
+        return None
+    names = np.asarray(chrom_names, dtype=object)
+    chrom_chunks, pos_chunks, cond_chunks, pred_chunks, true_chunks = [], [], [], [], []
+    for cond_idx, data in usage_per_cond.items():
+        pred = np.asarray(data["pred"], dtype=np.float32)
+        true = np.asarray(data["true"], dtype=np.float32)
+        gpos = np.asarray(data.get("genomic_pos", []), dtype=np.int64)
+        cidx = np.asarray(data.get("chrom_idx", []), dtype=np.int32)
+        if pred.size == 0 or gpos.size != pred.size:
+            continue
+        chrom_chunks.append(names[cidx])
+        pos_chunks.append(gpos)
+        cond_chunks.append(np.full(pred.size, int(cond_idx), dtype=np.int32))
+        pred_chunks.append(pred)
+        true_chunks.append(true)
+
+    if not pred_chunks:
+        return None
+
+    df = pd.DataFrame({
+        "Chromosome": np.concatenate(chrom_chunks),
+        "Position": np.concatenate(pos_chunks),
+        "cond_id": np.concatenate(cond_chunks),
+        "SSE_true": np.concatenate(true_chunks),
+        "SSE_pred": np.concatenate(pred_chunks),
+    })
+    df["Species"] = species_name
+    df["Condition_Name"] = df["cond_id"].map(idx_to_label).fillna("None_0")
+    split = df["Condition_Name"].str.rsplit("_", n=1, expand=True)
+    df["Tissue"] = split[0]
+    df["Timepoint"] = split[1].astype(int)
+    return df[["Species", "Chromosome", "Position", "SSE_true", "SSE_pred",
+               "Condition_Name", "Tissue", "Timepoint"]]
+
+
+# ---------------------------------------------------------------------------
 # Save / load predictions
 # ---------------------------------------------------------------------------
 
@@ -1592,6 +1961,38 @@ def save_predictions(
     logging.getLogger("evaluate_splice").info(f"  Saved: {npz_path}  {usage_path}")
 
 
+def load_usage_npz(usage_file: Path) -> dict:
+    """Load one usage NPZ (either the primary ``usage_<species>.npz`` or a
+    cross-species ``usage_<species>_from_<source>.npz``) into ``{cond_idx: {"pred":
+    ..., "true": ..., "site_key": ...}}``, same shape as ``_accumulate_usage``'s
+    in-process output. Includes ``site_key`` (from ``chr_pos``) whenever present, so
+    callers can group observations into per-site trajectories -- see
+    ``_site_keys_for``.
+    """
+    u = np.load(usage_file)
+    loaded: dict = {}
+    if "cond_ids" not in u:
+        return loaded
+    cond_ids = u["cond_ids"].astype(np.int32, copy=False)
+    pred = u["pred"].astype(np.float32, copy=False)
+    true = u["true"].astype(np.float32, copy=False)
+    chr_pos = u["chr_pos"] if "chr_pos" in u else None
+    if cond_ids.size == 0:
+        return loaded
+    order = np.argsort(cond_ids, kind="stable")
+    cond_sorted = cond_ids[order]
+    pred_sorted = pred[order]
+    true_sorted = true[order]
+    chr_pos_sorted = chr_pos[order] if chr_pos is not None else None
+    uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
+    for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
+        entry = {"pred": pred_sorted[s:s + k], "true": true_sorted[s:s + k]}
+        if chr_pos_sorted is not None:
+            entry["site_key"] = chr_pos_sorted[s:s + k]
+        loaded[int(c)] = entry
+    return loaded
+
+
 def load_predictions(
     out_dir: Path,
     org_name: str,
@@ -1625,17 +2026,26 @@ def load_predictions(
             cond_ids = u["cond_ids"].astype(np.int32, copy=False)
             pred = u["pred"].astype(np.float32, copy=False)
             true = u["true"].astype(np.float32, copy=False)
+            # "chrom:pos" per observation, parallel to cond_ids/pred/true (see
+            # save_predictions) -- lets trajectory-correlation group observations
+            # by site even when predictions were loaded from disk, not just
+            # freshly generated in this process.
+            chr_pos = u["chr_pos"] if "chr_pos" in u else None
             if cond_ids.size > 0:
                 order = np.argsort(cond_ids, kind="stable")
                 cond_sorted = cond_ids[order]
                 pred_sorted = pred[order]
                 true_sorted = true[order]
+                chr_pos_sorted = chr_pos[order] if chr_pos is not None else None
                 uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
                 for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
-                    usage_per_cond[int(c)] = {
+                    entry = {
                         "pred": pred_sorted[s:s + k],
                         "true": true_sorted[s:s + k],
                     }
+                    if chr_pos_sorted is not None:
+                        entry["site_key"] = chr_pos_sorted[s:s + k]
+                    usage_per_cond[int(c)] = entry
     elif usage_path_json.exists():
         with open(usage_path_json) as f:
             usage_per_cond = {int(k): v for k, v in json.load(f).items()}
@@ -1697,6 +2107,23 @@ def print_usage_metrics(org_name: str, usage_m: dict, logger: logging.Logger | N
     log_func(f"  Total observations: {usage_m['usage_n_observations']:,}")
 
 
+def print_trajectory_metrics(org_name: str, traj_m: dict, logger: logging.Logger | None = None) -> None:
+    log_func = logger.info if logger else print
+    overall = traj_m.get("overall", {})
+    log_func(f"\n{org_name} - Trajectory Pearson r (exc5-filtered, same gate as training):")
+    log_func(
+        f"  {'Overall':<15s} mean r={overall.get('mean_pearson_r', float('nan')):>7.4f}  "
+        f"median r={overall.get('median_pearson_r', float('nan')):>7.4f}  "
+        f"n={overall.get('n_sites_valid_r', 0):,}"
+    )
+    for tissue, m in sorted(traj_m.get("per_tissue", {}).items()):
+        log_func(
+            f"  {tissue:<15s} mean r={m['mean_pearson_r']:>7.4f}  "
+            f"median r={m['median_pearson_r']:>7.4f}  "
+            f"n={m['n_sites_valid_r']:,} (eligible {m['n_sites_eligible']:,}/{m['n_sites_total']:,})"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1718,7 +2145,7 @@ def main() -> None:
     model_cfg_path = Path(args.model_config) if args.model_config is not None else default_cfg_path
     if not model_cfg_path.exists():
         sys.exit(f"Model config not found: {model_cfg_path}")
-    model_cfg = load_config(model_cfg_path)
+    model_cfg = load_config(model_cfg_path, logger=logger)
     logger.info(f"Checkpoint   : {pth_path}")
     logger.info(f"Model config : {model_cfg_path}")
 
@@ -1839,8 +2266,11 @@ def main() -> None:
 
     all_results: dict[str, dict] = {}
 
-    need_usage_arrays = not args.skip_plots
-    if args.skip_predictions and args.skip_plots:
+    # Trajectory correlation needs per-site raw pred/true arrays (to pair up
+    # observations across a tissue's conditions) -- sufficient statistics alone
+    # can't reconstruct which observations belong to the same site.
+    need_usage_arrays = (not args.skip_plots) or args.trajectory_corr
+    if args.skip_predictions and args.skip_plots and not args.trajectory_corr:
         logger.info("Using stats-first loading mode: raw usage arrays are skipped for faster exact metrics.")
 
 
@@ -1879,27 +2309,7 @@ def main() -> None:
             for usage_file in out_dir.glob(f"usage_{org_name}_from_*.npz"):
                 suffix = usage_file.stem.replace(f"usage_{org_name}_", "")
                 source_name = suffix.replace("from_", "")
-                
-                # Load usage data directly from NPZ file
-                u = np.load(usage_file)
-                loaded_usage_per_cond: dict = {}
-                if "cond_ids" in u:
-                    cond_ids = u["cond_ids"].astype(np.int32, copy=False)
-                    pred = u["pred"].astype(np.float32, copy=False)
-                    true = u["true"].astype(np.float32, copy=False)
-                    if cond_ids.size > 0:
-                        order = np.argsort(cond_ids, kind="stable")
-                        cond_sorted = cond_ids[order]
-                        pred_sorted = pred[order]
-                        true_sorted = true[order]
-                        uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
-                        for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
-                            loaded_usage_per_cond[int(c)] = {
-                                "pred": pred_sorted[s:s + k],
-                                "true": true_sorted[s:s + k],
-                            }
-                
-                usage_results[suffix] = (loaded_usage_per_cond, source_name)
+                usage_results[suffix] = (load_usage_npz(usage_file), source_name)
             
             # If no cross-species files, use the standard usage file
             if not usage_results and usage_per_cond:
@@ -1920,27 +2330,7 @@ def main() -> None:
             for usage_file in out_dir.glob(f"usage_{org_name}_from_*.npz"):
                 suffix = usage_file.stem.replace(f"usage_{org_name}_", "")
                 source_name = suffix.replace("from_", "")
-                
-                # Load usage data directly from NPZ file
-                u = np.load(usage_file)
-                loaded_usage_per_cond: dict = {}
-                if "cond_ids" in u:
-                    cond_ids = u["cond_ids"].astype(np.int32, copy=False)
-                    pred = u["pred"].astype(np.float32, copy=False)
-                    true = u["true"].astype(np.float32, copy=False)
-                    if cond_ids.size > 0:
-                        order = np.argsort(cond_ids, kind="stable")
-                        cond_sorted = cond_ids[order]
-                        pred_sorted = pred[order]
-                        true_sorted = true[order]
-                        uniq, starts, counts = np.unique(cond_sorted, return_index=True, return_counts=True)
-                        for c, s, k in zip(uniq.tolist(), starts.tolist(), counts.tolist()):
-                            loaded_usage_per_cond[int(c)] = {
-                                "pred": pred_sorted[s:s + k],
-                                "true": true_sorted[s:s + k],
-                            }
-                
-                usage_results[suffix] = (loaded_usage_per_cond, source_name)
+                usage_results[suffix] = (load_usage_npz(usage_file), source_name)
             
             # If no cross-species files, use the standard usage file
             if not usage_results and usage_per_cond:
@@ -2094,10 +2484,14 @@ def main() -> None:
                 collate_fn=collate_splice,
             )
 
+            # Chromosome name list from the dataset, for coordinate tracking / tidy Parquet output
+            _ds = dataset.dataset if hasattr(dataset, "dataset") else dataset
+            _chrom_names = getattr(_ds, "chrom_names", None)
+
             # -- Inference ---------------------------------------------------
             # Classification predictions (same for all usage heads)
             logger.info(f"[{org_name}] Running classification inference …")
-            cls_probs, cls_labels, _, loss_mask_full = collect_predictions(
+            cls_probs, cls_labels, _, loss_mask_full, genomic_pos_full, chrom_idx_full = collect_predictions(
                 model=model,
                 usage_heads=usage_heads,
                 loader=loader,
@@ -2106,8 +2500,9 @@ def main() -> None:
                 seq_len=seq_len,
                 skip_usage=True,  # Skip usage for now, compute separately per head
                 condition_mapping=None,
+                collect_positions=_chrom_names is not None,
             )
-            
+
             # Usage predictions (one per usage head configuration)
             usage_results: dict[str, tuple[dict, str]] = {}  # suffix -> (usage_per_cond, source_name)
             
@@ -2117,7 +2512,7 @@ def main() -> None:
                         f"[{org_name}] Running usage inference with {source_name} head "
                         f"(organism_index {usage_org_idx}) …"
                     )
-                    _, _, usage_per_cond, _ = collect_predictions(
+                    _, _, usage_per_cond, _, _, _ = collect_predictions(
                         model=model,
                         usage_heads=usage_heads,
                         loader=loader,
@@ -2147,23 +2542,34 @@ def main() -> None:
             # Also save loss_mask if it exists
             if loss_mask_full is not None:
                 npz_kwargs["loss_mask"] = loss_mask_full
+            if genomic_pos_full is not None and chrom_idx_full is not None:
+                npz_kwargs["genomic_pos"] = genomic_pos_full
+                npz_kwargs["chrom_idx"] = chrom_idx_full
+                npz_kwargs["chrom_names"] = np.asarray(_chrom_names, dtype=object)
             cls_npz_path = out_dir / f"predictions_{org_name}.npz"
             np.savez_compressed(cls_npz_path, **npz_kwargs)
             logger.info(f"  Saved: {cls_npz_path}")
-            
+
+            # Tidy per-position classification Parquet, replacing the manual notebook step
+            if genomic_pos_full is not None and chrom_idx_full is not None:
+                cls_pq_path = out_dir / f"predictions_{org_name}.parquet"
+                cls_df = build_classification_dataframe(
+                    _chrom_names, chrom_idx_full, genomic_pos_full, cls_labels, cls_probs
+                )
+                cls_df.to_parquet(cls_pq_path, index=False)
+                logger.info(f"  Saved: {cls_pq_path}")
+
             # Usage predictions (one file per usage head)
             if usage_results:
                 import tempfile
                 import shutil
-                
-                # Extract chromosome name list from the dataset for coordinate tracking
-                _ds = dataset.dataset if hasattr(dataset, "dataset") else dataset
-                _chrom_names = getattr(_ds, "chrom_names", None)
+
+                idx_to_label = load_condition_labels(spec.get("usage_parquet"))
 
                 for suffix, (usage_per_cond, source_name) in usage_results.items():
                     result_name = f"{org_name}_{suffix}" if suffix else org_name
                     usage_path = out_dir / f"usage_{result_name}.npz"
-                    
+
                     # Use save_predictions to create usage file, extract just the usage part
                     with tempfile.TemporaryDirectory(dir=out_dir) as tmpdir:
                         tmpdir_path = Path(tmpdir)
@@ -2174,7 +2580,18 @@ def main() -> None:
                         if temp_usage.exists():
                             shutil.move(str(temp_usage), str(usage_path))
                             logger.info(f"  Saved: {usage_path}")
-            
+
+                    # Tidy usage Parquet (Species/Chromosome/Position/SSE_true/SSE_pred/
+                    # Condition_Name/Tissue/Timepoint), replacing the manual notebook step
+                    if idx_to_label:
+                        usage_df = build_usage_dataframe(
+                            usage_per_cond, _chrom_names, org_name, idx_to_label
+                        )
+                        if usage_df is not None:
+                            usage_pq_path = out_dir / f"usage_{result_name}.parquet"
+                            usage_df.to_parquet(usage_pq_path, index=False)
+                            logger.info(f"  Saved: {usage_pq_path}")
+
             usage_stats = {}
 
             # If there are no remaining species that still require inference,
@@ -2209,7 +2626,14 @@ def main() -> None:
         # Compute usage metrics for each usage head variant
         usage_metrics_by_head: dict[str, dict] = {}
         per_tissue_by_head: dict[str, dict] = {}
-        
+        trajectory_metrics_by_head: dict[str, dict] = {}
+
+        # Condition index -> "Tissue_Timepoint" label, needed for --trajectory-corr's
+        # tissue grouping. Read directly from the data species' own usage metadata
+        # regardless of which usage head produced the predictions (usage_per_cond is
+        # always keyed by data condition index, never the source head's own index).
+        idx_to_label = load_condition_labels(spec.get("usage_parquet")) if args.trajectory_corr else {}
+
         if usage_results:
             for suffix, (usage_per_cond, source_name) in usage_results.items():
                 result_key = suffix if suffix else "same_species"
@@ -2226,7 +2650,19 @@ def main() -> None:
                         usage_m,
                         logger=logger
                     )
-                
+
+                if args.trajectory_corr and usage_per_cond and idx_to_label:
+                    traj_m = compute_trajectory_correlation(
+                        usage_per_cond, idx_to_label,
+                        min_tp=args.traj_min_timepoints,
+                        exc_floor=args.traj_exc_floor,
+                    )
+                    trajectory_metrics_by_head[result_key] = traj_m
+                    print_trajectory_metrics(
+                        f"{org_name} ({source_name} head)" if suffix else org_name,
+                        traj_m, logger=logger,
+                    )
+
                 # Plots for this usage head
                 if not args.skip_plots and usage_per_cond:
                     plot_suffix = f"_{suffix}" if suffix else ""
@@ -2269,12 +2705,16 @@ def main() -> None:
             
             if per_tissue_by_head:
                 all_results[org_name]["per_tissue_usage"] = next(iter(per_tissue_by_head.values()))
+            if trajectory_metrics_by_head:
+                all_results[org_name]["trajectory_correlation"] = next(iter(trajectory_metrics_by_head.values()))
         elif len(usage_metrics_by_head) > 1:
             # Multiple usage heads - nest under "usage_by_head"
             all_results[org_name]["usage_by_head"] = usage_metrics_by_head
-            
+
             if per_tissue_by_head:
                 all_results[org_name]["per_tissue_by_head"] = per_tissue_by_head
+            if trajectory_metrics_by_head:
+                all_results[org_name]["trajectory_correlation_by_head"] = trajectory_metrics_by_head
 
         del cls_probs, cls_labels, usage_results, usage_stats
 
