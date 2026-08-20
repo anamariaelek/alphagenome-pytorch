@@ -265,31 +265,55 @@ python scripts/cluster_trajectories.py \
     --n-jobs 16 --output results/ --save-plots
 ```
 
+For example, clustering macaque trajectories for test sites, in brain, cerebellum, liver, and testis:
+
+```bash
+PARQUET=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/combined_usage_data_macaque.parquet
+DATA_CONFIG=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/data_config.json
+REF=${HOME}/sds/sd17d003/Anamaria/gp_splice_usage
+
+for TISSUE in Brain Cerebellum Liver Testis; do
+    OUT=${REF}/macaque/${TISSUE}
+    mkdir -p ${OUT}
+    python scripts/cluster_trajectories.py \
+        --parquet-path ${PARQUET} \
+        --species macaque \
+        --tissue ${TISSUE} \
+        --data-config ${DATA_CONFIG} \
+        --split test \
+        --output ${OUT} \
+        --save-plots \
+        > ${OUT}/cluster_trajectories.log 2>&1
+    echo "Done: macaque ${TISSUE}"
+done
+```
+
 #### cluster_predictions.py
 Assigns *predicted* trajectories to the nearest centroid of an existing reference
 (observed) clustering from `cluster_trajectories.py` — never re-clusters predictions
 independently — and reports per-site true vs. predicted cluster/shape agreement.
 
-For example, clustering trajectories from `<model>` predictions for 4 organs in 5 species against reference (observed) trajectories saved in `<ref>`.
+For example, clustering trajectory predictions for multiple organs from multiple species against reference (observed) trajectories:
 
 ```bash
-ref=${HOME}/sds/sd17d003/Anamaria/gp_splice_usage/
-model=lora_32_traj_human_mouse_rat_rabbit_opossum_sasse3
-model_dir=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/${model}
-preds_dir=${model_dir}/preds_intersect_protein_coding
-usage_template=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/combined_usage_data_{species}.parquet
-for species in human mouse rat rabbit opossum; do
-    for tissue in Brain Cerebellum Liver Testis; do
-        out=${preds_dir}/${species}/pred_gp_splice_usage/${tissue}
-        mkdir -p ${out}
+REF=${HOME}/sds/sd17d003/Anamaria/gp_splice_usage/
+MODEL=lora_64_traj_qc
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/${MODEL}
+PREDS_DIR=${MODEL_DIR}/preds_intersect_protein_coding
+USAGE_TEMPLATE=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/combined_usage_data_{species}.parquet
+for SPECIES in macaque; do
+for SPECIES in macaque; do
+    for TISSUE in Brain Cerebellum Liver Testis; do
+        OUT=${PREDS_DIR}/${SPECIES}/pred_gp_splice_usage/${TISSUE}
+        mkdir -p ${OUT}
         python scripts/cluster_predictions.py \
-            --species ${species} \
-            --tissue ${tissue} \
-            --ref-dir ${ref} \
-            --preds-dir ${preds_dir} \
-            --usage-template ${usage_template} \
-            --output ${out} > ${out}/cluster_predictions.log 2>&1
-        echo "Running clustering predictions for ${species} ${tissue}"
+            --species ${SPECIES} \
+            --tissue ${TISSUE} \
+            --ref-dir ${REF} \
+            --preds-dir ${PREDS_DIR} \
+            --usage-template ${USAGE_TEMPLATE} \
+            --output ${OUT} > ${OUT}/cluster_predictions.log 2>&1
+        echo "Running clustering predictions for ${SPECIES} ${TISSUE}"
     done
 done
 ```

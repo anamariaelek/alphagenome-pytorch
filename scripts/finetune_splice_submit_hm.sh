@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hm-132kb-obs
+#SBATCH --job-name=ft-hm
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=1
-#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
-#SBATCH --mem=300gb
-#SBATCH --time=48:00:00
+#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
+#SBATCH --mem=30gb
+#SBATCH --time=18:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -80,20 +80,20 @@ echo "Log file: ${LOG_FILE}"
 echo "---"
 
 # Resume if checkpoint exists
-RESUME="${OUTPUT_DIR}/${RUN_NAME}/best_model.pth"
-if [ -f "${RESUME}" ]; then
-    echo "Resuming from checkpoint: ${RESUME}"
-else
-    echo "No checkpoint found at ${RESUME}. Starting fresh training."
-    RESUME="auto"
-fi
+#RESUME="${OUTPUT_DIR}/${RUN_NAME}/best_model.pth"
+#if [ -f "${RESUME}" ]; then
+#    echo "Resuming from checkpoint: ${RESUME}"
+#else
+#    echo "No checkpoint found at ${RESUME}. Starting fresh training."
+#    RESUME="auto"
+#fi
 
 # Run training with timestamped log file
 # Python's setup_output_logging will handle the tee to LOG_FILE
 python -u ${WORK_DIR}/scripts/finetune_splice.py \
     --config ${CONFIG} \
     --compile \
-    --resume ${RESUME} \
+    --resume "auto" \
     --log-file ${LOG_FILE}
 
 echo "---"

@@ -109,14 +109,14 @@ usage_weight: 1.0
 # train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
 usage_loss_weights:
   bce: 1.0
-  delta_mse: 1.0
-  trajectory_pearson: 0.5
+  delta_mse: 5.0
+  trajectory_pearson: 2.0
 
 # BCE-only warm-up: for the first N epochs (1-indexed) the delta_mse/trajectory_pearson
 # terms are DISABLED (pure BCE); they switch on at full strength from epoch N+1.
 # N=2 -> epochs 1-2 BCE only, trajectory terms from epoch 3. 0 = no warm-up. The per-tissue
 # Pearson (traj_r / train_usage_trajectory_corr) is still logged during warm-up.
-usage_traj_warmup_epochs: 3
+usage_traj_warmup_epochs: 1
 
 # Gradient clipping (0 to disable)
 max_grad_norm: 1.0
@@ -143,7 +143,7 @@ log_every: 10
 # Output / checkpointing
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: lora_64_emb_traj_hm        # defaults to timestamp
+run_name: lora_64_emb_traj_hm__       # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

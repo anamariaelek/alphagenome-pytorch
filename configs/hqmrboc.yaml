@@ -47,7 +47,7 @@ species:
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/rabbit/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/rabbit/fold0/valid.bed
     organism_index: 3
-
+  
   - name: opossum
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Monodelphis_domestica.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/splice_sites_intersect_usage_protein_coding.parquet
@@ -55,15 +55,15 @@ species:
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/opossum/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/opossum/fold0/valid.bed
     organism_index: 4
-  
+
   - name: macaque
-    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Macaca_mulatta.fa
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/valid.bed
     organism_index: 5
-
+    
   - name: chicken
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Gallus_gallus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/splice_sites_intersect_usage_protein_coding.parquet
@@ -78,8 +78,8 @@ organism_embedding_init:
   2: 1   # new organism 2 from pretrained organism 1
   3: 1   # new organism 3 from pretrained organism 1
   4: 1   # new organism 4 from pretrained organism 1
-  5: 1   # new organism 5 from pretrained organism 1
-  6: 1   # new organism 6 from pretrained organism 1
+  5: 0   # new organism 5 from pretrained organism 0
+  6: 1   # new organism 5 from pretrained organism 0
 
 # ---------------------------------------------------------------------------
 # Pretrained weights
@@ -103,8 +103,17 @@ cache_genome: false        # false (default): lazy on-demand FASTA reads (fast s
 usage_coord_base: 0
 
 # observed_conditions_only: false (default) means unobserved conditions are treated as 0 and included in loss
-# observed_conditions_only: true means only compute loss for observed (position, condition) pairs
+# observed_conditions_only: true means only compute loss for:
+#     1) observed conditions in tissues with at least one observed timepoint, and
+#     2) all conditions in tissues with no observed timepoints (treating them as 0)
 observed_conditions_only: true
+
+# Balance the training sampler: cyclically resample smaller species (rabbit, chicken
+# currently have ~40% fewer windows than human/mouse/rat/opossum) up to the largest
+# species' window count, so every species gets the same number of batches/gradient
+# updates per epoch. Validation sampler is left unbalanced (per-species eval metrics
+# stay representative of the true data distribution).
+oversample_species: true
 
 # ---------------------------------------------------------------------------
 # Model / LoRA
@@ -112,16 +121,25 @@ observed_conditions_only: true
 dtype: bfloat16            # bfloat16 | float32
 gradient_checkpointing: true
 
-lora_rank: 8
-lora_alpha: 16
-lora_targets: q_proj,v_proj
+train_species_embeddings: true
+
+lora_rank: 64
+lora_alpha: 128
+lora_targets: q_proj,v_proj,k_proj,linear_embedding
+
+# Additional components to fully fine-tune on top of whatever 'mode' already
+# trains (splice heads, LoRA-adapted attention, species embeddings above).
+# Comma-separated, ignored in 'mode: full' (everything is already trainable).
+# Valid names: encoder, tower, decoder, embedder_128bp, embedder_1bp,
+# embedder_pair, organism_embed
+train_components: embedder_1bp
 
 # ---------------------------------------------------------------------------
 # Optimiser
 # ---------------------------------------------------------------------------
 epochs: 20
-batch_size: 4
-gradient_accumulation_steps: 64   # effective batch = batch_size * accum * gpus
+batch_size: 6
+gradient_accumulation_steps: 32   # effective batch = batch_size * accum * gpus
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 1000
@@ -143,14 +161,11 @@ usage_weight: 1.0
 # train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
 usage_loss_weights:
   bce: 1.0
-  delta_mse: 0.0
+  delta_mse: 5.0
   trajectory_pearson: 1.0
 
-# BCE-only warm-up: for the first N epochs (1-indexed) the delta_mse/trajectory_pearson
-# terms are DISABLED (pure BCE); they switch on at full strength from epoch N+1.
-# N=2 -> epochs 1-2 BCE only, trajectory terms from epoch 3. 0 = no warm-up. The per-tissue
-# Pearson (traj_r / train_usage_trajectory_corr) is still logged during warm-up.
-usage_traj_warmup_epochs: 0
+# BCE-only warm-up. The per-tissue traj_r / train_usage_trajectory_corr is still logged during warm-up.
+usage_traj_warmup_epochs: 3
 
 # Gradient clipping (0 to disable)
 max_grad_norm: 1.0 
@@ -158,7 +173,7 @@ max_grad_norm: 1.0
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
-num_workers: 2
+num_workers: 2             # Reduced to 2 to minimize RAM usage from worker processes
 use_amp: true              # set false to disable AMP
 compile: true              # torch.compile for fused kernels
 # Fraction of GPU memory this process may use (1.0 = no cap). Set <1.0 to leave
@@ -174,10 +189,10 @@ wandb_project: alphagenome-splice
 log_every: 10
 
 # ---------------------------------------------------------------------------
-# Output / checkpointing
+# Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: 132kb_encode_intersect_usage_pc_obs_human_macaque_mouse_rat_rabbit_opossum_chicken        # defaults to timestamp
+run_name: lora_64_emb_traj_hqmrboc_        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

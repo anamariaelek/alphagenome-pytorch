@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=hmrbo
-#SBATCH --partition=gpu-single 
+#SBATCH --job-name=ft-hqmo
+#SBATCH --partition=gpu-single
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=2
 #SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
-#SBATCH --mem=80gb
+#SBATCH --mem=30gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_hmrbo_132kb.yaml"
+CONFIG="${WORK_DIR}/configs/hqmo.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then
@@ -80,20 +80,20 @@ echo "Log file: ${LOG_FILE}"
 echo "---"
 
 # Resume if checkpoint exists
-RESUME="${OUTPUT_DIR}/${RUN_NAME}/best_model.pth"
-if [ -f "${RESUME}" ]; then
-    echo "Resuming from checkpoint: ${RESUME}"
-else
-    echo "No checkpoint found at ${RESUME}. Starting fresh training."
-    RESUME="auto"
-fi
+#RESUME="${OUTPUT_DIR}/${RUN_NAME}/best_model.pth"
+#if [ -f "${RESUME}" ]; then
+#    echo "Resuming from checkpoint: ${RESUME}"
+#else
+#    echo "No checkpoint found at ${RESUME}. Starting fresh training."
+#    RESUME="auto"
+#fi
 
 # Run training with timestamped log file
 # Python's setup_output_logging will handle the tee to LOG_FILE
 python -u ${WORK_DIR}/scripts/finetune_splice.py \
     --config ${CONFIG} \
     --compile \
-    --resume ${RESUME} \
+    --resume "auto" \
     --log-file ${LOG_FILE}
 
 echo "---"

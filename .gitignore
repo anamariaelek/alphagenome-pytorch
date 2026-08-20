@@ -77,6 +77,8 @@ docs/_build/
 # Hatch VCS
 src/alphagenome_pytorch/_version.py
 
+._*
 slurm*
+logs*
 tmp
 examples/notebooks/*png

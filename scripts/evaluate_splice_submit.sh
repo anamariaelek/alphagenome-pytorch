@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=eval-ft-hmrro
+#SBATCH --job-name=eval-hqmo__
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=1
-#SBATCH --gres=gpu:1,gpumem_per_gpu:20GB
-#SBATCH --mem=60gb
-#SBATCH --time=8:00:00
+#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
+#SBATCH --mem=40gb
+#SBATCH --time=6:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -67,29 +67,48 @@ DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 # PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=lora_32_human_mouse_rat_rabbit_opossum
+RUN=lora_64_emb_traj_hqmo
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
 # Data configuration
 DATA_CONFIG="${DIR}/data/data_config_${TIMESTAMP}.json"
 
-# Evaluation settings
-for EVAL_SPECIES in human mouse rat rabbit opossum; do
+# Evaluation on trained species
+for EVAL_SPECIES in human mouse macaque opossum; do 
 OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
-
 python ${WORK_DIR}/scripts/evaluate_splice.py \
     --checkpoint "${CHECKPOINT_PATH}" \
     --data-config "${DATA_CONFIG}" \
     --eval-species "${EVAL_SPECIES}" \
     --per-tissue \
     --observed-conditions-only \
+    --trajectory-corr \
     --overwrite \
-    --batch-size 8 \
+    --batch-size 6 \
     --max-windows 1000 \
     --device cuda \
     --seed 1950 \
     --output-dir "${OUT_DIR}" 
- 
+done
+
+# Evaluation on unseen species
+for EVAL_SPECIES in rat rabbit chicken; do 
+OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
+mkdir -p ${OUT_DIR}
+python ${WORK_DIR}/scripts/evaluate_splice.py \
+    --checkpoint "${CHECKPOINT_PATH}" \
+    --data-config "${DATA_CONFIG}" \
+    --eval-species "${EVAL_SPECIES}" \
+    --per-tissue \
+    --observed-conditions-only \
+    --trajectory-corr \
+    --cross-species-usage \
+    --overwrite \
+    --batch-size 6 \
+    --max-windows 1000 \
+    --device cuda \
+    --seed 1950 \
+    --output-dir "${OUT_DIR}"
 done

@@ -93,6 +93,10 @@ def main():
 
             meta = pd.read_parquet(pcp, columns=["Chromosome", "Position", "pred_cluster",
                                                   "pred_shape", "ref_cluster"])
+            if meta.empty:
+                log.warning("  [%s/%s] %s has 0 rows (no trajectories cleared "
+                            "cluster_predictions.py's --min-timepoints) — skipping", sp, organ, pcp)
+                continue
             meta["Chromosome"] = meta["Chromosome"].astype(str)
             # Total size of the FIXED reference clustering predictions were assigned into
             # (Ward cluster IDs are contiguous 1..N) — used so a given cluster ID gets the
