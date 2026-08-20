@@ -129,14 +129,26 @@ def save_checkpoint(
     atomic_torch_save(checkpoint, path)
 
 
-def find_latest_checkpoint(output_dir: Path) -> Path | None:
+def find_latest_checkpoint(
+    output_dir: Path,
+    pattern: str = "checkpoint_epoch*.pth",
+) -> Path | None:
     """Find the most recent checkpoint in output_dir.
 
     Prefers ``checkpoint_preempt.pth`` (saved mid-epoch by the signal
-    handler) over ``checkpoint_epoch*.pth`` when it is newer.
+    handler) over the per-epoch checkpoints matched by ``pattern`` when it
+    is newer.
 
     Args:
         output_dir: Directory to search for checkpoints.
+        pattern: Glob pattern for per-epoch checkpoints, matching whatever
+            naming convention the caller's ``save_checkpoint`` calls use
+            (e.g. ``scripts/finetune.py`` writes ``checkpoint_epoch{N}.pth``,
+            the default here, while ``scripts/finetune_splice.py`` writes
+            ``epoch_{N:02d}.pth`` and must pass ``pattern="epoch_*.pth"``).
+            A mismatched pattern silently finds nothing and "auto" resume
+            falls back to training from scratch, so keep this in sync with
+            the filenames actually passed to ``save_checkpoint``.
 
     Returns:
         Path to the latest checkpoint, or None if no checkpoints found.
@@ -149,9 +161,10 @@ def find_latest_checkpoint(output_dir: Path) -> Path | None:
     preempt = output_dir / "checkpoint_preempt.pth"
 
     def _epoch_num(p: Path) -> int:
-        return int(p.stem.replace("checkpoint_epoch", ""))
+        digits = "".join(ch for ch in p.stem if ch.isdigit())
+        return int(digits) if digits else -1
 
-    epoch_ckpts = list(output_dir.glob("checkpoint_epoch*.pth"))
+    epoch_ckpts = list(output_dir.glob(pattern))
     epoch_ckpts.sort(key=_epoch_num)
 
     if not epoch_ckpts and not preempt.exists():

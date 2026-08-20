@@ -703,6 +703,16 @@ class SpeciesGroupedSampler(BatchSampler):
         shuffle: Shuffle both within-species indices and the final batch order.
         seed: Base random seed (combined with *epoch* via :meth:`set_epoch`).
         drop_last: If ``True``, drop the last incomplete batch per species.
+        oversample_to_max: If ``True``, every species is (cyclically) resampled
+            up to the window count of the largest species before batching, so
+            every species contributes the same number of batches/gradient
+            updates per epoch instead of being proportional to its dataset
+            size. Each real example is still used floor(target/n) or
+            floor(target/n)+1 times per epoch (not iid with-replacement), to
+            keep per-epoch exposure even. Has no effect on the species with
+            the most windows. Recommended for the training sampler only —
+            leave validation unbalanced so reported per-species metrics stay
+            representative of the true data distribution.
     """
 
     def __init__(
@@ -712,11 +722,13 @@ class SpeciesGroupedSampler(BatchSampler):
         shuffle: bool = True,
         seed: int = 0,
         drop_last: bool = False,
+        oversample_to_max: bool = False,
     ) -> None:
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
         self.drop_last = drop_last
+        self.oversample_to_max = oversample_to_max
         self._epoch = 0
 
         # Build organism_index → list of global dataset indices
@@ -733,13 +745,27 @@ class SpeciesGroupedSampler(BatchSampler):
             org_idx = dataset.organism_index
             self.species_indices[org_idx] = list(range(len(dataset)))
 
+    def _target_size(self) -> int:
+        """Window count every species is resampled up to when balancing."""
+        return max(len(v) for v in self.species_indices.values())
+
     def _make_batches(self) -> list[list[int]]:
         rng = np.random.default_rng(self.seed + self._epoch)
         batches: list[list[int]] = []
+        target_n = self._target_size() if self.oversample_to_max else None
         for org_idx, indices in self.species_indices.items():
             idx_arr = np.array(indices, dtype=np.int64)
             if self.shuffle:
                 rng.shuffle(idx_arr)
+            if target_n is not None and len(idx_arr) < target_n:
+                n_repeats = math.ceil(target_n / len(idx_arr))
+                tiled = np.tile(idx_arr, n_repeats)
+                if self.shuffle:
+                    # Reshuffle the tiled array (not just each repeat block) so
+                    # duplicated examples don't land in the same relative
+                    # position/batch every cycle.
+                    rng.shuffle(tiled)
+                idx_arr = tiled[:target_n]
             for i in range(0, len(idx_arr), self.batch_size):
                 batch = idx_arr[i : i + self.batch_size].tolist()
                 if self.drop_last and len(batch) < self.batch_size:
@@ -755,8 +781,9 @@ class SpeciesGroupedSampler(BatchSampler):
 
     def __len__(self) -> int:
         total = 0
+        target_n = self._target_size() if self.oversample_to_max else None
         for indices in self.species_indices.values():
-            n = len(indices)
+            n = target_n if target_n is not None else len(indices)
             if self.drop_last:
                 total += n // self.batch_size
             else:
@@ -782,6 +809,7 @@ class DistributedSpeciesGroupedSampler(SpeciesGroupedSampler):
         shuffle: As in :class:`SpeciesGroupedSampler`.
         seed: As in :class:`SpeciesGroupedSampler`.
         drop_last: As in :class:`SpeciesGroupedSampler`.
+        oversample_to_max: As in :class:`SpeciesGroupedSampler`.
     """
 
     def __init__(
@@ -793,8 +821,12 @@ class DistributedSpeciesGroupedSampler(SpeciesGroupedSampler):
         shuffle: bool = True,
         seed: int = 0,
         drop_last: bool = False,
+        oversample_to_max: bool = False,
     ) -> None:
-        super().__init__(dataset, batch_size, shuffle=shuffle, seed=seed, drop_last=drop_last)
+        super().__init__(
+            dataset, batch_size, shuffle=shuffle, seed=seed, drop_last=drop_last,
+            oversample_to_max=oversample_to_max,
+        )
         self.num_replicas = num_replicas
         self.rank = rank
 

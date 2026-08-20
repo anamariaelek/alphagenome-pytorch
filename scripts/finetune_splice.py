@@ -285,6 +285,16 @@ def parse_args() -> argparse.Namespace:
              "across observed conditions (MSE on deltas). When False (default), compute MSE "
              "on absolute usage values.",
     )
+    data.add_argument(
+        "--oversample-species",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="In multi-species training, cyclically resample every species' training "
+             "windows up to the largest species' count before batching, so each species "
+             "contributes the same number of batches/gradient updates per epoch instead "
+             "of being proportional to its window count. Training only — validation "
+             "stays unbalanced so per-species metrics remain representative.",
+    )
 
     # Model arguments
     model_grp = parser.add_argument_group("Model")
@@ -460,6 +470,7 @@ def parse_args() -> argparse.Namespace:
         "usage_coord_base",
         "observed_conditions_only",
         "usage_delta_from_mean",
+        "oversample_species",
         "pretrained_weights",
         "lora_rank",
         "lora_alpha",
@@ -681,14 +692,24 @@ def create_dataloaders(
     batch_size: int,
     num_workers: int,
     seed: int = 0,
+    oversample_species: bool = False,
 ) -> tuple[DataLoader, DataLoader, Any, Any]:
     """Create data loaders backed by species-grouped batch samplers.
 
     Each batch is guaranteed to contain sequences from a single species,
     which allows per-species usage heads with different ``n_conditions``.
+
+    ``oversample_species`` balances the *training* sampler only (cyclically
+    resampling smaller species up to the largest species' window count), so
+    every species gets the same number of batches/gradient updates per
+    epoch. The validation sampler is left unbalanced so per-species eval
+    metrics stay representative of the true data distribution.
     """
     from alphagenome_pytorch.extensions.finetuning.splice_datasets import SpeciesGroupedSampler
-    train_sampler = SpeciesGroupedSampler(train_dataset, batch_size=batch_size, shuffle=True, seed=seed)
+    train_sampler = SpeciesGroupedSampler(
+        train_dataset, batch_size=batch_size, shuffle=True, seed=seed,
+        oversample_to_max=oversample_species,
+    )
     val_sampler = SpeciesGroupedSampler(val_dataset, batch_size=batch_size, shuffle=False, seed=seed)
 
     from alphagenome_pytorch.extensions.finetuning.splice_datasets import collate_splice
@@ -1054,7 +1075,11 @@ def main() -> None:
     # Resolve resume checkpoint
     resume_path = None
     if args.resume == "auto":
-        resume_path = find_latest_checkpoint(output_dir)
+        # finetune_splice.py saves per-epoch checkpoints as "epoch_{N:02d}.pth"
+        # (not "checkpoint_epoch{N}.pth", which is finetune.py's convention and
+        # find_latest_checkpoint's default) — the pattern must match or "auto"
+        # silently finds nothing and starts fresh.
+        resume_path = find_latest_checkpoint(output_dir, pattern="epoch_*.pth")
         if resume_path:
             print(f"Auto-resume: found {resume_path}")
         else:
@@ -1076,8 +1101,11 @@ def main() -> None:
         args.batch_size,
         args.num_workers,
         seed=args.seed or 0,
+        oversample_species=args.oversample_species,
     )
     print(f"Train batches: {len(train_loader):,}, Val batches: {len(val_loader):,}")
+    if args.oversample_species:
+        print("  (species-balanced: smaller species oversampled up to the largest species' window count)")
 
     class_weights: torch.Tensor | None = None
 
@@ -1150,7 +1178,9 @@ def main() -> None:
         "usage_coord_base": args.usage_coord_base,
         "observed_conditions_only": args.observed_conditions_only,
         "usage_delta_from_mean": args.usage_delta_from_mean,
+        "oversample_species": args.oversample_species,
         "usage_loss_weights": getattr(args, "usage_loss_weights", None),
+        "usage_traj_warmup_epochs": getattr(args, "usage_traj_warmup_epochs", 0),
         "species_n_conditions": species_n_conditions,
         "cls_weight": args.cls_weight,
         "usage_weight": args.usage_weight,

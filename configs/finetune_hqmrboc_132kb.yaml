@@ -55,8 +55,7 @@ species:
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/opossum/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/opossum/fold0/valid.bed
     organism_index: 4
-
-species:
+    
   - name: macaque
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
@@ -109,6 +108,13 @@ usage_coord_base: 0
 #     2) all conditions in tissues with no observed timepoints (treating them as 0)
 observed_conditions_only: true
 
+# Balance the training sampler: cyclically resample smaller species (rabbit, chicken
+# currently have ~40% fewer windows than human/mouse/rat/opossum) up to the largest
+# species' window count, so every species gets the same number of batches/gradient
+# updates per epoch. Validation sampler is left unbalanced (per-species eval metrics
+# stay representative of the true data distribution).
+oversample_species: true
+
 # ---------------------------------------------------------------------------
 # Model / LoRA
 # ---------------------------------------------------------------------------
@@ -119,14 +125,14 @@ train_species_embeddings: true
 
 lora_rank: 64
 lora_alpha: 128
-lora_targets: q_proj,v_proj
+lora_targets: q_proj,v_proj,k_proj,linear_embedding
 
 # Additional components to fully fine-tune on top of whatever 'mode' already
 # trains (splice heads, LoRA-adapted attention, species embeddings above).
 # Comma-separated, ignored in 'mode: full' (everything is already trainable).
 # Valid names: encoder, tower, decoder, embedder_128bp, embedder_1bp,
 # embedder_pair, organism_embed
-#train_components: tower,embedder_1bp,embedder_128bp
+train_components: embedder_1bp
 
 # ---------------------------------------------------------------------------
 # Optimiser
@@ -186,7 +192,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: lora_64_traj_hqmrboc        # defaults to timestamp
+run_name: lora_64_emb_traj_hqmrboc        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir
