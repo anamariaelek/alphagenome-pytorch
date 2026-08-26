@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hm
+#SBATCH --job-name=ft-hm___
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
 #SBATCH --mem=30gb
-#SBATCH --time=18:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Config file
-CONFIG="${WORK_DIR}/configs/finetune_hm_132kb.yaml"
+CONFIG="${WORK_DIR}/configs/hm.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

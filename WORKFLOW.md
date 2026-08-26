@@ -190,33 +190,63 @@ passes it (`class_weights` stays `None` throughout), so current training runs us
 
 ## Usage loss
 
-The usage head is trained with a composite loss, configured via `usage_loss_weights`
-in the YAML config:
+The usage head is trained with a composite loss (`splice_usage_loss` in
+[`splice_losses.py`](../src/alphagenome_pytorch/extensions/finetuning/splice_losses.py)),
+combining up to three components, each isolating a different, otherwise-conflatable
+kind of error. `usage_loss_weights` in the YAML config supplies each component's
+weight; a component with weight `0.0` (or an omitted key) is skipped entirely — its
+loss and any per-batch metrics it would log are simply not computed.
 
-- `bce`: binary cross-entropy on absolute usage (SSE) — every observed (position,
-  condition) pair. The baseline "get the level right" term.
-- `delta_mse`: per-(site,tissue) centered MSE — teaches trajectory *magnitude*.
-- `trajectory_pearson`: `1 - PearsonR` per (site,tissue) — teaches trajectory
-  *direction*, independent of amplitude.
+- **`bce`** — binary cross-entropy on absolute usage (SSE) in `[0, 1]`, over every
+  observed `(position, condition)` pair, no eligibility filter. The baseline "get the
+  absolute level right" term — this is what actually calibrates predicted usage
+  fraction against the true one; the two trajectory terms below are deliberately
+  blind to absolute level.
+- **`delta_mse`** — per-(site, tissue) centered MSE: both predicted and true
+  trajectories are first mean-centered over their own observed timepoints
+  (`_tissue_centered`), then squared error is computed between the two *centered*
+  curves. Centering means a constant level offset scores zero error here — this term
+  is purely about trajectory *magnitude* (how big the swing is), not where it sits.
+  Eligible trajectories are weighted **equally** (not by amplitude), so a handful of
+  extreme-swing sites can't dominate a batch's gradient.
+- **`trajectory_pearson`** — `1 - PearsonR` per (site, tissue), computed on the same
+  centered curves. Pearson r is scale- and shift-invariant, so this term is purely
+  about trajectory *direction/shape* — a prediction that's the right shape but at
+  half (or double) the true amplitude still scores well here (that failure mode is
+  `delta_mse`'s job to catch, not this term's). The correlation denominator is
+  regularized by `var_floor` (fixed at `1e-3`, not YAML-configurable) so a flat
+  *prediction* (near-zero variance) yields a bounded gradient (`r → 0`) instead of
+  the correlation blowing up, rather than being skipped as ineligible.
 
-`delta_mse` and `trajectory_pearson` are restricted to sites whose true trajectory
-clears an excursion filter (5-point median-filtered deviation from its own baseline,
-"exc5") — this excludes flat sites, noisy wobble, and measurement outliers, so the 
-trajectory terms only spend gradient on genuinely dynamic developmental sites 
-instead of being swamped by the (much larger) flat majority.
+`delta_mse` and `trajectory_pearson` are both restricted to the same eligibility
+gate: a trajectory must have `≥ min_tp` observed timepoints *and* its median-filtered
+(`median_win`-point), self-recentered excursion — max deviation from its own
+filtered-baseline mean, robust to a 1-2 point noisy outlier — must exceed
+`exc_floor`. Current fixed values (`_per_tissue_delta_mse` / `_per_tissue_pearson_loss`
+defaults, not exposed in the YAML config): `min_tp=3`, `exc_floor=0.10`,
+`median_win=5` — nicknamed "exc5" elsewhere in this codebase (`evaluate_splice.py
+--trajectory-corr`, the prediction-clustering notebooks). This excludes flat sites,
+noisy wobble, and single-timepoint measurement outliers, so both trajectory terms
+only spend gradient on genuinely dynamic developmental sites instead of being
+swamped by the (much larger) flat majority — a plain, unfiltered version of either
+loss over *all* sites never learns real trajectory behavior for the dynamic
+minority.
 
-`usage_traj_warmup_epochs` linearly ramps `delta_mse`/`trajectory_pearson` from 0 to
-their configured weight over the first N epochs (`bce` is always at full weight), so
-the level fit is established before the trajectory terms apply full pressure.
+`usage_traj_warmup_epochs` (integer, default `0` = off) linearly ramps
+`delta_mse`/`trajectory_pearson`'s weights from `0` up to their configured value
+over the first N epochs — `bce` is always at full weight from epoch 1. The scale
+factor is `min(1, max(0, (epoch - 1) / usage_traj_warmup_epochs))`, so it's `0` at
+epoch 1 and reaches `1.0` (full configured weight) at epoch
+`usage_traj_warmup_epochs + 1`. The point is to let the level fit (`bce`) get
+established before the trajectory terms start applying gradient pressure, rather
+than all three competing from epoch 1.
 
-`tissue_cond_groups` (built automatically from each species' condition metadata)
-splits a site's conditions by tissue, ordered by developmental timepoint, so the
-trajectory terms measure *within-tissue* dynamics rather than between-tissue level
-offsets.
-
-See `usage_loss_weights` in any `configs/finetune_*_132kb.yaml` for the full
-parameter reference and current defaults.
-
+`tissue_cond_groups` (built automatically from each species' condition metadata, not
+a YAML key) splits a site's conditions by tissue, ordered by developmental
+timepoint, so `delta_mse`/`trajectory_pearson` measure *within-tissue* dynamics
+rather than between-tissue level offsets. Without it, both terms would collapse to
+one all-conditions group per site, dominated by between-tissue level differences
+rather than genuine developmental change within a tissue.
 
 # Evaluate
 
@@ -249,6 +279,29 @@ python scripts/predict_splice_site.py \
     --genome /path/to/genome.fa \
     --annotation /path/to/annotation.parquet \
     --checkpoint /path/to/model.pth
+```
+
+#### list_prediction_dirs.sh
+General lister: scans every model run directory under `DIR` (default
+`${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai`) for per-species prediction output
+directories — identified by a `metrics.json` inside them, under any `*/preds_*/<species>/`
+path, regardless of what the model run directory itself is named, or what follows the
+`preds_` prefix (`preds_intersect_protein_coding`, `preds_gtf`, `preds_union`, `preds_usage`,
+...) — and writes one tab-separated `(checkpoint, data_config, species, output_dir)` line per
+match to `JOBS_FILE` (default `/tmp/prediction_dirs.txt`) — re-derived from each directory's
+own `eval.log`, so no hardcoded model list. Lists every matching directory regardless of what's
+already been computed inside it; its two consumers decide what to do with each one, and both
+always run this script first, so they cover the same set of directories without needing to be
+chained manually:
+
+- **`backfill_trajectory_metrics.sh`** — reruns `evaluate_splice.py --skip-predictions
+  --trajectory-corr --overwrite` for every directory, (re)computing `trajectory_correlation` /
+  `trajectory_magnitude` whether or not that directory had them before.
+- **`cluster_predictions.sh`** (Developmental-trajectory clustering, below).
+
+```bash
+bash scripts/list_prediction_dirs.sh   # -> /tmp/prediction_dirs.txt
+bash scripts/backfill_trajectory_metrics.sh # PARALLEL=8 to tune
 ```
 
 ### Developmental-trajectory clustering
@@ -297,12 +350,11 @@ For example, clustering trajectory predictions for multiple organs from multiple
 
 ```bash
 REF=${HOME}/sds/sd17d003/Anamaria/gp_splice_usage/
-MODEL=lora_64_traj_qc
+MODEL=lora_64_emb_traj_hm_
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/${MODEL}
 PREDS_DIR=${MODEL_DIR}/preds_intersect_protein_coding
 USAGE_TEMPLATE=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/combined_usage_data_{species}.parquet
-for SPECIES in macaque; do
-for SPECIES in macaque; do
+for SPECIES in human mouse; do
     for TISSUE in Brain Cerebellum Liver Testis; do
         OUT=${PREDS_DIR}/${SPECIES}/pred_gp_splice_usage/${TISSUE}
         mkdir -p ${OUT}
@@ -323,6 +375,24 @@ python scripts/cluster_predictions.py --species human --tissue Brain \
     --ref-dir /path/to/gp_splice_usage --preds-dir /path/to/preds_root \
     --usage-template /path/to/data/combined_usage_data_{species}.parquet \
     --output /path/to/pred_clusters
+```
+
+#### cluster_predictions.sh
+Automates the `cluster_predictions.py` loop above across every `(model, species)` pair from
+`list_prediction_dirs.sh` (see the Evaluate section above), over the 4 tissues with a
+reference clustering (Brain/Cerebellum/Liver/Testis — matches
+`splice_prediction_clustering.ipynb`'s `TISSUE_LIST`). Writes to
+`<preds_dir>/<species>/pred_gp_splice_usage/<tissue>/`, the exact
+nested layout the notebook's `pred_clusters_path()` expects. Species with no reference
+clustering (e.g. chicken) are skipped automatically; `cluster_predictions.py` itself is
+idempotent (skips existing output unless `--overwrite`), so this is safe to rerun any time new
+predictions show up — it only fills in what's missing.
+
+```bash
+bash scripts/cluster_predictions.sh
+# tune parallelism: PARALLEL (concurrent cluster_predictions.py processes) x GP_NJOBS
+# (GP-fitting threads within each) -- keep their product under your core count
+PARALLEL=10 GP_NJOBS=2 bash scripts/cluster_predictions.sh
 ```
 
 #### plot_prediction_clusters.py

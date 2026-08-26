@@ -77,6 +77,7 @@ class SpliceTrainMetrics:
     usage_delta_loss: float | None = None
     usage_trajectory_loss: float | None = None
     usage_trajectory_corr: float | None = None  # mean per-tissue temporal Pearson
+    usage_trajectory_rmse: float | None = None  # literal true-vs-pred RMSE (level + magnitude)
     species_metrics: dict[int, dict[str, float]] = field(default_factory=dict)
     n_batches: int = 0
     n_usage_valid_pairs: int = 0  # total (position, condition) pairs with observed usage
@@ -169,10 +170,12 @@ def train_epoch_splice(
     usage_delta_sum = 0.0
     usage_traj_sum = 0.0
     usage_tcorr_sum = 0.0
+    usage_trmse_sum = 0.0
     n_usage_bce_batches = 0
     n_usage_delta_batches = 0
     n_usage_traj_batches = 0
     n_usage_tcorr_batches = 0
+    n_usage_trmse_batches = 0
     step = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
@@ -284,6 +287,10 @@ def train_epoch_splice(
             if _tc is not None and math.isfinite(_tc):
                 usage_tcorr_sum += _tc
                 n_usage_tcorr_batches += 1
+            _trmse = usage_corr.get("trajectory_rmse")
+            if _trmse is not None and math.isfinite(_trmse):
+                usage_trmse_sum += _trmse
+                n_usage_trmse_batches += 1
 
             # Scale for accumulation
             (total_loss / accumulation_steps).backward()
@@ -335,6 +342,7 @@ def train_epoch_splice(
                 usage_delta = usage_corr.get("delta_loss")
                 usage_traj = usage_corr.get("trajectory_loss")
                 usage_tcorr = usage_corr.get("trajectory_corr")
+                usage_trmse = usage_corr.get("trajectory_rmse")
                 usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_bce is not None else ""
                 usage_delta_str = f" usage_mse_delta={usage_delta:.4f}" if usage_delta is not None else ""
                 usage_traj_str = f" usage_traj={usage_traj:.4f}" if usage_traj is not None else ""
@@ -343,10 +351,11 @@ def train_epoch_splice(
                 if _traj_configured and _traj_scale < 1.0:
                     usage_traj_str += f" [traj warmup: scale={_traj_scale:.2f}]"
                 usage_tcorr_str = f" traj_r={usage_tcorr:.3f}" if usage_tcorr is not None else ""
+                usage_trmse_str = f" traj_rmse={usage_trmse:.4f}" if usage_trmse is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" +
-                    usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str +
+                    usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str + usage_trmse_str +
                     f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
                 )
                 # Add to logger
@@ -367,6 +376,8 @@ def train_epoch_splice(
                 if usage_tcorr is not None:
                     log_metrics["train_usage_trajectory_corr"] = usage_tcorr
                     log_metrics["train_usage_traj_weight_scale"] = _traj_scale
+                if usage_trmse is not None:
+                    log_metrics["train_usage_trajectory_rmse"] = usage_trmse
                 if logger is not None:
                     logger.log_step(log_metrics)
                 step_start = time.perf_counter()
@@ -402,6 +413,8 @@ def train_epoch_splice(
         metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
     if n_usage_tcorr_batches > 0:
         metrics.usage_trajectory_corr = usage_tcorr_sum / n_usage_tcorr_batches
+    if n_usage_trmse_batches > 0:
+        metrics.usage_trajectory_rmse = usage_trmse_sum / n_usage_trmse_batches
 
     # Warn when usage head is present but received zero gradient signal.
     # This typically means there are no matching (position, condition) pairs
@@ -477,10 +490,12 @@ def validate_splice(
     usage_delta_sum = 0.0
     usage_traj_sum = 0.0
     usage_tcorr_sum = 0.0
+    usage_trmse_sum = 0.0
     n_usage_bce_batches = 0
     n_usage_delta_batches = 0
     n_usage_traj_batches = 0
     n_usage_tcorr_batches = 0
+    n_usage_trmse_batches = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
 
@@ -554,6 +569,10 @@ def validate_splice(
                 if _tc is not None and math.isfinite(_tc):
                     usage_tcorr_sum += _tc
                     n_usage_tcorr_batches += 1
+                _trmse = usage_corr.get("trajectory_rmse")
+                if _trmse is not None and math.isfinite(_trmse):
+                    usage_trmse_sum += _trmse
+                    n_usage_trmse_batches += 1
 
             total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -578,6 +597,8 @@ def validate_splice(
                 "usage_loss": 0.0,
                 "traj_corr": 0.0,
                 "n_traj_corr": 0.0,
+                "traj_rmse": 0.0,
+                "n_traj_rmse": 0.0,
                 "n_batches": 0.0,
             }
         species_sums[batch_org]["loss"] += total_loss.item()
@@ -587,6 +608,10 @@ def validate_splice(
         if _tc is not None and math.isfinite(_tc):
             species_sums[batch_org]["traj_corr"] += _tc
             species_sums[batch_org]["n_traj_corr"] += 1.0
+        _trmse = usage_corr.get("trajectory_rmse")
+        if _trmse is not None and math.isfinite(_trmse):
+            species_sums[batch_org]["traj_rmse"] += _trmse
+            species_sums[batch_org]["n_traj_rmse"] += 1.0
         species_sums[batch_org]["n_batches"] += 1.0
         
         # Periodic memory cleanup in validation (RAM + GPU)
@@ -612,6 +637,8 @@ def validate_splice(
         metrics.usage_trajectory_loss = usage_traj_sum / n_usage_traj_batches
     if n_usage_tcorr_batches > 0:
         metrics.usage_trajectory_corr = usage_tcorr_sum / n_usage_tcorr_batches
+    if n_usage_trmse_batches > 0:
+        metrics.usage_trajectory_rmse = usage_trmse_sum / n_usage_trmse_batches
 
     for org_idx, sums in species_sums.items():
         n_batches = sums["n_batches"]
@@ -623,6 +650,8 @@ def validate_splice(
             }
             if sums["n_traj_corr"] > 0:
                 sm["val_usage_trajectory_corr"] = sums["traj_corr"] / sums["n_traj_corr"]
+            if sums["n_traj_rmse"] > 0:
+                sm["val_usage_trajectory_rmse"] = sums["traj_rmse"] / sums["n_traj_rmse"]
             metrics.species_metrics[org_idx] = sm
 
     # No correlation logging

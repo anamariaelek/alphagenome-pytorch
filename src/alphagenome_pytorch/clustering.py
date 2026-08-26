@@ -62,6 +62,24 @@ SHAPE_ORDER = [
     "noisy",
 ]
 
+# ── Hierarchical dynamic/direction labeling (exc5-gated) ─────────────────────────
+# A simpler, 5-label alternative to classify_cluster_shape/SHAPE_ORDER above: level
+# 1 is "dynamic or not", decided by the SAME excursion gate used by the
+# training-time trajectory loss and evaluate_splice.py --trajectory-corr (a
+# median-filtered, self-recentered deviation-from-baseline vs. exc_floor), not an
+# independent amplitude threshold; level 2 (dynamic trajectories only) is just
+# direction: up / down / a mid-trajectory reversal (up-down / down-up). See
+# classify_dynamic_direction.
+DYNAMIC_SHAPE_COLORS = {
+    "up":          "#1a7a1a",   # dark green
+    "down":        "#a01010",   # dark red
+    "up-down":     "#1f77b4",   # blue
+    "down-up":     "#ff7f0e",   # orange
+    "non_dynamic": "#7f7f7f",   # gray
+}
+
+DYNAMIC_SHAPE_ORDER = ["up", "down", "up-down", "down-up", "non_dynamic"]
+
 
 def prepare_trajectories(parquet_path, species=None, tissue=None,
                          min_timepoints=5, min_reads=1,
@@ -701,6 +719,79 @@ def classify_cluster_shape(mean_traj,
     if abs_net >= min_net_change:
         return f'{"up" if net_change > 0 else "down"}_{_knee()}'
     return "noisy"
+
+
+def trajectory_excursion(traj, win=5):
+    """Max deviation from baseline of a median-filtered, self-recentered curve --
+    the same "exc5" statistic used by the training-time trajectory loss
+    (``splice_losses._trajectory_excursion``) and ``evaluate_splice.py``'s
+    ``--trajectory-corr`` (``_trajectory_excursion_np``), applied here to a single
+    *fully observed* trajectory (a cluster mean, or any dense GP-feature vector) --
+    unlike the sparse real-observation case those two use, there's no missing-data
+    masking to do, so this is the plain, unmasked version.
+
+    The median filter (not a mean/boxcar filter) makes this robust to an isolated
+    1-2 point noisy timepoint; recentering on the *filtered* sequence's own mean
+    (not the raw mean) avoids an outlier still inflating the excursion even after
+    being filtered out of the max/min (see the two source functions' docstrings
+    for the full rationale). ``win`` is capped at the trajectory length (kept odd).
+    """
+    from scipy.ndimage import median_filter
+    y = np.asarray(traj, dtype=float)
+    n = len(y)
+    if n == 0:
+        return 0.0
+    win = max(1, min(win, n if n % 2 == 1 else n - 1))
+    filt = median_filter(y, size=win, mode="nearest")
+    baseline = float(filt.mean())
+    return float(np.max(np.abs(filt - baseline)))
+
+
+def classify_dynamic_direction(mean_traj,
+                               exc_floor=0.10,
+                               median_win=5,
+                               peak_window=(0.25, 0.75),
+                               reversal_fraction=0.30,
+                               biphasic_abs_leg=0.15):
+    """Two-level shape label (see ``DYNAMIC_SHAPE_ORDER``): first "dynamic or not"
+    via the exc5 excursion gate (matching training/evaluation, not an independent
+    amplitude threshold like ``classify_cluster_shape``'s ``amplitude_threshold``);
+    second, for dynamic trajectories only, plain *direction* -- up / down / a
+    mid-trajectory reversal -- with none of ``classify_cluster_shape``'s further
+    early/mid/late timing or high/low-baseline subdivisions.
+
+    1. Not dynamic (excursion <= ``exc_floor``) -> ``"non_dynamic"``.
+    2. Dynamic: a clean mid-trajectory peak or valley (both legs of the reversal
+       clear ``reversal_fraction`` of the amplitude AND the absolute floor
+       ``biphasic_abs_leg`` -- same biphasic test as ``classify_cluster_shape``,
+       so a shallow one-sided wiggle still doesn't count as a reversal) ->
+       ``"up-down"`` / ``"down-up"``; otherwise the plain start-vs-end direction
+       -> ``"up"`` / ``"down"``.
+    """
+    y = np.asarray(mean_traj, dtype=float)
+    n = len(y)
+
+    if trajectory_excursion(y, win=median_win) <= exc_floor:
+        return "non_dynamic"
+
+    lo = int(np.floor(peak_window[0] * n))
+    hi = int(np.ceil(peak_window[1] * n))
+    argmax_idx, argmin_idx = int(np.argmax(y)), int(np.argmin(y))
+    amplitude = float(np.max(y) - np.min(y))
+    min_leg = max(reversal_fraction * amplitude, biphasic_abs_leg)
+
+    is_up_down = (lo <= argmax_idx <= hi
+                  and float(y[argmax_idx] - y[0]) >= min_leg
+                  and float(y[argmax_idx] - y[-1]) >= min_leg)
+    is_down_up = (lo <= argmin_idx <= hi
+                  and float(y[0] - y[argmin_idx]) >= min_leg
+                  and float(y[-1] - y[argmin_idx]) >= min_leg)
+
+    if is_up_down:
+        return "up-down"
+    if is_down_up:
+        return "down-up"
+    return "up" if float(y[-1] - y[0]) >= 0 else "down"
 
 
 def select_k_gap(Z, k_min=5, k_max=80):

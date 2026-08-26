@@ -96,6 +96,7 @@ gradient_checkpointing: true
 
 train_species_embeddings: true
 
+# If mode: lora, these LoRA hyperparameters are used. If mode: full, they are ignored.
 lora_rank: 64
 lora_alpha: 128
 lora_targets: q_proj,v_proj,k_proj,linear_embedding

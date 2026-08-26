@@ -221,7 +221,9 @@ CHR_SIZES = {
 
 
 # Trajectory-clustering constants used by save_cluster_plots() below.
-from alphagenome_pytorch.clustering import T_GRID, SHAPE_COLORS, SHAPE_ORDER
+from alphagenome_pytorch.clustering import (
+    T_GRID, SHAPE_COLORS, SHAPE_ORDER, DYNAMIC_SHAPE_COLORS, DYNAMIC_SHAPE_ORDER,
+)
 
 def _normalize_tissue_subset(tissue_subset):
     """Return a de-duplicated list of tissue names or None."""
@@ -2230,11 +2232,20 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
     log.info("Heatmap -> %s", out_hm)
 
     # ── Cluster profiles (ordered by shape, then descending mean SSE) ─────────
-    _shape_rank = {s: i for i, s in enumerate(SHAPE_ORDER)}
+    # cluster_shapes may come from either shape-classification scheme (the fine-grained
+    # classify_cluster_shape or the simpler 5-label classify_dynamic_direction) -- detect
+    # which one from the labels actually present so ordering/coloring use the matching
+    # SHAPE_ORDER/SHAPE_COLORS vs DYNAMIC_SHAPE_ORDER/DYNAMIC_SHAPE_COLORS pair. Using the
+    # wrong pair leaves most labels unmatched, falling back to a uniform grey.
+    if set(cluster_shapes.values()) <= set(DYNAMIC_SHAPE_COLORS):
+        _shape_order, _shape_colors = DYNAMIC_SHAPE_ORDER, DYNAMIC_SHAPE_COLORS
+    else:
+        _shape_order, _shape_colors = SHAPE_ORDER, SHAPE_COLORS
+    _shape_rank = {s: i for i, s in enumerate(_shape_order)}
     _sorted_clusters = sorted(
         cluster_ids,
         key=lambda k: (
-            _shape_rank.get(cluster_shapes[k], len(SHAPE_ORDER)),
+            _shape_rank.get(cluster_shapes[k], len(_shape_order)),
             -float(features_v[cluster_labels == k].mean()),
         ),
     )
@@ -2252,7 +2263,7 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
         mean_k = features_v[mask_k].mean(axis=0)
         std_k  = features_v[mask_k].std(axis=0)
         shape_k = cluster_shapes[k]
-        color  = SHAPE_COLORS.get(shape_k, "#7f7f7f")
+        color  = _shape_colors.get(shape_k, "#7f7f7f")
 
         n_draw = min(80, mask_k.sum())
         for i in rng.choice(np.where(mask_k)[0], size=n_draw, replace=False):

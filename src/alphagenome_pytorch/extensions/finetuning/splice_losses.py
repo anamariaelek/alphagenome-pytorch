@@ -253,6 +253,20 @@ def splice_usage_loss(
             metrics_dict["trajectory_corr"] = _pm.get("trajectory_corr", float("nan"))
             metrics_dict["n_trajectory_sites"] = _pm.get("n_trajectory_sites", 0)
 
+        # Trajectory RMSE monitoring metric: literal, uncentered true-vs-pred residual --
+        # unlike delta_mse's loss above (mean-centered, so blind to a constant level/bias
+        # offset by design), this reflects bce-style level error and delta_mse-style
+        # magnitude error together, matching evaluate_splice.py's post-hoc `rmse`. Always
+        # computed (not gated on delta_mse's weight) since it isn't the same quantity as
+        # delta_loss even when delta_mse is weighted.
+        if tissue_cond_groups is not None:
+            with torch.no_grad():
+                _rmse_mse, _rm = _per_tissue_literal_mse(
+                    gathered_sigmoid, usage_values, final_mask, groups,
+                    min_tp=traj_min_timepoints, exc_floor=traj_exc_floor)
+            metrics_dict["trajectory_rmse"] = _rmse_mse.clamp(min=0).sqrt().item()
+            metrics_dict.setdefault("n_trajectory_sites", _rm.get("n_trajectory_sites", 0))
+
         if return_vals:
             return total_loss, metrics_dict, pred_vals, true_vals
         return total_loss, metrics_dict
@@ -377,6 +391,43 @@ def _per_tissue_delta_mse(pred, tgt, mask, groups, coverage=None,
         if coverage is not None:
             cov = coverage[..., idx].to(pred.dtype)
             w = w * (cov * mm).sum(-1) / denom              # mean coverage over obs tps
+        num = num + (se * w).sum()
+        wsum = wsum + w.sum()
+        n_traj += int(ok.sum().item())
+    loss = num / wsum.clamp(min=1e-6)
+    return loss, {"n_trajectory_sites": n_traj}
+
+
+def _per_tissue_literal_mse(pred, tgt, mask, groups,
+                            min_tp: int = 3, exc_floor: float = 0.10, median_win: int = 5,
+                            ) -> tuple[Tensor, dict[str, float]]:
+    """Per-(site,tissue) MSE on the literal, uncentered residual (``pred - tgt``) --
+    unlike :func:`_per_tissue_delta_mse` (which mean-centers both curves on their own
+    means first, so it's blind to a constant level/bias offset by design), this reflects
+    level error and magnitude error together, matching ``evaluate_splice.py``'s post-hoc
+    ``rmse`` metric. Monitoring only -- not used as a training loss; ``delta_mse`` keeps
+    using the centered version above so it trains magnitude independently of level (that's
+    ``bce``'s job). Same eligibility gate and equal-per-eligible-site weighting as
+    :func:`_per_tissue_delta_mse` -- a trajectory's dynamic-or-not status is about whether
+    its own TRUE shape shows a genuine excursion, unrelated to whether the residual used
+    to score it is centered.
+    """
+    num = (pred * 0.0).sum()
+    wsum = pred.new_zeros(())
+    n_traj = 0
+    for idx in groups:
+        p = pred[..., idx]
+        t = tgt[..., idx]
+        mm = mask[..., idx].to(pred.dtype)
+        n = mm.sum(-1)
+        denom = n.clamp(min=1)
+        se = ((p - t) ** 2 * mm).sum(-1) / denom             # (B, sites) literal per-traj MSE
+
+        mu_t = (t * mm).sum(-1) / denom
+        dt = (t - mu_t.unsqueeze(-1)) * mm
+        excursion = _trajectory_excursion(dt, mm, denom, win=median_win)
+        ok = (n >= min_tp) & (excursion > exc_floor)
+        w = ok.to(pred.dtype)                                # equal weight per eligible site
         num = num + (se * w).sum()
         wsum = wsum + w.sum()
         n_traj += int(ok.sum().item())

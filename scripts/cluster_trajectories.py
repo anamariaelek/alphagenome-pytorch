@@ -59,10 +59,12 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from alphagenome_pytorch.clustering import (
     T_GRID,
     SHAPE_ORDER,
+    DYNAMIC_SHAPE_ORDER,
     prepare_trajectories,
     filter_to_split,
     smooth_all_trajectories,
     classify_cluster_shape,
+    classify_dynamic_direction,
     select_k_gap,
 )
 from alphagenome_pytorch.plotting.splicing import save_cluster_plots
@@ -149,6 +151,22 @@ def parse_args():
 
     # Shape classification
     g = p.add_argument_group("Shape classification")
+    g.add_argument("--shape-scheme", choices=["dynamic", "legacy"], default="dynamic",
+                   help="'dynamic' (default): hierarchical 5-label scheme -- first "
+                        "dynamic-or-not via the same exc5 excursion gate used by the "
+                        "training-time trajectory loss and evaluate_splice.py "
+                        "--trajectory-corr (--exc-floor/--exc-median-win below), then "
+                        "for dynamic trajectories only, plain direction (up/down/"
+                        "up-down/down-up) -- no further early/mid/late timing or "
+                        "high/low-baseline subdivisions. 'legacy': the original 14-way "
+                        "classify_cluster_shape decision tree (remaining flags below).")
+    g.add_argument("--exc-floor", type=float, default=0.10,
+                   help="--shape-scheme=dynamic: min excursion (median-filtered, "
+                        "self-recentered deviation from baseline) to count as dynamic. "
+                        "Matches training's traj_exc_floor default. Default: 0.10")
+    g.add_argument("--exc-median-win", type=int, default=5,
+                   help="--shape-scheme=dynamic: median-filter window for the "
+                        "excursion gate. Default: 5")
     g.add_argument("--flat-high", type=float, default=0.80,
                    help="Mean SSE >= this → flat_high. Default: 0.80")
     g.add_argument("--flat-low",  type=float, default=0.20,
@@ -340,28 +358,37 @@ def main():
     cluster_labels = fcluster(Z, t=n_clusters, criterion="maxclust")
 
     # ── 4. Shape classification ────────────────────────────────────────────
-    log.info("=== Shape classification ===")
+    log.info("=== Shape classification (scheme=%s) ===", args.shape_scheme)
     cluster_shapes = {}
     for k in range(1, n_clusters + 1):
         mean_k = features_v[cluster_labels == k].mean(axis=0)
-        cluster_shapes[k] = classify_cluster_shape(
-            mean_k,
-            amplitude_threshold=args.amplitude_threshold,
-            monotone_frac=args.monotone_frac,
-            reversal_fraction=args.reversal_fraction,
-            min_net_change=args.min_net_change,
-            knee_frac=args.knee_frac,
-            flat_high=args.flat_high,
-            flat_low=args.flat_low,
-            strict_updown=args.strict_updown,
-            updown_low=args.updown_low,
-            high_base_min=args.high_base_min,
-            low_base_max=args.low_base_max,
-            high_dir_change=args.high_dir_change,
-            biphasic_abs_leg=args.biphasic_abs_leg,
-            updown_high=args.updown_high,
-            updown_min_change=args.updown_min_change,
-        )
+        if args.shape_scheme == "dynamic":
+            cluster_shapes[k] = classify_dynamic_direction(
+                mean_k,
+                exc_floor=args.exc_floor,
+                median_win=args.exc_median_win,
+                reversal_fraction=args.reversal_fraction,
+                biphasic_abs_leg=args.biphasic_abs_leg,
+            )
+        else:
+            cluster_shapes[k] = classify_cluster_shape(
+                mean_k,
+                amplitude_threshold=args.amplitude_threshold,
+                monotone_frac=args.monotone_frac,
+                reversal_fraction=args.reversal_fraction,
+                min_net_change=args.min_net_change,
+                knee_frac=args.knee_frac,
+                flat_high=args.flat_high,
+                flat_low=args.flat_low,
+                strict_updown=args.strict_updown,
+                updown_low=args.updown_low,
+                high_base_min=args.high_base_min,
+                low_base_max=args.low_base_max,
+                high_dir_change=args.high_dir_change,
+                biphasic_abs_leg=args.biphasic_abs_leg,
+                updown_high=args.updown_high,
+                updown_min_change=args.updown_min_change,
+            )
 
     log.info("%-8s  %-16s  %8s", "Cluster", "Shape", "N sites")
     log.info("-" * 38)
@@ -406,7 +433,8 @@ def main():
     for k, sh in cluster_shapes.items():
         ss[sh] += int((cluster_labels == k).sum())
     log.info("Shape distribution:")
-    for sh in SHAPE_ORDER:
+    shape_order = DYNAMIC_SHAPE_ORDER if args.shape_scheme == "dynamic" else SHAPE_ORDER
+    for sh in shape_order:
         if ss.get(sh, 0) > 0:
             log.info("  %-16s  %s trajectories", sh, f"{ss[sh]:,}")
 

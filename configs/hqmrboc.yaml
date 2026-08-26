@@ -79,7 +79,7 @@ organism_embedding_init:
   3: 1   # new organism 3 from pretrained organism 1
   4: 1   # new organism 4 from pretrained organism 1
   5: 0   # new organism 5 from pretrained organism 0
-  6: 1   # new organism 5 from pretrained organism 0
+  6: 1   # new organism 6 from pretrained organism 1
 
 # ---------------------------------------------------------------------------
 # Pretrained weights
@@ -123,6 +123,7 @@ gradient_checkpointing: true
 
 train_species_embeddings: true
 
+# If mode: lora, these LoRA hyperparameters are used. If mode: full, they are ignored.
 lora_rank: 64
 lora_alpha: 128
 lora_targets: q_proj,v_proj,k_proj,linear_embedding
@@ -161,11 +162,11 @@ usage_weight: 1.0
 # train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
 usage_loss_weights:
   bce: 1.0
-  delta_mse: 5.0
-  trajectory_pearson: 1.0
+  delta_mse: 15.0
+  trajectory_pearson: 0.5
 
 # BCE-only warm-up. The per-tissue traj_r / train_usage_trajectory_corr is still logged during warm-up.
-usage_traj_warmup_epochs: 3
+usage_traj_warmup_epochs: 1
 
 # Gradient clipping (0 to disable)
 max_grad_norm: 1.0 
@@ -192,7 +193,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-run_name: lora_64_emb_traj_hqmrboc_        # defaults to timestamp
+run_name: lora_64_emb_traj_hqmrboc___        # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

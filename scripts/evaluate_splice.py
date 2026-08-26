@@ -188,13 +188,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trajectory-corr", action="store_true",
-        help="Compute per-site, per-tissue trajectory Pearson r, restricted to "
+        help="Compute per-site, per-tissue trajectory metrics, restricted to "
              "(site, tissue) trajectories eligible under the same excursion filter "
-             "used by the training-time trajectory loss (splice_losses._per_tissue_"
-             "pearson_loss) -- i.e. genuinely dynamic, not flat/noisy/single-point-"
-             "outlier. Reports overall and per-tissue r, and adds them to metrics.json. "
-             "Combine with --skip-predictions to compute this on already-saved "
-             "predictions without rerunning inference.",
+             "used by the training-time trajectory losses (splice_losses._per_tissue_"
+             "pearson_loss and _per_tissue_delta_mse) -- i.e. genuinely dynamic, not "
+             "flat/noisy/single-point-outlier. Covers both trajectory loss terms: "
+             "'trajectory_correlation' (direction/shape, mirrors trajectory_pearson) "
+             "and 'trajectory_magnitude' (rmse + amplitude R^2 + trajectory R^2, mirrors delta_mse). "
+             "Reports overall and per-tissue values for both, and adds them to "
+             "metrics.json. Combine with --skip-predictions to compute this on "
+             "already-saved predictions without rerunning inference.",
     )
     parser.add_argument(
         "--traj-min-timepoints", type=int, default=3,
@@ -1208,6 +1211,25 @@ def _site_keys_for(entry: dict) -> list:
     return list(zip(entry["chrom_idx"], entry["genomic_pos"]))
 
 
+def _amplitude_r2(true_amp: np.ndarray, pred_amp: np.ndarray) -> float:
+    """Unrefit coefficient of determination between true and predicted excursion
+    magnitudes: ``1 - sum((pred-true)^2) / sum((true-mean(true))^2)``.
+
+    Deliberately *not* Pearson r: r is scale/shift-invariant, so a model that
+    uniformly compresses every amplitude (e.g. predicts exactly half the true
+    excursion everywhere) scores a perfect r=1.0 while being systematically
+    wrong on magnitude. R^2 penalizes that directly (goes negative -- worse
+    than always predicting the mean -- for a uniform 2x compression).
+    """
+    if true_amp.size < 2:
+        return float("nan")
+    ss_tot = np.sum((true_amp - true_amp.mean()) ** 2)
+    if ss_tot < 1e-12:
+        return float("nan")
+    ss_res = np.sum((pred_amp - true_amp) ** 2)
+    return float(1.0 - ss_res / ss_tot)
+
+
 def compute_trajectory_correlation(
     usage_per_cond: dict,
     idx_to_label: dict[int, str],
@@ -1319,6 +1341,190 @@ def compute_trajectory_correlation(
             "n_sites_valid_r": len(all_rs),
             "mean_pearson_r": float(np.mean(all_rs)) if all_rs else float("nan"),
             "median_pearson_r": float(np.median(all_rs)) if all_rs else float("nan"),
+        },
+        "per_tissue": per_tissue,
+    }
+
+
+def compute_trajectory_magnitude(
+    usage_per_cond: dict,
+    idx_to_label: dict[int, str],
+    min_tp: int = 3,
+    exc_floor: float = 0.10,
+    median_win: int = 5,
+) -> dict:
+    """Per-(site, tissue) magnitude agreement between predicted and true
+    developmental trajectories -- the evaluation-time counterpart of the
+    training-time delta_mse loss (splice_losses._per_tissue_delta_mse). Same
+    tissue grouping, timepoint ordering, and eligibility gate (>= min_tp
+    observed timepoints AND true excursion > exc_floor) as
+    compute_trajectory_correlation, so all three metrics (usage_pearson_r for
+    bce, trajectory_correlation for trajectory_pearson, this for delta_mse)
+    are directly comparable and cover the three usage loss components 1:1.
+
+    Unlike trajectory_correlation (direction/shape, scale-invariant), this
+    scores AMPLITUDE: a prediction that's perfectly rank-correlated with the
+    true trajectory but compressed or exaggerated in scale gets a good
+    trajectory_pearson but a bad score here.
+
+    Returns three views of the same eligible set, per (site, tissue):
+    - "rmse": literal, uncentered residual (true - pred) at each observed
+      timepoint, squared and averaged first within each trajectory (its own
+      observed timepoints), then averaged equally across sites, then sqrt'd
+      into raw usage-fraction units (0=perfect, lower is better). Unlike the
+      training-time delta_mse loss (splice_losses._per_tissue_delta_mse),
+      which centers each trajectory on its own mean before differencing --
+      deliberately ignoring absolute level/bias error, since that's
+      usage_pearson_r/bce's job -- this evaluation metric uses the raw
+      residual, so it also reflects any level miscalibration alongside
+      magnitude error. Not a bit-for-bit mirror of delta_mse; a more literal,
+      directly-interpretable "how far off is the raw prediction" number.
+    - "amplitude_r2": coefficient of determination (R^2, *not* Pearson r^2 --
+      computed directly on the true/predicted excursion magnitudes with no
+      refit) between each site's true and predicted excursion magnitude
+      (1=perfect, 0=no better than predicting the mean, can go negative;
+      higher is better) -- a secondary, bounded-above headline number for
+      when a single "did it get the size right" number is more useful than
+      an RMSE in raw units. Pearson r is deliberately NOT used here: r is
+      invariant to scale and shift, so a model that uniformly compresses
+      every amplitude by e.g. 2x (true=[0.2,0.4,0.8], pred=[0.1,0.2,0.4])
+      scores a perfect r=1.0 despite being systematically wrong on
+      magnitude -- exactly what this metric exists to catch. R^2 scores
+      that same example negative, correctly flagging it as worse than the
+      trivial mean-predictor baseline. Excursion itself is still computed on
+      each trajectory's own self-recentered curve (deviation from its own
+      baseline is what "excursion" means), so amplitude_r2 is unaffected by
+      the raw-vs-centered residual distinction above.
+    - "trajectory_r2": like "amplitude_r2" but scored across every observed
+      timepoint of every eligible trajectory instead of each site's single
+      peak-excursion point -- won't look fine when the model is wrong in the
+      middle of a trajectory (or vice versa). Shares "rmse"'s literal
+      residual as its SS_res numerator (so it moves with rmse, and also
+      picks up level/bias error); SS_tot is each trajectory's own variance
+      around its own mean (same per-site baseline amplitude_r2 uses), i.e.
+      "does the raw prediction beat the trivial baseline of this same site's
+      own average value at every timepoint". Both rmse and trajectory_r2
+      still weight big absolute errors more than small ones (raw squared
+      error, not per-site variance-normalized), same as delta_mse.
+
+    Returns ``{"overall": {...}, "per_tissue": {tissue: {...}, ...}}``.
+    """
+
+    tissue_to_idx: dict[str, list[int]] = {}
+    for cond_idx, name in idx_to_label.items():
+        tissue = name.split("_")[0]
+        tissue_to_idx.setdefault(tissue, []).append(cond_idx)
+
+    def _timepoint(cond_idx: int) -> int:
+        name = idx_to_label.get(cond_idx, "")
+        try:
+            return int(name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            return cond_idx
+
+    per_tissue: dict[str, dict] = {}
+    all_site_mse: list[float] = []
+    all_true_amp: list[float] = []
+    all_pred_amp: list[float] = []
+    all_dt_points: list[float] = []
+    all_residual_points: list[float] = []
+
+    for tissue in sorted(tissue_to_idx):
+        cond_idxs = sorted(
+            (c for c in tissue_to_idx[tissue] if c in usage_per_cond),
+            key=_timepoint,
+        )
+        if len(cond_idxs) < min_tp:
+            continue
+
+        site_data: dict = {}
+        for j, c in enumerate(cond_idxs):
+            entry = usage_per_cond[c]
+            keys = _site_keys_for(entry)
+            for k, p, t in zip(keys, entry["pred"], entry["true"]):
+                site_data.setdefault(k, {})[j] = (float(p), float(t))
+
+        if not site_data:
+            continue
+
+        site_keys = list(site_data.keys())
+        N, T = len(site_keys), len(cond_idxs)
+        pred_mat = np.zeros((N, T), dtype=np.float64)
+        true_mat = np.zeros((N, T), dtype=np.float64)
+        mask_mat = np.zeros((N, T), dtype=bool)
+        for i, k in enumerate(site_keys):
+            for j, (p, t) in site_data[k].items():
+                pred_mat[i, j] = p
+                true_mat[i, j] = t
+                mask_mat[i, j] = True
+
+        n_obs = mask_mat.sum(axis=1)
+        denom = np.clip(n_obs, 1, None).astype(np.float64)
+        mu_p = (pred_mat * mask_mat).sum(axis=1) / denom
+        mu_t = (true_mat * mask_mat).sum(axis=1) / denom
+        dp = np.where(mask_mat, pred_mat - mu_p[:, None], 0.0)
+        dt = np.where(mask_mat, true_mat - mu_t[:, None], 0.0)
+
+        # Literal, uncentered residual (true - pred) at each observed timepoint -- unlike dp/dt
+        # above (which self-recenter each trajectory on its own mean, purely to define
+        # "deviation from baseline" for the excursion/amplitude_r2 computation below), rmse and
+        # trajectory_r2 are meant to answer "how far off is the raw prediction", including any
+        # absolute level/bias error, not just relative-shape error.
+        residual = np.where(mask_mat, true_mat - pred_mat, 0.0)
+        site_mse = (residual ** 2 * mask_mat).sum(axis=1) / denom
+
+        excursion_true = _trajectory_excursion_np(dt, mask_mat, win=median_win)
+        excursion_pred = _trajectory_excursion_np(dp, mask_mat, win=median_win)
+        eligible = (n_obs >= min_tp) & (excursion_true > exc_floor)
+        n_eligible = int(eligible.sum())
+
+        tissue_mse = site_mse[eligible]
+        true_amp = excursion_true[eligible]
+        pred_amp = excursion_pred[eligible]
+        all_site_mse.extend(tissue_mse.tolist())
+        all_true_amp.extend(true_amp.tolist())
+        all_pred_amp.extend(pred_amp.tolist())
+
+        amp_r2 = _amplitude_r2(true_amp, pred_amp)
+
+        # trajectory_r2's R^2: SS_res from the literal residual above (same numerator as rmse);
+        # SS_tot from dt (each trajectory's own variance around its own mean) -- i.e. "does the
+        # raw prediction beat the trivial baseline of this same site's own average value at
+        # every timepoint", not the much weaker "beats the global average across all sites".
+        # Can't reuse _amplitude_r2 here since its SS_tot/SS_res come from the same pair of
+        # arrays -- here they're deliberately different quantities.
+        eligible_pt_mask = mask_mat & eligible[:, None]
+        tissue_dt_points = dt[eligible_pt_mask]
+        tissue_residual_points = residual[eligible_pt_mask]
+        all_dt_points.extend(tissue_dt_points.tolist())
+        all_residual_points.extend(tissue_residual_points.tolist())
+
+        tissue_ss_tot = float(np.sum(tissue_dt_points ** 2))
+        traj_r2 = (float(1.0 - np.sum(tissue_residual_points ** 2) / tissue_ss_tot)
+                   if tissue_ss_tot > 1e-12 else float("nan"))
+
+        per_tissue[tissue] = {
+            "n_sites_total": int(N),
+            "n_sites_eligible": n_eligible,
+            "rmse": float(np.sqrt(tissue_mse.mean())) if n_eligible else float("nan"),
+            "amplitude_r2": amp_r2,
+            "trajectory_r2": traj_r2,
+        }
+
+    true_amp_arr = np.array(all_true_amp)
+    pred_amp_arr = np.array(all_pred_amp)
+    overall_amp_r2 = _amplitude_r2(true_amp_arr, pred_amp_arr)
+
+    overall_ss_tot = float(np.sum(np.array(all_dt_points) ** 2))
+    overall_traj_r2 = (float(1.0 - np.sum(np.array(all_residual_points) ** 2) / overall_ss_tot)
+                        if overall_ss_tot > 1e-12 else float("nan"))
+
+    return {
+        "overall": {
+            "n_sites_eligible": len(all_site_mse),
+            "rmse": float(np.sqrt(np.mean(all_site_mse))) if all_site_mse else float("nan"),
+            "amplitude_r2": overall_amp_r2,
+            "trajectory_r2": overall_traj_r2,
         },
         "per_tissue": per_tissue,
     }
@@ -2124,6 +2330,25 @@ def print_trajectory_metrics(org_name: str, traj_m: dict, logger: logging.Logger
         )
 
 
+def print_trajectory_magnitude_metrics(org_name: str, mag_m: dict, logger: logging.Logger | None = None) -> None:
+    log_func = logger.info if logger else print
+    overall = mag_m.get("overall", {})
+    log_func(f"\n{org_name} - Trajectory Magnitude (exc5-filtered, same gate as training):")
+    log_func(
+        f"  {'Overall':<15s} rmse={overall.get('rmse', float('nan')):>7.4f}  "
+        f"amplitude R2={overall.get('amplitude_r2', float('nan')):>7.4f}  "
+        f"trajectory R2={overall.get('trajectory_r2', float('nan')):>7.4f}  "
+        f"n={overall.get('n_sites_eligible', 0):,}"
+    )
+    for tissue, m in sorted(mag_m.get("per_tissue", {}).items()):
+        log_func(
+            f"  {tissue:<15s} rmse={m['rmse']:>7.4f}  "
+            f"amplitude R2={m['amplitude_r2']:>7.4f}  "
+            f"trajectory R2={m.get('trajectory_r2', float('nan')):>7.4f}  "
+            f"n={m['n_sites_eligible']:,}/{m['n_sites_total']:,}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2627,6 +2852,7 @@ def main() -> None:
         usage_metrics_by_head: dict[str, dict] = {}
         per_tissue_by_head: dict[str, dict] = {}
         trajectory_metrics_by_head: dict[str, dict] = {}
+        trajectory_magnitude_by_head: dict[str, dict] = {}
 
         # Condition index -> "Tissue_Timepoint" label, needed for --trajectory-corr's
         # tissue grouping. Read directly from the data species' own usage metadata
@@ -2661,6 +2887,17 @@ def main() -> None:
                     print_trajectory_metrics(
                         f"{org_name} ({source_name} head)" if suffix else org_name,
                         traj_m, logger=logger,
+                    )
+
+                    mag_m = compute_trajectory_magnitude(
+                        usage_per_cond, idx_to_label,
+                        min_tp=args.traj_min_timepoints,
+                        exc_floor=args.traj_exc_floor,
+                    )
+                    trajectory_magnitude_by_head[result_key] = mag_m
+                    print_trajectory_magnitude_metrics(
+                        f"{org_name} ({source_name} head)" if suffix else org_name,
+                        mag_m, logger=logger,
                     )
 
                 # Plots for this usage head
@@ -2707,6 +2944,8 @@ def main() -> None:
                 all_results[org_name]["per_tissue_usage"] = next(iter(per_tissue_by_head.values()))
             if trajectory_metrics_by_head:
                 all_results[org_name]["trajectory_correlation"] = next(iter(trajectory_metrics_by_head.values()))
+            if trajectory_magnitude_by_head:
+                all_results[org_name]["trajectory_magnitude"] = next(iter(trajectory_magnitude_by_head.values()))
         elif len(usage_metrics_by_head) > 1:
             # Multiple usage heads - nest under "usage_by_head"
             all_results[org_name]["usage_by_head"] = usage_metrics_by_head
@@ -2715,6 +2954,8 @@ def main() -> None:
                 all_results[org_name]["per_tissue_by_head"] = per_tissue_by_head
             if trajectory_metrics_by_head:
                 all_results[org_name]["trajectory_correlation_by_head"] = trajectory_metrics_by_head
+            if trajectory_magnitude_by_head:
+                all_results[org_name]["trajectory_magnitude_by_head"] = trajectory_magnitude_by_head
 
         del cls_probs, cls_labels, usage_results, usage_stats
 
