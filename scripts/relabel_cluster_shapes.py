@@ -45,11 +45,13 @@ import pandas as pd
 from alphagenome_pytorch.clustering import (
     cluster_centroids,
     classify_dynamic_direction,
+    classify_site_shapes,
+    shape_fraction_summary,
     reference_prefix,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s",
-                    datefmt="%H:%M:%S")
+                    datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
 
 
@@ -60,10 +62,10 @@ def parse_args():
                    help="Root of the prediction-cluster outputs to also relabel "
                         "(<preds-dir>/<species>/pred_gp_splice_usage/<Tissue>/). Optional.")
     p.add_argument("--split", default="test", choices=["test", "val", "train"])
-    p.add_argument("--exc-floor", type=float, default=0.10)
-    p.add_argument("--exc-median-win", type=int, default=5)
+    p.add_argument("--exc-floor", type=float, default=0.08)
+    p.add_argument("--exc-median-win", type=int, default=3)
     p.add_argument("--reversal-fraction", type=float, default=0.30)
-    p.add_argument("--biphasic-abs-leg", type=float, default=0.15)
+    p.add_argument("--biphasic-abs-leg", type=float, default=0.20)
     p.add_argument("--dry-run", action="store_true",
                    help="Report what would change without writing anything.")
     return p.parse_args()
@@ -88,9 +90,14 @@ def relabel_reference(meta_path, feats_path, args):
     old_dist = meta["ClusterShape"].value_counts()
     new_col = meta["Cluster"].map(new_shapes)
     new_dist = new_col.value_counts()
+    # Per-site labels (each trajectory on its own GP curve) — the source for shape stats.
+    site_shapes = classify_site_shapes(
+        feats, exc_floor=args.exc_floor, median_win=args.exc_median_win,
+        reversal_fraction=args.reversal_fraction, biphasic_abs_leg=args.biphasic_abs_leg)
     log.info("  %s clusters, %s sites", f"{len(cluster_ids)}", f"{len(meta):,}")
-    log.info("  old shape distribution: %s", dict(old_dist))
-    log.info("  new shape distribution: %s", dict(new_dist))
+    log.info("  old shape distribution (cluster): %s", dict(old_dist))
+    log.info("  new shape distribution (cluster): %s", dict(new_dist))
+    log.info("  per-site shape distribution:      %s", dict(pd.Series(site_shapes).value_counts()))
 
     if not args.dry_run:
         backup_path = meta_path.replace(".parquet", ".legacy_bak.parquet")
@@ -98,8 +105,14 @@ def relabel_reference(meta_path, feats_path, args):
             shutil.copy2(meta_path, backup_path)
             log.info("  backed up -> %s", backup_path)
         meta["ClusterShape"] = new_col
+        meta["ShapeSite"] = site_shapes
         meta.to_parquet(meta_path, index=False)
         log.info("  wrote -> %s", meta_path)
+        # refresh the shape-fraction summary (computed from the per-site labels)
+        frac = shape_fraction_summary(meta, shape_col="ShapeSite")
+        frac_path = meta_path.replace("_clustering_metadata.parquet", "_shape_fractions.csv")
+        frac.to_csv(frac_path, index=False)
+        log.info("  shape fractions -> %s  (from ShapeSite)", frac_path)
 
     return new_shapes
 

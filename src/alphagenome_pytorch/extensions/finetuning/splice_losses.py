@@ -96,7 +96,7 @@ def splice_usage_loss(
     usage_coverage: Tensor | None = None,
     traj_min_timepoints: int = 3,
     traj_var_floor: float = 1e-3,
-    traj_exc_floor: float = 0.10,
+    traj_exc_floor: float = 0.08,
 ) -> tuple:
     """Masked loss for per-condition splice-site usage.
 
@@ -338,7 +338,7 @@ def _masked_median_filter(x: Tensor, mask: Tensor, win: int = 5) -> Tensor:
     return torch.where(n_valid > 0, filt, torch.zeros_like(filt))
 
 
-def _trajectory_excursion(dt: Tensor, mm: Tensor, denom: Tensor, win: int = 5) -> Tensor:
+def _trajectory_excursion(dt: Tensor, mm: Tensor, denom: Tensor, win: int = 3) -> Tensor:
     """Max deviation from baseline of the median-filtered (``win``-point) centered
     trajectory ``dt``, shape ``(..., T) -> (...)``.
 
@@ -363,7 +363,7 @@ def _trajectory_excursion(dt: Tensor, mm: Tensor, denom: Tensor, win: int = 5) -
 
 
 def _per_tissue_delta_mse(pred, tgt, mask, groups, coverage=None,
-                          min_tp: int = 3, exc_floor: float = 0.10, median_win: int = 5,
+                          min_tp: int = 3, exc_floor: float = 0.08, median_win: int = 3,
                           ) -> tuple[Tensor, dict[str, float]]:
     """Per-(site,tissue) centered-MSE loss (trajectory *magnitude*), restricted to
     trajectories whose true shape shows a genuine excursion from its own baseline
@@ -399,7 +399,7 @@ def _per_tissue_delta_mse(pred, tgt, mask, groups, coverage=None,
 
 
 def _per_tissue_literal_mse(pred, tgt, mask, groups,
-                            min_tp: int = 3, exc_floor: float = 0.10, median_win: int = 5,
+                            min_tp: int = 3, exc_floor: float = 0.08, median_win: int = 3,
                             ) -> tuple[Tensor, dict[str, float]]:
     """Per-(site,tissue) MSE on the literal, uncentered residual (``pred - tgt``) --
     unlike :func:`_per_tissue_delta_mse` (which mean-centers both curves on their own
@@ -437,7 +437,7 @@ def _per_tissue_literal_mse(pred, tgt, mask, groups,
 
 def _per_tissue_pearson_loss(pred, tgt, mask, groups,
                              min_tp: int = 3, var_floor: float = 1e-3, eps: float = 1e-8,
-                             exc_floor: float = 0.10, median_win: int = 5,
+                             exc_floor: float = 0.08, median_win: int = 3,
                              ) -> tuple[Tensor, dict[str, float]]:
     """1 - Pearson r per (site, tissue) over its timepoints, averaged. Vectorised.
 

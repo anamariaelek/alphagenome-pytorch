@@ -2127,9 +2127,17 @@ def plot_splice_site_dynamics_from_usage_results(
 
 def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
                        n_clusters, out_dir, prefix, label, random_seed=42,
-                       heatmap_height=9.0, cluster_ids=None, color_denom=None):
+                       heatmap_height=9.0, cluster_ids=None, color_denom=None,
+                       site_shapes=None):
     """Save the clustering heatmap (``<prefix>_heatmap.png``) and the per-cluster
     shape-profile grid (``<prefix>_profiles.png``).
+
+    ``site_shapes`` (optional, row-aligned with ``features_v``): per-site shape
+    labels. When given, the heatmap's right-hand shape strip is coloured **per row**
+    by each site's own shape (and the legend title reads "site shape") instead of one
+    block per cluster — use it to show the per-site ``ShapeSite`` annotation rather
+    than the cluster-mean ``ClusterShape``. The profiles grid is unaffected (still
+    one panel per cluster).
 
     ``heatmap_height`` caps the heatmap figure height (inches). The heatmap shows one
     row per site via ``imshow`` (which rescales to the axes), so a fixed compact height
@@ -2189,12 +2197,13 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
 
     # Compact, capped height (imshow rescales the site rows to the axes regardless).
     fig = plt.figure(figsize=(10.5, float(heatmap_height)))
-    gs  = gridspec.GridSpec(2, 3, width_ratios=[0.05, 0.02, 0.93],
+    gs  = gridspec.GridSpec(2, 4, width_ratios=[0.05, 0.02, 0.88, 0.03],
                             height_ratios=[0.05, 0.95], hspace=0.15, wspace=0.02)
-    ax_cb  = fig.add_subplot(gs[0, 2])
-    ax_lbl = fig.add_subplot(gs[1, 0])
-    ax_str = fig.add_subplot(gs[1, 1])
-    ax_ht  = fig.add_subplot(gs[1, 2])
+    ax_cb    = fig.add_subplot(gs[0, 2])
+    ax_lbl   = fig.add_subplot(gs[1, 0])
+    ax_str   = fig.add_subplot(gs[1, 1])
+    ax_ht    = fig.add_subplot(gs[1, 2])
+    ax_shape = fig.add_subplot(gs[1, 3])   # right-side per-cluster shape strip
 
     masked = np.ma.masked_invalid(fsplit)
     cm_bad = plt.get_cmap("RdBu_r").copy()
@@ -2211,15 +2220,54 @@ def save_cluster_plots(features_v, cluster_labels, cluster_shapes,
 
     ax_str.set_xlim(0, 1); ax_str.set_ylim(len(fsplit), 0); ax_str.axis("off")
     ax_lbl.set_xlim(0, 1); ax_lbl.set_ylim(len(fsplit), 0); ax_lbl.axis("off")
+    ax_shape.set_xlim(0, 1); ax_shape.set_ylim(len(fsplit), 0); ax_shape.axis("off")
+
+    # Shape colour scheme (detect which classifier produced cluster_shapes, same as
+    # the profiles section below).
+    if set(cluster_shapes.values()) <= set(DYNAMIC_SHAPE_COLORS):
+        _sc_order, _sc_colors = DYNAMIC_SHAPE_ORDER, DYNAMIC_SHAPE_COLORS
+    else:
+        _sc_order, _sc_colors = SHAPE_ORDER, SHAPE_COLORS
+
+    # Right-side shape strip: per ROW (each site's own shape) when site_shapes is
+    # given, else one colour block per CLUSTER.
+    _per_site = site_shapes is not None and len(site_shapes) == len(features_v)
+    if _per_site:
+        import matplotlib.colors as _mcolors
+        ss_sorted = np.asarray(site_shapes, dtype=object)[order]   # align to fsort rows
+        rgba = np.ones((len(fsplit), 1, 4)); rgba[..., 3] = 0.0    # transparent → gaps blank
+        s = 0
+        for k, y0, y1 in row_ranges:
+            nc = y1 - y0
+            rgba[y0:y1, 0, :] = [_mcolors.to_rgba(_sc_colors.get(sh, "#7f7f7f"))
+                                 for sh in ss_sorted[s:s + nc]]
+            s += nc
+        ax_shape.imshow(rgba, aspect="auto", interpolation="nearest",
+                        origin="upper", extent=(0, 1, len(fsplit), 0))
+
     # Only label clusters thick enough to be legible at the compact height, so the
     # C# labels don't pile up over the many thin mid clusters.
     _min_label_rows = 0.012 * len(fsplit)
     for k, y0, y1 in row_ranges:
         ax_str.add_patch(plt.Rectangle((0, y0), 1, y1 - y0,
                                         color=color_of(k), ec="none"))
+        if not _per_site:   # one shape colour block per cluster
+            ax_shape.add_patch(plt.Rectangle((0, y0), 1, y1 - y0,
+                                             color=_sc_colors.get(cluster_shapes[k], "#7f7f7f"),
+                                             ec="none"))
         if (y1 - y0) >= _min_label_rows:
             ax_lbl.text(1.0, (y0+y1)/2, f"C{k}", ha="right", va="center",
                         fontsize=8, fontweight="bold", color=color_of(k))
+
+    # Shape legend (only the shapes actually present), below the heatmap.
+    _shape_vals = set(np.asarray(site_shapes)) if _per_site else set(cluster_shapes.values())
+    _present = [s for s in _sc_order if s in _shape_vals]
+    _handles = [plt.Rectangle((0, 0), 1, 1, color=_sc_colors.get(s, "#7f7f7f")) for s in _present]
+    if _handles:
+        ax_ht.legend(_handles, _present, loc="upper center",
+                     bbox_to_anchor=(0.5, -0.06), ncol=min(len(_present), 7),
+                     fontsize=7, frameon=False, handlelength=1.0, columnspacing=1.2,
+                     title=("site shape" if _per_site else "cluster shape"), title_fontsize=7)
 
     cb = plt.colorbar(im, cax=ax_cb, orientation="horizontal")
     cb.set_label("SSE", fontsize=8)

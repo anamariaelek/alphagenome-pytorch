@@ -65,7 +65,9 @@ from alphagenome_pytorch.clustering import (
     smooth_all_trajectories,
     classify_cluster_shape,
     classify_dynamic_direction,
+    classify_site_shapes,
     select_k_gap,
+    shape_fraction_summary,
 )
 from alphagenome_pytorch.plotting.splicing import save_cluster_plots
 
@@ -75,7 +77,7 @@ from alphagenome_pytorch.plotting.splicing import save_cluster_plots
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
 
@@ -148,6 +150,12 @@ def parse_args():
                    help="Number of clusters. Omit to auto-select via gap statistic.")
     g.add_argument("--auto-k-min", type=int, default=5)
     g.add_argument("--auto-k-max", type=int, default=80)
+    g.add_argument("--no-cluster", action="store_true",
+                   help="Skip Ward-linkage clustering (and the heatmap/profiles plots): fit GPs "
+                        "and write per-site shapes only -- <prefix>_site_shapes.parquet "
+                        "(Chr/Pos/Strand/ShapeSite/GP stats) + <prefix>_shape_fractions.csv. "
+                        "Use for very large sets where Ward's O(N^2) memory is infeasible; shape "
+                        "fractions don't need the clustering anyway.")
 
     # Shape classification
     g = p.add_argument_group("Shape classification")
@@ -160,13 +168,14 @@ def parse_args():
                         "up-down/down-up) -- no further early/mid/late timing or "
                         "high/low-baseline subdivisions. 'legacy': the original 14-way "
                         "classify_cluster_shape decision tree (remaining flags below).")
-    g.add_argument("--exc-floor", type=float, default=0.10,
+    g.add_argument("--exc-floor", type=float, default=0.08,
                    help="--shape-scheme=dynamic: min excursion (median-filtered, "
                         "self-recentered deviation from baseline) to count as dynamic. "
-                        "Matches training's traj_exc_floor default. Default: 0.10")
-    g.add_argument("--exc-median-win", type=int, default=5,
+                        "Matches training's traj_exc_floor default. Default: 0.08")
+    g.add_argument("--exc-median-win", type=int, default=3,
                    help="--shape-scheme=dynamic: median-filter window for the "
-                        "excursion gate. Default: 5")
+                        "excursion gate (smaller preserves narrow dips). Matches "
+                        "training. Default: 3")
     g.add_argument("--flat-high", type=float, default=0.80,
                    help="Mean SSE >= this → flat_high. Default: 0.80")
     g.add_argument("--flat-low",  type=float, default=0.20,
@@ -185,10 +194,10 @@ def parse_args():
     g.add_argument("--reversal-fraction", type=float, default=0.30,
                    help="Min size of each biphasic leg as a fraction of amplitude. "
                         "Default: 0.30")
-    g.add_argument("--biphasic-abs-leg", type=float, default=0.15,
+    g.add_argument("--biphasic-abs-leg", type=float, default=0.20,
                    help="Absolute min size of EACH biphasic leg (separates a clean "
                         "up-down/down-up reversal from a shallow one-sided wiggle, "
-                        "which stays 'noisy'). Default: 0.15")
+                        "which stays 'noisy'). Default: 0.20")
     g.add_argument("--strict-updown", action=argparse.BooleanOptionalAction, default=True,
                    help="Only label up/down when the cluster mean clearly spans "
                         "low->high (or high->low): start <= --updown-low, end >= "
@@ -259,6 +268,11 @@ def main():
         diagnostics_v = None
         log.info("Loaded %s trajectories × %d timepoints",
                  f"{len(features_v):,}", features_v.shape[1])
+        # Loaded features are split-specific (saved as e.g. <sp>_<tis>_train_gp_features.npy),
+        # so carry the split token into the output prefix too (matches the fresh-run path with
+        # --data-config, and keeps train/val/test outputs from colliding).
+        prefix = args.prefix or f"{sp_part}_{tis_part}_{args.split}"
+        label  = f"{sp_part}/{tis_part} [{args.split}]"
     else:
         if not args.parquet_path:
             sys.exit("--parquet-path is required (unless resuming with "
@@ -338,6 +352,33 @@ def main():
     n = len(features_v)
     log.info("Working with %s valid trajectories", f"{n:,}")
 
+    # ── 3'. Per-site shapes only (skip Ward) ───────────────────────────────
+    if args.no_cluster:
+        # Shape labels are a per-site property of each GP trajectory and don't need the
+        # clustering, so annotate every site directly and skip the O(N^2) Ward linkage
+        # (which OOMs on very large sets). No cluster archetypes (heatmap/profiles) here.
+        log.info("=== Per-site shape annotation (--no-cluster: skipping Ward) ===")
+        site_shapes = classify_site_shapes(
+            features_v, exc_floor=args.exc_floor, median_win=args.exc_median_win,
+            reversal_fraction=args.reversal_fraction, biphasic_abs_leg=args.biphasic_abs_leg)
+        meta = sites_v.copy()
+        meta["ShapeSite"]   = site_shapes
+        meta["GP_mean_SSE"] = features_v.mean(axis=1)
+        meta["GP_max_SSE"]  = features_v.max(axis=1)
+        meta["GP_min_SSE"]  = features_v.min(axis=1)
+        meta["GP_range"]    = meta["GP_max_SSE"] - meta["GP_min_SSE"]
+        meta["GP_lml"]      = lmls_v
+        out_meta = os.path.join(args.output, f"{prefix}_site_shapes.parquet")
+        meta.to_parquet(out_meta, index=False)
+        log.info("Per-site shapes → %s  (%s sites)", out_meta, f"{len(meta):,}")
+        log.info("Shape distribution: %s", dict(pd.Series(site_shapes).value_counts()))
+        frac = shape_fraction_summary(meta, shape_col="ShapeSite")
+        out_frac = os.path.join(args.output, f"{prefix}_shape_fractions.csv")
+        frac.to_csv(out_frac, index=False)
+        log.info("Shape fractions → %s  (from ShapeSite)", out_frac)
+        log.info("=== Done (--no-cluster) ===")
+        return 0
+
     # ── 3. Hierarchical clustering ─────────────────────────────────────────
     log.info("=== Ward-linkage clustering ===")
     Z = linkage(features_v, method="ward", metric="euclidean")
@@ -401,6 +442,14 @@ def main():
     meta = sites_v.copy()
     meta["Cluster"]      = cluster_labels
     meta["ClusterShape"] = meta["Cluster"].map(cluster_shapes)
+    # Per-site shape: each trajectory labelled on its own GP curve (not the cluster
+    # mean). This is the faithful source for shape *statistics* — cluster means wash
+    # out individually-dynamic sites in heterogeneous clusters. ClusterShape is kept
+    # for the archetype heatmap/profiles view.
+    if args.shape_scheme == "dynamic":
+        meta["ShapeSite"] = classify_site_shapes(
+            features_v, exc_floor=args.exc_floor, median_win=args.exc_median_win,
+            reversal_fraction=args.reversal_fraction, biphasic_abs_leg=args.biphasic_abs_leg)
     meta["GP_mean_SSE"]  = features_v.mean(axis=1)
     meta["GP_max_SSE"]   = features_v.max(axis=1)
     meta["GP_min_SSE"]   = features_v.min(axis=1)
@@ -427,6 +476,15 @@ def main():
     out_meta = os.path.join(args.output, f"{prefix}_clustering_metadata.parquet")
     meta.to_parquet(out_meta, index=False)
     log.info("Metadata → %s  (%s rows)", out_meta, f"{len(meta):,}")
+
+    # Shape fractions (of total sites), incl. the non_dynamic high/mid/low split.
+    # Computed from the per-site ShapeSite labels when available (dynamic scheme),
+    # else from the cluster-propagated ClusterShape.
+    _frac_col = "ShapeSite" if "ShapeSite" in meta.columns else "ClusterShape"
+    frac = shape_fraction_summary(meta, shape_col=_frac_col)
+    out_frac = os.path.join(args.output, f"{prefix}_shape_fractions.csv")
+    frac.to_csv(out_frac, index=False)
+    log.info("Shape fractions → %s  (from %s)", out_frac, _frac_col)
 
     # Shape summary
     ss = Counter()

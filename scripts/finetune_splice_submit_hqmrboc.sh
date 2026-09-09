@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hqmrboc___
+#SBATCH --job-name=ft-hqmrboc__524kb
 #SBATCH --partition=gpu-single
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=2
-#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
-#SBATCH --mem=24gb
+#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
+#SBATCH --mem=48gb
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Config file
-CONFIG="${WORK_DIR}/configs/hqmrboc.yaml"
+CONFIG="${WORK_DIR}/configs/hqmrboc_524kb.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

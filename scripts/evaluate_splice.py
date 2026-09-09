@@ -205,10 +205,10 @@ def parse_args() -> argparse.Namespace:
              "eligible for --trajectory-corr (default: 3, matches training).",
     )
     parser.add_argument(
-        "--traj-exc-floor", type=float, default=0.10,
+        "--traj-exc-floor", type=float, default=0.08,
         help="Minimum median-filtered excursion from baseline for a (site, tissue) "
              "trajectory to count as genuinely dynamic for --trajectory-corr "
-             "(default: 0.10, matches training).",
+             "(default: 0.08, matches training).",
     )
     parser.add_argument(
         "--observed-conditions-only", action="store_true",
@@ -1181,7 +1181,7 @@ def _masked_median_filter_np(x: np.ndarray, mask: np.ndarray, win: int = 5) -> n
     return np.where(n_valid > 0, filt, 0.0)
 
 
-def _trajectory_excursion_np(dt: np.ndarray, mask: np.ndarray, win: int = 5) -> np.ndarray:
+def _trajectory_excursion_np(dt: np.ndarray, mask: np.ndarray, win: int = 3) -> np.ndarray:
     """Numpy port of splice_losses._trajectory_excursion: max deviation from baseline
     of the median-filtered, self-recentered trajectory. ``dt``, ``mask``: ``(N, T)``
     centered-target arrays -> ``(N,)`` excursion per site.
@@ -1234,8 +1234,8 @@ def compute_trajectory_correlation(
     usage_per_cond: dict,
     idx_to_label: dict[int, str],
     min_tp: int = 3,
-    exc_floor: float = 0.10,
-    median_win: int = 5,
+    exc_floor: float = 0.08,
+    median_win: int = 3,
 ) -> dict:
     """Per-(site, tissue) Pearson r, filtered the same way as the training-time
     trajectory loss (``splice_losses._per_tissue_pearson_loss``): a (site, tissue)
@@ -1350,8 +1350,8 @@ def compute_trajectory_magnitude(
     usage_per_cond: dict,
     idx_to_label: dict[int, str],
     min_tp: int = 3,
-    exc_floor: float = 0.10,
-    median_win: int = 5,
+    exc_floor: float = 0.08,
+    median_win: int = 3,
 ) -> dict:
     """Per-(site, tissue) magnitude agreement between predicted and true
     developmental trajectories -- the evaluation-time counterpart of the

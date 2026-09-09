@@ -721,7 +721,7 @@ def classify_cluster_shape(mean_traj,
     return "noisy"
 
 
-def trajectory_excursion(traj, win=5):
+def trajectory_excursion(traj, win=3):
     """Max deviation from baseline of a median-filtered, self-recentered curve --
     the same "exc5" statistic used by the training-time trajectory loss
     (``splice_losses._trajectory_excursion``) and ``evaluate_splice.py``'s
@@ -748,11 +748,11 @@ def trajectory_excursion(traj, win=5):
 
 
 def classify_dynamic_direction(mean_traj,
-                               exc_floor=0.10,
-                               median_win=5,
+                               exc_floor=0.08,
+                               median_win=3,
                                peak_window=(0.25, 0.75),
                                reversal_fraction=0.30,
-                               biphasic_abs_leg=0.15):
+                               biphasic_abs_leg=0.20):
     """Two-level shape label (see ``DYNAMIC_SHAPE_ORDER``): first "dynamic or not"
     via the exc5 excursion gate (matching training/evaluation, not an independent
     amplitude threshold like ``classify_cluster_shape``'s ``amplitude_threshold``);
@@ -931,3 +931,63 @@ def load_prediction_trajectories(preds_parquet, usage_parquet, species, tissue,
     sites, _true_wide, pred_wide, reads_wide = load_pred_true_trajectories(
         preds_parquet, usage_parquet, species, tissue, min_timepoints, min_reads)
     return sites, pred_wide, reads_wide
+
+
+def classify_site_shapes(features, exc_floor=0.08, median_win=3,
+                         reversal_fraction=0.30, biphasic_abs_leg=0.20):
+    """Per-site dynamic shape label: apply :func:`classify_dynamic_direction` to
+    **each row** of a GP-feature matrix (one trajectory per site), rather than to a
+    cluster mean. Because it never averages divergent members together, a
+    heterogeneous cluster's individually-dynamic sites keep their own up/down/
+    up-down/down-up labels instead of being washed out to ``non_dynamic`` by a flat
+    mean. Returns an ``object`` array of labels, row-aligned with ``features``.
+    """
+    features = np.asarray(features, float)
+    return np.array(
+        [classify_dynamic_direction(features[i], exc_floor=exc_floor,
+                                     median_win=median_win,
+                                     reversal_fraction=reversal_fraction,
+                                     biphasic_abs_leg=biphasic_abs_leg)
+         for i in range(len(features))],
+        dtype=object,
+    )
+
+
+def shape_fraction_summary(meta, level_col="GP_mean_SSE", shape_col="ClusterShape",
+                           nd_label="non_dynamic", nd_high=0.8, nd_low=0.2):
+    """Fraction of each annotated trajectory shape, as a fraction of *all* sites.
+
+    Returns a tidy DataFrame with columns ``group, category, n_sites, fraction``:
+      * ``group="shape"`` — one row per ``ClusterShape`` value (the dynamic shapes
+        ``up/down/up-down/down-up`` and the flat ``non_dynamic`` class). These
+        fractions sum to 1.
+      * ``group="non_dynamic_band"`` — the ``non_dynamic`` sites split by their
+        per-site usage level (``level_col``) into ``high`` (>= ``nd_high``),
+        ``mid`` (between) and ``low`` (<= ``nd_low``). These sum to the
+        ``non_dynamic`` shape fraction.
+
+    The band split is only emitted when ``nd_label`` is present and ``level_col``
+    exists (e.g. the coarse ``dynamic`` scheme, where flat sites are not already
+    sub-labelled by level).
+    """
+    n = len(meta)
+    shapes = meta[shape_col].fillna(nd_label)
+    vc = shapes.value_counts()
+    rows = [dict(group="shape", category=sh, n_sites=int(c),
+                 fraction=(c / n if n else 0.0))
+            for sh, c in vc.items()]
+
+    if nd_label in vc.index and level_col in meta.columns:
+        lvl = meta.loc[shapes == nd_label, level_col]
+        bands = [("high", lvl >= nd_high),
+                 ("mid",  (lvl > nd_low) & (lvl < nd_high)),
+                 ("low",  lvl <= nd_low)]
+        for name, mask in bands:
+            c = int(mask.sum())
+            rows.append(dict(group="non_dynamic_band", category=name,
+                             n_sites=c, fraction=(c / n if n else 0.0)))
+
+    out = pd.DataFrame(rows, columns=["group", "category", "n_sites", "fraction"])
+    out.attrs["n_total"] = n
+    out.attrs["nd_thresholds"] = dict(high=nd_high, low=nd_low)
+    return out
