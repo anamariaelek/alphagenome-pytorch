@@ -432,16 +432,22 @@ def chain_lift(lift_df, species, chain_path, new_assembly_label=None):
     if not mask.any():
         return lift_df
     n_before = int(mask.sum())
-    new_chrom, new_pos = [], []
+    new_chrom, new_pos, new_strand = [], [], []
     for _, r in lift_df[mask].iterrows():
         conv = lo.convert_coordinate("chr" + str(r["aln_chrom"]), int(r["aln_pos"]))
         if conv:
             new_chrom.append(conv[0][0].removeprefix("chr")); new_pos.append(int(conv[0][1]))
+            flip = conv[0][2] == "-"
+            cur = str(r["aln_strand"]) if "aln_strand" in lift_df.columns else "+"
+            new_strand.append(("-" if cur == "+" else "+") if flip else cur)
         else:
-            new_chrom.append(None); new_pos.append(np.nan)
+            new_chrom.append(None); new_pos.append(np.nan); new_strand.append(None)
     lift_df = lift_df.copy()
+    lift_df["aln_pos"] = lift_df["aln_pos"].astype("float64")
     lift_df.loc[mask, "aln_chrom"] = new_chrom
     lift_df.loc[mask, "aln_pos"]   = new_pos
+    if "aln_strand" in lift_df.columns:
+        lift_df.loc[mask, "aln_strand"] = new_strand
     if new_assembly_label:
         lift_df.loc[mask, "assembly"] = new_assembly_label
     lift_df = lift_df[lift_df["aln_pos"].notna()].copy()
@@ -449,3 +455,160 @@ def chain_lift(lift_df, species, chain_path, new_assembly_label=None):
     n_after = int((lift_df["species"] == species).sum())
     print(f"{species} chain lift: {n_after:,}/{n_before:,}")
     return lift_df
+
+
+# --- per-site universe -------------------------------------------------------
+
+#: species -> data/<dir> holding the annotation that defines that species' sites.
+SITE_DATA_DIR = {
+    "human": "Homo_sapiens",
+    "mouse": "Mus_musculus",
+    "rat": "Rattus_norvegicus",
+    "rabbit": "Oryctolagus_cuniculus",
+    "opossum": "Monodelphis_domestica",
+    "macaque": "Macaca_mulatta",
+    "chicken": "Gallus_gallus",
+}
+
+
+def site_strand(species, data_root, table="splice_sites_gtf.parquet"):
+    """Strand and SiteType per site, from the annotation that defined the sites.
+
+    The site tables carry no Strand column; the strand is the sign in SiteType
+    ("Donor+", "Acceptor-"). Coordinates annotated on both strands cannot be
+    keyed by chromosome+position and are dropped — the count is returned.
+    """
+    import os
+    import pandas as pd
+
+    d = SITE_DATA_DIR.get(species, species)
+    p = os.path.join(data_root, d, table)
+    if not os.path.exists(p):
+        raise FileNotFoundError(p)
+    a = pd.read_parquet(p, columns=["Chromosome", "Position", "SiteType"])
+    a["Chromosome"] = a["Chromosome"].astype(str)
+    a["Strand"] = a["SiteType"].astype(str).str[-1]
+    a = a[a["Strand"].isin(["+", "-"])]
+    n = a.groupby(["Chromosome", "Position"])["Strand"].nunique()
+    both = n[n > 1].reset_index()[["Chromosome", "Position"]]
+    if len(both):
+        a = a.merge(both, on=["Chromosome", "Position"], how="left", indicator=True)
+        a = a[a["_merge"] == "left_only"].drop(columns="_merge")
+    return a.drop_duplicates(["Chromosome", "Position"]), len(both)
+
+
+def site_universe(species, usage_root, data_root, with_site=True):
+    """Distinct predicted sites of a species, with Strand and SiteType attached.
+
+    Reads usage_<species>.parquet — the per-site prediction table, one row per
+    site per condition — and reduces it to distinct (Chromosome, Position),
+    then joins the annotation for Strand/SiteType. Sites whose coordinate is
+    absent from the annotation, or annotated on both strands, are dropped.
+    """
+    import os
+    import pandas as pd
+
+    p = os.path.join(usage_root, species, "usage_%s.parquet" % species)
+    if not os.path.exists(p):
+        return None
+    u = pd.read_parquet(p, columns=["Chromosome", "Position"])
+    u["Chromosome"] = u["Chromosome"].astype(str)
+    u = u.drop_duplicates(["Chromosome", "Position"])
+    ann, n_both = site_strand(species, data_root)
+    m = u.merge(ann, on=["Chromosome", "Position"], how="left")
+    n_missing = int(m["Strand"].isna().sum())
+    m = m[m["Strand"].notna()].copy()
+    if with_site:
+        m["site"] = _site_series(m["Chromosome"], m["Position"], m["Strand"])
+    print("[site_universe] %-8s %6d distinct predicted sites | %6d with strand "
+          "| dropped %5d unannotated, %5d both-strand coords in annotation"
+          % (species, len(u), len(m), n_missing, n_both), flush=True)
+    return m.reset_index(drop=True)
+
+
+# --- annotation universe and snapping ----------------------------------------
+
+def annot_universe(species, data_root, protein_coding=True, with_site=True):
+    """Annotated splice sites of a species, with Strand, SiteType and site id.
+
+    The model-independent site universe: every site the annotation defines,
+    not only those a model was run on. Coordinates annotated on both strands
+    are dropped (they cannot be keyed by chromosome+position).
+    """
+    table = ("splice_sites_gtf_protein_coding.parquet" if protein_coding
+             else "splice_sites_gtf.parquet")
+    a, n_both = site_strand(species, data_root, table=table)
+    a = a.copy()
+    a["SiteBase"] = a["SiteType"].astype(str).str[:-1]
+    if with_site:
+        a["site"] = _site_series(a["Chromosome"], a["Position"], a["Strand"])
+    print("[annot_universe] %-8s %7d annotated sites (%s) | dropped %4d both-strand"
+          % (species, len(a), "protein-coding" if protein_coding else "all biotypes",
+             n_both), flush=True)
+    return a.reset_index(drop=True)
+
+
+def snap_to_universe(lift, u, tol=3, require_type=True):
+    """Snap projected coordinates to the nearest site of a species' universe.
+
+    ``lift`` needs ``aln_chrom, aln_pos, aln_strand, human_site`` and, when
+    ``require_type``, ``human_base`` ("Donor"/"Acceptor"). A candidate qualifies
+    only if its SiteType matches the human site's type carried through the
+    alignment: the base is preserved, and the strand is flipped where the
+    alignment block places the partner on the opposite strand. Adds ``aln_site``,
+    ``aln_dist`` and ``aln_sitetype``; rows with no candidate within ``tol`` get NA.
+    """
+    import numpy as np
+    import pandas as pd
+
+    out = lift.copy()
+    n = len(out)
+    site = np.full(n, None, dtype=object)
+    dist = np.full(n, np.nan)
+    stype = np.full(n, None, dtype=object)
+    if n == 0 or u is None or not len(u):
+        out["aln_site"], out["aln_dist"], out["aln_sitetype"] = site, dist, stype
+        return out
+
+    u = u.copy()
+    u["Chromosome"] = u["Chromosome"].astype(str)
+    hs = out["human_site"].astype(str).str.rsplit(":", n=1).str[-1].to_numpy()
+    exp_strand = np.where(out["aln_strand"].to_numpy() == "-",
+                          np.where(hs == "+", "-", "+"), hs)
+    tmp = pd.DataFrame({"chrom": out["aln_chrom"].astype(str).to_numpy(),
+                        "pos": out["aln_pos"].to_numpy().astype(np.int64)})
+    if require_type:
+        tmp["type"] = np.char.add(out["human_base"].to_numpy().astype(str),
+                                  exp_strand.astype(str))
+        keys = ["chrom", "type"]
+        ukeys = ["Chromosome", "SiteType"]
+    else:
+        keys, ukeys = ["chrom"], ["Chromosome"]
+
+    prep = {}
+    for k, g in u.groupby(ukeys[0] if len(ukeys) == 1 else ukeys, sort=False, observed=True):
+        p = g["Position"].to_numpy().astype(np.int64)
+        o = np.argsort(p)
+        prep[k] = (p[o], g["site"].to_numpy()[o], g["SiteType"].to_numpy()[o])
+
+    for k, idx in tmp.groupby(keys[0] if len(keys) == 1 else keys, sort=False, observed=True).indices.items():
+        cand = prep.get(k)
+        if cand is None:
+            continue
+        cpos, csite, ctype = cand
+        pos = tmp["pos"].to_numpy()[idx]
+        j = np.searchsorted(cpos, pos)
+        lo = np.clip(j - 1, 0, len(cpos) - 1)
+        hi = np.clip(j, 0, len(cpos) - 1)
+        dlo, dhi = np.abs(cpos[lo] - pos), np.abs(cpos[hi] - pos)
+        take_hi = dhi < dlo
+        best = np.where(take_hi, hi, lo)
+        d = np.where(take_hi, dhi, dlo)
+        ok = d <= tol
+        sel = idx[ok]
+        site[sel] = csite[best[ok]]
+        dist[sel] = d[ok]
+        stype[sel] = ctype[best[ok]]
+
+    out["aln_site"], out["aln_dist"], out["aln_sitetype"] = site, dist, stype
+    return out

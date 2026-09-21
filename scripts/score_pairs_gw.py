@@ -36,7 +36,7 @@ from alphagenome_pytorch import xspecies as sx  # noqa: E402
 B = "/home/elek/sds/sd17d003/Anamaria"
 AG = f"{B}/alphagenome_genomicsxai"
 PRED = f"{AG}/best_model/preds_intersect_protein_coding"
-MAP = f"{AG}/best_model/cross_species_alignment/xspecies_site_map_genomewide.parquet"
+MAP = f"{AG}/cross_species_ref/xspecies_site_map_genomewide.parquet"
 TIS = ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Testis", "Ovary"]
 SP_ORDER = ["human", "mouse", "rat", "rabbit", "opossum"]
 PARTNERS = SP_ORDER[1:]

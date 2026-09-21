@@ -53,7 +53,7 @@ import matplotlib.pyplot as plt
 
 B = "/home/elek/sds/sd17d003/Anamaria"
 AG = f"{B}/alphagenome_genomicsxai"
-XS = f"{AG}/best_model/cross_species_alignment"
+XS = f"{AG}/best_model/cross_species_trajectory_divergence"
 TRAJ = f"{AG}/devas/traj_eval"
 TORD = ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"]
 DCOL = {"gain_in_focal": "#1f6fb4", "loss_in_focal": "#d1495b",
