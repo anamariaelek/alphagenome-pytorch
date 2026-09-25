@@ -30,34 +30,43 @@
 # ---------------------------------------------------------------------------
 # Data — CHANGED: reduced from 7 species to 3 (human, mouse, macaque) for a
 # faster pilot while still exercising multi-species batching/sampling —
-# a primate outgroup (macaque) plus a rodent (mouse) alongside human, all
-# similarly sized (~16.5k-19k train windows each, vs. rabbit/chicken which
-# have ~40% fewer). Restore the remaining species blocks from hqmrboc.yaml
-# (rat/rabbit/opossum/chicken) for the full 7-species comparison.
+# a primate outgroup (macaque) plus a rodent (mouse) alongside human.
+# Restore the remaining species blocks from hqmrboc.yaml (rat/rabbit/
+# opossum/chicken) for the full 7-species comparison.
+#
+# train_bed/val_bed also point at data/pilot_beds/<species>/ instead of the
+# full fold0 splits (~18-19k/~3k windows each) -- a fixed-seed random
+# subsample (2000 train / 500 val windows per species, see
+# data/pilot_beds/), since there's no --max-examples-style flag to do this
+# at the CLI level. Balanced to the largest (now all equal at 2000) x 3
+# species / batch_size(3) / grad_accum(32) -> ~62 optimizer steps/epoch, so
+# epochs=3 below lands in the few-hundred-step range without the ~2h+/epoch
+# the full fold0 splits would take. Point back at the fold0 paths (see
+# hqmrboc.yaml) for the full-scale run.
 # ---------------------------------------------------------------------------
 species:
   - name: human
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect_usage_protein_coding.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/valid.bed
     organism_index: 0
 
   - name: mouse
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect_usage_protein_coding.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/mouse/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/mouse/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/valid.bed
     organism_index: 1
 
   - name: macaque
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
-    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/train.bed
-    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/valid.bed
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/valid.bed
     organism_index: 5
 
 organism_embedding_init:
@@ -132,12 +141,14 @@ usage_loss_weights:
 usage_traj_warmup_epochs: 1
 
 # ---------------------------------------------------------------------------
-# Performance — compile enabled: at ~300 optimizer steps, compile's few-minute
-# warmup is worth it against the ~26s/step (compiled) observed on this exact
-# batch_size/sequence_length/lora_rank combination in production
-# (lora_64_emb_traj_hqmrboc, see submit script). Also passed explicitly via
-# --compile on the CLI in the submit script, which is the pattern the other
-# submit scripts in this repo use regardless of this config value.
+# Performance — compile enabled: even at the ~186 total optimizer steps this
+# pilot now runs (data/pilot_beds subsets x 3 epochs), compile's few-minute
+# warmup is still worth it against per-step cost at this sequence_length/
+# lora_rank (production reference: ~26s/step compiled at batch_size=6 on
+# lora_64_emb_traj_hqmrboc, see submit script -- this pilot's batch_size=3
+# should be somewhat cheaper per step). Also passed explicitly via --compile
+# on the CLI in the submit script, which is the pattern the other submit
+# scripts in this repo use regardless of this config value.
 # ---------------------------------------------------------------------------
 num_workers: 2
 use_amp: true
