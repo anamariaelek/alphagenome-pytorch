@@ -896,6 +896,7 @@ def collect_predictions(
                 condition_mapping=condition_mapping,
                 window_starts=batch["window_start"].numpy() if "window_start" in batch else None,
                 chrom_idxs=batch["chrom_idx"].numpy() if "chrom_idx" in batch else None,
+                coverage=batch["usage_coverage"].numpy() if "usage_coverage" in batch else None,
             )
 
     cls_probs = np.concatenate(all_cls_probs, axis=0)
@@ -926,15 +927,22 @@ def collect_predictions(
 def _accumulate_usage(
     usage_preds: np.ndarray,    # (B, S, T_model) where T_model = model n_conditions
     positions: np.ndarray,      # (B, max_sites)  -1 padded
-    values: np.ndarray,         # (B, max_sites, n_data_cond)
-    mask: np.ndarray,           # (B, max_sites, n_data_cond) bool
+    values: np.ndarray,         # (B, max_sites, n_data_cond, max_replicates)
+    mask: np.ndarray,           # (B, max_sites, n_data_cond, max_replicates) bool
     acc: dict,
     condition_mapping: dict[int, int] | None = None,
     window_starts: np.ndarray | None = None,  # (B,) int64 genomic start of each window
     chrom_idxs: np.ndarray | None = None,     # (B,) int32 chromosome index per window
+    coverage: np.ndarray | None = None,       # (B, max_sites, n_data_cond, max_replicates)
 ) -> None:
     """Accumulate usage predictions and ground truth.
-    
+
+    ``values``/``mask``/``coverage`` carry one entry per real biological
+    replicate (see ``SpliceSiteUsageIndex.query``); they're pooled here into a
+    single coverage-weighted representative true-usage value per (site,
+    condition) before comparison against the model's single per-condition
+    prediction.
+
     Args:
         usage_preds: Model predictions (B, S, T_model)
         condition_mapping: Optional mapping from data condition index -> model condition index
@@ -944,13 +952,22 @@ def _accumulate_usage(
     """
     B = positions.shape[0]
     n_data_cond = values.shape[2]
+
+    # Pool the replicate axis into one coverage-weighted value per (B, max_sites,
+    # n_data_cond), and a "any real replicate observed" mask of the same shape.
+    rep_w = (coverage if coverage is not None else mask.astype(np.float64)) * mask
+    denom = rep_w.sum(-1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        values_pooled = np.where(denom > 0, (values * rep_w).sum(-1) / np.where(denom > 0, denom, 1), 0.0)
+    mask_pooled = mask.any(-1)
+
     for i in range(B):
         valid = positions[i] != -1
         if not valid.any():
             continue
         valid_pos = positions[i][valid]
-        valid_vals = values[i][valid]       # (k, n_data_cond)
-        valid_mask = mask[i][valid]         # (k, n_data_cond) bool
+        valid_vals = values_pooled[i][valid]  # (k, n_data_cond)
+        valid_mask = mask_pooled[i][valid]    # (k, n_data_cond) bool
         valid_preds = usage_preds[i, valid_pos, :]  # (k, T_model)
 
         # Genomic coordinates for this window

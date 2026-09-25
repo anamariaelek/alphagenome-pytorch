@@ -107,8 +107,8 @@ class TestSpliceUsageLoss:
         B, S, n_cond, max_sites = 2, 1000, 3, 10
         predictions = torch.rand(B, S, n_cond)
         usage_positions = torch.full((B, max_sites), -1, dtype=torch.long)
-        usage_values = torch.zeros(B, max_sites, n_cond)
-        usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
+        usage_values = torch.zeros(B, max_sites, n_cond, 1)
+        usage_mask = torch.zeros(B, max_sites, n_cond, 1, dtype=torch.bool)
 
         loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         assert loss.item() == 0.0
@@ -124,10 +124,10 @@ class TestSpliceUsageLoss:
 
         usage_positions = torch.full((B, max_sites), -1, dtype=torch.long)
         usage_positions[0, 0] = 100  # single valid position
-        usage_values = torch.zeros(B, max_sites, n_cond)
-        usage_values[0, 0, 0] = 1.0   # target = 1.0
-        usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
-        usage_mask[0, 0, 0] = True     # only (batch=0, site=0, cond=0) observed
+        usage_values = torch.zeros(B, max_sites, n_cond, 1)
+        usage_values[0, 0, 0, 0] = 1.0   # target = 1.0
+        usage_mask = torch.zeros(B, max_sites, n_cond, 1, dtype=torch.bool)
+        usage_mask[0, 0, 0, 0] = True     # only (batch=0, site=0, cond=0, rep=0) observed
 
         loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         # BCE(0.9, 1.0) = -log(0.9) ≈ 0.105
@@ -145,9 +145,9 @@ class TestSpliceUsageLoss:
 
         usage_positions = torch.full((B, max_sites), -1, dtype=torch.long)
         usage_positions[0, 0] = 50
-        usage_values = torch.zeros(B, max_sites, n_cond)  # target = 0
-        usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
-        usage_mask[0, 0, 0] = True
+        usage_values = torch.zeros(B, max_sites, n_cond, 1)  # target = 0
+        usage_mask = torch.zeros(B, max_sites, n_cond, 1, dtype=torch.bool)
+        usage_mask[0, 0, 0, 0] = True
 
         loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         # BCE_with_logits(7.0, 0) = softplus(7.0) ≈ 7.0
@@ -161,10 +161,10 @@ class TestSpliceUsageLoss:
         raw = torch.randn(B, S, n_cond)
         predictions = torch.sigmoid(raw).detach().requires_grad_(True)
         usage_positions = torch.tensor([[50, 120, -1]])
-        usage_values = torch.rand(B, max_sites, n_cond)
-        usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
-        usage_mask[0, 0, :] = True
-        usage_mask[0, 1, 0] = True
+        usage_values = torch.rand(B, max_sites, n_cond, 1)
+        usage_mask = torch.zeros(B, max_sites, n_cond, 1, dtype=torch.bool)
+        usage_mask[0, 0, :, 0] = True
+        usage_mask[0, 1, 0, 0] = True
 
         loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         loss.backward()
@@ -177,8 +177,8 @@ class TestSpliceUsageLoss:
         B, S, n_cond, max_sites = 1, 100, 2, 4
         predictions = torch.randn(B, S, n_cond, requires_grad=True)
         usage_positions = torch.full((B, max_sites), -1, dtype=torch.long)
-        usage_values = torch.zeros(B, max_sites, n_cond)
-        usage_mask = torch.zeros(B, max_sites, n_cond, dtype=torch.bool)
+        usage_values = torch.zeros(B, max_sites, n_cond, 1)
+        usage_mask = torch.zeros(B, max_sites, n_cond, 1, dtype=torch.bool)
 
         loss, _ = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask)
         assert loss.item() == 0.0
@@ -190,8 +190,8 @@ class TestSpliceUsageLoss:
 
         B, S, n_cond, max_sites = 1, 64, 3, 1
         usage_positions = torch.tensor([[12]])
-        usage_values = torch.tensor([[[0.0, 0.5, 1.0]]])
-        usage_mask = torch.ones(B, max_sites, n_cond, dtype=torch.bool)
+        usage_values = torch.tensor([[[0.0, 0.5, 1.0]]]).unsqueeze(-1)
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
 
         flat_predictions = torch.zeros(B, S, n_cond)
         flat_predictions[0, 12, :] = 0.0
@@ -222,11 +222,11 @@ class TestSpliceUsageLoss:
 
         B, S, n_cond, max_sites = 1, 64, 3, 1
         usage_positions = torch.tensor([[12]])
-        usage_values = torch.tensor([[[0.0, 0.5, 1.0]]])  # clearly dynamic trajectory
-        usage_mask = torch.ones(B, max_sites, n_cond, dtype=torch.bool)
+        usage_values = torch.tensor([[[0.0, 0.5, 1.0]]]).unsqueeze(-1)  # clearly dynamic trajectory
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
 
         exact_logits = torch.zeros(B, S, n_cond)
-        exact_logits[0, 12, :] = torch.logit(usage_values[0, 0, :].clamp(1e-4, 1 - 1e-4))
+        exact_logits[0, 12, :] = torch.logit(usage_values[0, 0, :, 0].clamp(1e-4, 1 - 1e-4))
 
         wrong_magnitude = torch.zeros(B, S, n_cond)
         wrong_magnitude[0, 12, :] = torch.logit(torch.tensor([0.45, 0.5, 0.55]))  # right shape, tiny magnitude
@@ -253,8 +253,8 @@ class TestSpliceUsageLoss:
         usage_values = torch.tensor([[
             [0.50, 0.48, 0.51, 0.49, 0.50, 0.52, 0.49, 0.50, 0.51],
             [0.78, 0.80, 0.81, 0.75, 0.05, 0.79, 0.75, 0.67, 0.70],
-        ]])
-        usage_mask = torch.ones(B, max_sites, n_cond, dtype=torch.bool)
+        ]]).unsqueeze(-1)
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
         predictions = torch.zeros(B, S, n_cond)  # arbitrary; loss should be exactly 0 (no eligible sites)
 
         loss, metrics = splice_usage_loss(
@@ -263,3 +263,138 @@ class TestSpliceUsageLoss:
         )
         assert loss.item() == 0.0
         assert metrics["n_trajectory_sites"] == 0
+
+    # ─── Replicate-level BCE ────────────────────────────────────────────────
+
+    def test_bce_sums_every_replicate_independently(self):
+        """Every real replicate observation should contribute its own BCE term,
+        not be collapsed to a single pooled value -- with a single replicate
+        per (site,condition), this reduces to the pre-replicate behavior."""
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, n_cond, max_sites = 1, 50, 1, 1
+        predictions = torch.full((B, S, n_cond), 2.0)  # sigmoid(2.0) ≈ 0.881
+        usage_positions = torch.tensor([[10]])
+
+        # Two replicates at the same (site, condition) with different SSE.
+        usage_values = torch.tensor([[[[0.2, 0.8]]]])   # (B, max_sites, n_cond, max_rep)
+        usage_mask = torch.ones(B, max_sites, n_cond, 2, dtype=torch.bool)
+
+        loss_two_rep, metrics_two_rep = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"bce": 1.0},
+        )
+        # Manually average the two replicates' unweighted BCE terms (equal coverage
+        # implied since usage_coverage=None -> uniform weight => plain mean).
+        expected = F.binary_cross_entropy_with_logits(
+            torch.tensor([2.0, 2.0]), torch.tensor([0.2, 0.8]), reduction="mean")
+        assert loss_two_rep.item() == pytest.approx(expected.item(), rel=1e-5)
+        assert metrics_two_rep["n_valid"] == 2   # replicate-level count, not condition-level
+
+    def test_bce_coverage_weighting_favors_higher_coverage_replicate(self):
+        """With usage_coverage supplied, a high-coverage replicate should pull
+        the weighted-mean BCE closer to its own (unweighted) value than an
+        equal-weight average would."""
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, n_cond, max_sites = 1, 50, 1, 1
+        usage_positions = torch.tensor([[10]])
+        usage_values = torch.tensor([[[[0.1, 0.9]]]])
+        usage_mask = torch.ones(B, max_sites, n_cond, 2, dtype=torch.bool)
+
+        # A non-zero logit so each replicate's individual BCE term actually
+        # differs (BCE_with_logits(0, y) is identically log(2) regardless of y,
+        # which would make any weighting scheme indistinguishable).
+        predictions = torch.full((B, S, n_cond), 2.0)
+
+        # Replicate 0 (target 0.1) has far more reads than replicate 1 (target 0.9).
+        usage_coverage_high_first = torch.tensor([[[[100.0, 5.0]]]])
+        usage_coverage_high_second = torch.tensor([[[[5.0, 100.0]]]])
+
+        loss_a, _ = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"bce": 1.0}, usage_coverage=usage_coverage_high_first)
+        loss_b, _ = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"bce": 1.0}, usage_coverage=usage_coverage_high_second)
+        unweighted, _ = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"bce": 1.0})
+
+        bce_low = F.binary_cross_entropy_with_logits(torch.tensor(2.0), torch.tensor(0.1)).item()
+        bce_high = F.binary_cross_entropy_with_logits(torch.tensor(2.0), torch.tensor(0.9)).item()
+
+        # loss_a is weighted toward matching target 0.1 -> closer to bce_low than
+        # the unweighted 50/50 mean is; loss_b toward 0.9 -> closer to bce_high.
+        assert abs(loss_a.item() - bce_low) < abs(unweighted.item() - bce_low)
+        assert abs(loss_b.item() - bce_high) < abs(unweighted.item() - bce_high)
+        assert loss_a.item() != pytest.approx(loss_b.item(), rel=1e-4)
+
+    def test_bce_reduces_to_pooled_mean_when_replicates_agree(self):
+        """When all replicates at a (site,condition) agree exactly, coverage
+        weighting shouldn't matter and this should equal the single-value BCE."""
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, n_cond, max_sites = 1, 50, 1, 1
+        predictions = torch.full((B, S, n_cond), 1.5)
+        usage_positions = torch.tensor([[10]])
+        usage_values = torch.full((B, max_sites, n_cond, 3), 0.7)
+        usage_mask = torch.ones(B, max_sites, n_cond, 3, dtype=torch.bool)
+        usage_coverage = torch.tensor([[[[3.0, 40.0, 17.0]]]])
+
+        loss, _ = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"bce": 1.0}, usage_coverage=usage_coverage)
+        expected = F.binary_cross_entropy_with_logits(torch.tensor(1.5), torch.tensor(0.7))
+        assert loss.item() == pytest.approx(expected.item(), rel=1e-5)
+
+    # ─── tissue_contrast ────────────────────────────────────────────────────
+
+    def test_tissue_contrast_rewards_matching_marker_enrichment(self):
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, max_sites = 1, 64, 1
+        # Two tissues x two timepoints each = 4 conditions. Tissue 0 (conds 0,1) is
+        # a true marker (usage ~0.9, well above tissue 1's ~0.1) -- true contrast
+        # ~0.8, comfortably clearing the default marker_floor=0.25.
+        n_cond = 4
+        usage_positions = torch.tensor([[12]])
+        usage_values = torch.tensor([[[[0.9], [0.85], [0.1], [0.15]]]])  # (B,1,4,1)
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
+        groups = [[0, 1], [2, 3]]
+
+        matching_logits = torch.zeros(B, S, n_cond)
+        matching_logits[0, 12, :] = torch.logit(torch.tensor([0.9, 0.85, 0.1, 0.15]).clamp(1e-4, 1 - 1e-4))
+
+        compressed_logits = torch.zeros(B, S, n_cond)
+        compressed_logits[0, 12, :] = torch.logit(torch.tensor([0.55, 0.55, 0.45, 0.45]))  # right sign, flat
+
+        match_loss, match_metrics = splice_usage_loss(
+            matching_logits, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"tissue_contrast": 1.0}, tissue_cond_groups=groups,
+        )
+        compressed_loss, _ = splice_usage_loss(
+            compressed_logits, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"tissue_contrast": 1.0}, tissue_cond_groups=groups,
+        )
+
+        assert match_loss.item() < compressed_loss.item()
+        assert match_metrics["n_marker_sites"] >= 1
+
+    def test_tissue_contrast_ignores_non_marker_sites(self):
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, max_sites, n_cond = 1, 64, 1, 4
+        usage_positions = torch.tensor([[12]])
+        # Both tissues at a similar usage level -- no marker, true contrast near 0.
+        usage_values = torch.tensor([[[[0.5], [0.52], [0.48], [0.5]]]])
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
+        groups = [[0, 1], [2, 3]]
+        predictions = torch.zeros(B, S, n_cond)  # arbitrary
+
+        loss, metrics = splice_usage_loss(
+            predictions, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"tissue_contrast": 1.0}, tissue_cond_groups=groups,
+        )
+        assert loss.item() == 0.0
+        assert metrics["n_marker_sites"] == 0

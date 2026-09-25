@@ -141,16 +141,52 @@ class TestSpliceSiteUsageIndex:
              "Label": 0, "Condition": 1},
         ]
         d = self._build_dir(tmp_path, rows)
-        idx = SpliceSiteUsageIndex(str(d), min_coverage=10, usage_coord_base=1)
+        idx = SpliceSiteUsageIndex(str(d / "_usage.parquet"), min_coverage=10, usage_coord_base=1)
 
         # query position 1000 in 0-based (= 1001 in 1-based)
-        site_pos, vals, masks = idx.query("1", np.array([1000]))
+        site_pos, vals, masks, covs = idx.query("1", np.array([1000]))
         assert len(site_pos) == 1
         assert site_pos[0] == 1000
-        assert vals[0].shape == (3,)
-        assert masks[0][0] and masks[0][1] and not masks[0][2]
-        np.testing.assert_allclose(vals[0][0], 0.8, rtol=1e-5)
-        np.testing.assert_allclose(vals[0][1], 0.5, rtol=1e-5)
+        assert vals[0].shape == (3, idx.max_replicates)
+        # Condition 0: one real replicate at slot 0; condition 1: one real
+        # replicate at slot 0; condition 2: unobserved -> also True at slot 0
+        # (observed_conditions_only=False default: every condition contributes,
+        # unobserved ones as a synthetic biological-zero entry).
+        assert masks[0][0, 0] and masks[0][1, 0] and masks[0][2, 0]
+        np.testing.assert_allclose(vals[0][2, 0], 0.0)   # synthetic zero, not a real observation
+        assert not masks[0][0, 1:].any()
+        np.testing.assert_allclose(vals[0][0, 0], 0.8, rtol=1e-5)
+        np.testing.assert_allclose(vals[0][1, 0], 0.5, rtol=1e-5)
+        np.testing.assert_allclose(covs[0][0, 0], 10.0, rtol=1e-5)   # Alpha+Beta = 8+2
+        np.testing.assert_allclose(covs[0][1, 0], 10.0, rtol=1e-5)   # Alpha+Beta = 5+5
+
+    def test_replicates_kept_independent_not_collapsed(self, tmp_path: Path):
+        """Multiple biological replicates at the same (site,condition) must all
+        survive in query()'s output -- not silently collapsed to one arbitrary
+        replicate (the bug this change fixes)."""
+        from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
+            SpliceSiteUsageIndex,
+        )
+
+        rows = [
+            {"Chromosome": "1", "Position": 1001, "SSE": 0.2, "Alpha": 2, "Beta": 8,
+             "Label": 0, "Condition": 0},
+            {"Chromosome": "1", "Position": 1001, "SSE": 0.6, "Alpha": 6, "Beta": 4,
+             "Label": 0, "Condition": 0},
+            {"Chromosome": "1", "Position": 1001, "SSE": 0.9, "Alpha": 9, "Beta": 1,
+             "Label": 0, "Condition": 0},
+        ]
+        d = self._build_dir(tmp_path, rows)
+        idx = SpliceSiteUsageIndex(str(d / "_usage.parquet"), min_coverage=10, usage_coord_base=1)
+        site_pos, vals, masks, covs = idx.query("1", np.array([1000]))
+
+        assert len(site_pos) == 1
+        cond0_mask = masks[0][0]
+        assert cond0_mask.sum() == 3   # all three replicates present, not just one
+        observed_sse = sorted(vals[0][0][cond0_mask].tolist())
+        np.testing.assert_allclose(observed_sse, [0.2, 0.6, 0.9], rtol=1e-5)
+        observed_cov = sorted(covs[0][0][cond0_mask].tolist())
+        np.testing.assert_allclose(observed_cov, [10.0, 10.0, 10.0], rtol=1e-5)
 
     def test_coverage_filter(self, tmp_path: Path):
         from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
@@ -162,8 +198,8 @@ class TestSpliceSiteUsageIndex:
              "Label": 0, "Condition": 0},   # Alpha+Beta=5 < 10 → filtered out
         ]
         d = self._build_dir(tmp_path, rows)
-        idx = SpliceSiteUsageIndex(str(d), min_coverage=10, usage_coord_base=1)
-        site_pos, vals, masks = idx.query("1", np.array([1000]))
+        idx = SpliceSiteUsageIndex(str(d / "_usage.parquet"), min_coverage=10, usage_coord_base=1)
+        site_pos, vals, masks, covs = idx.query("1", np.array([1000]))
         assert len(site_pos) == 0
 
     def test_none_class_excluded(self, tmp_path: Path):
@@ -176,8 +212,8 @@ class TestSpliceSiteUsageIndex:
              "Label": 4, "Condition": 0},   # Label=4 = "None" → excluded
         ]
         d = self._build_dir(tmp_path, rows)
-        idx = SpliceSiteUsageIndex(str(d), min_coverage=10, usage_coord_base=1)
-        site_pos, _, _ = idx.query("1", np.array([1000]))
+        idx = SpliceSiteUsageIndex(str(d / "_usage.parquet"), min_coverage=10, usage_coord_base=1)
+        site_pos, _, _, _ = idx.query("1", np.array([1000]))
         assert len(site_pos) == 0
 
 
@@ -291,7 +327,7 @@ class TestSpliceSiteDataset:
         pd.DataFrame(rows).to_parquet(d / "_usage.parquet", index=False)
         (d / "_usage.json").write_text(json.dumps(meta))
 
-        usage_idx = SpliceSiteUsageIndex(str(d), min_coverage=10, usage_coord_base=1)
+        usage_idx = SpliceSiteUsageIndex(str(d / "_usage.parquet"), min_coverage=10, usage_coord_base=1)
 
         bed = self._write_bed(tmp_path, [("chr1", 5000, 136072)])
         ds = SpliceSiteDataset(genome=genome, bed_file=bed, annotation=annot,
@@ -301,9 +337,12 @@ class TestSpliceSiteDataset:
         assert "usage_positions" in item
         assert "usage_values" in item
         assert "usage_mask" in item
+        assert "usage_coverage" in item
         assert item["usage_positions"].shape == (10,)
-        assert item["usage_values"].shape == (10, 2)
-        assert item["usage_mask"].shape == (10, 2)
+        max_rep = usage_idx.max_replicates
+        assert item["usage_values"].shape == (10, 2, max_rep)
+        assert item["usage_mask"].shape == (10, 2, max_rep)
+        assert item["usage_coverage"].shape == (10, 2, max_rep)
 
         # The first non-padded position should correspond to genomic 10000 (0-based)
         win_start = 5000
@@ -331,16 +370,20 @@ class TestSpliceSiteDataset:
 
 
 class TestCollateSplice:
-    def _make_item(self, has_usage: bool = True, n_cond: int = 3, max_sites: int = 4):
+    def _make_item(self, has_usage: bool = True, n_cond: int = 3, max_sites: int = 4, max_rep: int = 5):
         item = {
             "sequence": torch.zeros(131072, 4),
             "organism_index": torch.tensor(0),
             "classification_labels": torch.zeros(131072, dtype=torch.long),
+            "loss_mask": torch.ones(131072, dtype=torch.bool),
+            "window_start": torch.tensor(0, dtype=torch.int64),
+            "chrom_idx": torch.tensor(0, dtype=torch.int32),
         }
         if has_usage:
             item["usage_positions"] = torch.full((max_sites,), -1, dtype=torch.long)
-            item["usage_values"] = torch.zeros(max_sites, n_cond)
-            item["usage_mask"] = torch.zeros(max_sites, n_cond, dtype=torch.bool)
+            item["usage_values"] = torch.zeros(max_sites, n_cond, max_rep)
+            item["usage_mask"] = torch.zeros(max_sites, n_cond, max_rep, dtype=torch.bool)
+            item["usage_coverage"] = torch.zeros(max_sites, n_cond, max_rep)
         return item
 
     def test_batch_shapes_with_usage(self):
@@ -351,8 +394,9 @@ class TestCollateSplice:
         assert out["sequence"].shape == (2, 131072, 4)
         assert out["classification_labels"].shape == (2, 131072)
         assert out["usage_positions"].shape == (2, 4)
-        assert out["usage_values"].shape == (2, 4, 3)
-        assert out["usage_mask"].shape == (2, 4, 3)
+        assert out["usage_values"].shape == (2, 4, 3, 5)
+        assert out["usage_mask"].shape == (2, 4, 3, 5)
+        assert out["usage_coverage"].shape == (2, 4, 3, 5)
 
     def test_batch_shapes_without_usage(self):
         from alphagenome_pytorch.extensions.finetuning.splice_datasets import collate_splice

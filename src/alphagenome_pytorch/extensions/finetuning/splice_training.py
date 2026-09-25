@@ -252,6 +252,9 @@ def train_epoch_splice(
                     usage_pos = batch["usage_positions"].to(device)
                     usage_vals = batch["usage_values"].to(device)
                     usage_mask = batch["usage_mask"].to(device)
+                    usage_cov = batch.get("usage_coverage")
+                    if usage_cov is not None:
+                        usage_cov = usage_cov.to(device)
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                     logits = usage_out["logits"]
@@ -263,6 +266,7 @@ def train_epoch_splice(
                         delta_from_mean=usage_delta_from_mean,
                         usage_loss_weights=epoch_usage_weights,
                         tissue_cond_groups=_groups_for(int(org_idx[0].item())),
+                        usage_coverage=usage_cov,
                     )
 
                 total_loss = total_loss + usage_weight * usage_loss_val
@@ -541,6 +545,9 @@ def validate_splice(
                 usage_pos = batch["usage_positions"].to(device)
                 usage_vals = batch["usage_values"].to(device)
                 usage_mask = batch["usage_mask"].to(device)
+                usage_cov = batch.get("usage_coverage")
+                if usage_cov is not None:
+                    usage_cov = usage_cov.to(device)
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 logits = usage_out["logits"]
@@ -554,6 +561,7 @@ def validate_splice(
                     delta_from_mean=usage_delta_from_mean,
                     usage_loss_weights=usage_loss_weights,
                     tissue_cond_groups=_groups,
+                    usage_coverage=usage_cov,
                 )
 
                 if "bce_loss" in usage_corr:
