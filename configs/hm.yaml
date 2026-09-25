@@ -143,7 +143,7 @@ log_every: 10
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
-output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
 run_name: lora_64_emb_traj_hm___       # defaults to timestamp
 save_every: 1
 

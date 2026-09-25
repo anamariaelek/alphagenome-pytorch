@@ -1,0 +1,128 @@
+--- run_attributions.orig.py	2026-09-24 09:41:54
++++ run_attributions.py	2026-09-24 09:40:29
+@@ -134,10 +134,28 @@
+     return out
+ 
+ 
+-def window(fasta: pyfaidx.Fasta, chrom: str, pos: int, seq_len: int):
+-    """One-hot window of ``seq_len`` bp centred on 0-based ``pos``."""
++def window(fasta: pyfaidx.Fasta, chrom: str, pos: int, seq_len: int,
++           offset: int | None = None):
++    """One-hot window of ``seq_len`` bp holding 0-based ``pos`` at index ``offset``.
++
++    ``offset=None`` (the default) centres the site at ``seq_len // 2``, which is the
++    original behaviour and what every existing caller gets.
++
++    Pass an explicit ``offset`` to reproduce the framing an evaluation window used.
++    This matters whenever the gene is larger than ``seq_len``: the evaluation windows
++    are gene-centred, so for a gene that overruns the window the site is NOT centred,
++    and a centred window can contain a substantially different amount of the gene --
++    at SORCS3 (623,953 bp) the evaluation window is the gene's terminal one and is
++    100% intragenic with 39 internal splice sites, whereas the centred window runs
++    56 kb past the gene end and holds only 25. Attributing the centred window would
++    explain a prediction that differs from the stored one by up to 0.42 SSE.
++    """
+     half = seq_len // 2
+-    start = pos - half
++    site = half if offset is None else int(offset)
++    if not 0 <= site < seq_len:
++        raise ValueError(
++            f"site offset {site} outside the {seq_len} bp window (chrom {chrom}, pos {pos})")
++    start = pos - site
+     clen = len(fasta[chrom])
+     lpad = max(0, -start)
+     rpad = max(0, start + seq_len - clen)
+@@ -146,7 +164,32 @@
+         seq = "N" * lpad + seq + "N" * rpad
+     oh = sequence_to_onehot(seq).astype(np.float32)
+     assert oh.shape == (seq_len, 4), oh.shape
+-    return oh, half  # site index within the window
++    return oh, site  # site index within the window
++
++
++def manifest_offset(r, seq_len: int):
++    """Site offset requested by a manifest row, or None to centre the site.
++
++    Honours an optional ``window_start`` column (the genomic start of the evaluation
++    window, straight from the fold0 test BED); the offset is then
++    ``Position - window_start``. Absent, blank, or non-numeric means "centre it", so
++    manifests written before this column existed behave exactly as before.
++    """
++    ws = getattr(r, "window_start", None)
++    if ws is None or (isinstance(ws, float) and np.isnan(ws)):
++        return None
++    try:
++        ws = int(ws)
++    except (TypeError, ValueError):
++        return None
++    off = int(r.Position) - ws
++    if not 0 <= off < seq_len:
++        raise ValueError(
++            f"window_start={ws} puts Position={int(r.Position)} at offset {off}, outside "
++            f"the {seq_len} bp window ({getattr(r, 'species', '?')} "
++            f"{getattr(r, 'Chromosome', '?')}). Check the BED row is the one that "
++            f"actually produced this site's stored prediction.")
++    return off
+ 
+ 
+ def predict_at(model, x: torch.Tensor, org: int, site: int, cond: int, device):
+@@ -183,7 +226,8 @@
+             continue
+         cidx = int(s["conds"][cname])
+         fa = pyfaidx.Fasta(s["fasta"], as_raw=True, sequence_always_upper=True)
+-        oh, si = window(fa, str(r.Chromosome), int(r.Position), cfg["sequence_length"])
++        oh, si = window(fa, str(r.Chromosome), int(r.Position), cfg["sequence_length"],
++                        manifest_offset(r, cfg["sequence_length"]))
+         x = torch.from_numpy(oh)[None].to(device)
+         t0 = time.time()
+         lg, pr = predict_at(model, x, s["org"], si, cidx, device)
+@@ -226,7 +270,8 @@
+         if r.species not in fastas:
+             fastas[r.species] = pyfaidx.Fasta(s["fasta"], as_raw=True,
+                                               sequence_always_upper=True)
+-        oh, si = window(fastas[r.species], str(r.Chromosome), int(r.Position), seq_len)
++        oh, si = window(fastas[r.species], str(r.Chromosome), int(r.Position), seq_len,
++                        manifest_offset(r, seq_len))
+         x = torch.from_numpy(oh)[None].to(device)
+         tfn = usage_target(si, cidx)
+         lg, pr = predict_at(model, x, s["org"], si, cidx, device)
+@@ -249,7 +294,12 @@
+         dt = time.time() - t0
+ 
+         w = args.report_bp
+-        lo, hi = si - w, si + w + 1
++        # Clamp to the array: once the site is not centred (an explicit window_start),
++        # si +/- w can run off either end. Bare numpy slicing would truncate SILENTLY,
++        # leaving attr/contrib/onehot shorter than the offsets vector and so misaligned
++        # against it. Deriving offsets from the clamped bounds keeps them 1:1 by
++        # construction; when the site IS centred these values are unchanged.
++        lo, hi = max(0, si - w), min(len(contrib), si + w + 1)
+         prof = contrib[: nb * BIN].reshape(nb, BIN).sum(axis=1)
+         name = f"{r.species}_{str(r.site).replace(':', '_')}_{cname}"
+         np.savez_compressed(
+@@ -258,7 +308,7 @@
+             contrib=contrib[lo:hi].astype(np.float32),
+             profile_128bp=prof.astype(np.float32),
+             onehot=oh[lo:hi].astype(np.int8),
+-            offsets=np.arange(-w, w + 1, dtype=np.int32),
++            offsets=np.arange(lo - si, hi - si, dtype=np.int32),
+             meta=json.dumps(dict(species=r.species, site=str(r.site), tissue=r.Tissue,
+                                  condition=cname, condition_idx=cidx,
+                                  organism_index=s["org"], position=int(r.Position),
+@@ -266,7 +316,15 @@
+                                  human_anchor=str(r.human_anchor), symbol=str(r.symbol),
+                                  role=str(r.role), steps=args.steps,
+                                  baselines=nbase, baseline=args.baseline,
+-                                 logit=lg, pred=pr)),
++                                 logit=lg, pred=pr,
++                                 # framing provenance: which window this explains, so a
++                                 # saved .npz is self-describing rather than implicitly
++                                 # assumed to be centred
++                                 site_offset=int(si),
++                                 window_start=int(r.Position) - int(si),
++                                 centred=bool(si == seq_len // 2),
++                                 report_lo=int(lo), report_hi=int(hi),
++                                 report_truncated=bool(lo > si - w or hi < si + w + 1))),
+         )
+         cw = contrib[lo:hi]
+         rows.append(dict(

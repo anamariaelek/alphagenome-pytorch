@@ -128,7 +128,7 @@ log_every: 10
 # ---------------------------------------------------------------------------
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
-output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
 run_name: 132kb_encode_intersect_usage_pc_obs_opossum        # defaults to timestamp
 save_every: 1
 

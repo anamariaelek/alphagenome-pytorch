@@ -144,7 +144,7 @@ log_every: 10
 # ---------------------------------------------------------------------------
 # Output / checkpointing
 # ---------------------------------------------------------------------------
-output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
 run_name: 132kb_encode_intersect_usage_pc_obs_human_mouse_rat        # defaults to timestamp
 save_every: 1
 

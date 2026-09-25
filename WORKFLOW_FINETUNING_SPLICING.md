@@ -711,6 +711,16 @@ per organ in the run log). Whatever aggregation produced the stored values is th
 not one of those two, which is the reason the `_true` pass exists rather than comparing
 predictions straight against the count-based call.
 
+**Full-store re-run and reporting live with the results, not here.** The invocation above
+reads `best_model/preds_intersect_protein_coding`, the sampled store. The all-sites re-run
+that produced `${AGX_BASE}/devas/calls_full/` overrides `PRED_DIR` to
+`best_model/preds_intersect_protein_coding_all` and is driven by
+`${AGX_BASE}/devas/scripts/devas_full_and_class.py`, which imports this script as a module
+and so needs `PYTHONPATH=$(pwd)/scripts`. The tables and figures under `devas/tables/` and
+`devas/figures/` are generated from the resulting call table by
+`${AGX_BASE}/devas/scripts/devas_report.py`. See `devas/README.md` for both, for the
+directory layout and for which outputs came from which run.
+
 
 ## Trajectory evaluation
 

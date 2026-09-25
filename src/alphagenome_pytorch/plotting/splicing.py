@@ -20,14 +20,14 @@ CLASS_LABELS = {0: 'donor +', 1: 'acceptor +', 2: 'donor -', 3: 'acceptor -', 4:
 CLASS_COLORS  = {0: '#ff7f00', 1: '#33a02c', 2: '#fdbf6f', 3: '#b2df8a', 4: '#1f78b4'}
 
 TISSUE_COLORS = {
-    'Brain': '#3399cc',
-    'Midbrain': '#34b3e6',
-    'Cerebellum': '#34ccff',
-    'Heart': '#cc0100',
-    'Kidney': '#cc9900',
-    'Liver': '#339900',
-    'Ovary': '#cc329a',
-    'Testis': '#ff6600'
+    "Brain": "#5B92E5",
+    "Midbrain": "#6EC6FF",
+    "Cerebellum": "#8CE5FF",
+    "Heart": "#E64A45",
+    "Kidney": "#E6B800",
+    "Liver": "#5CB85C",
+    "Ovary": "#E668B3",
+    "Testis": "#FF8C42",
 }
 
 SPECIES_ORDER = ['human', 'macaque', 'mouse', 'rat', 'rabbit', 'opossum', 'chicken']
