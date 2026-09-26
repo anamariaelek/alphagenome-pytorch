@@ -1381,11 +1381,13 @@ def main() -> None:
             train_traj = getattr(train_metrics, "usage_trajectory_loss", None)
             train_tcorr = getattr(train_metrics, "usage_trajectory_corr", None)
             train_trmse = getattr(train_metrics, "usage_trajectory_rmse", None)
+            train_tcontrast = getattr(train_metrics, "usage_tissue_contrast_loss", None)
             val_bce = getattr(val_metrics, "usage_bce_loss", None)
             val_delta = getattr(val_metrics, "usage_delta_loss", None)
             val_traj = getattr(val_metrics, "usage_trajectory_loss", None)
             val_tcorr = getattr(val_metrics, "usage_trajectory_corr", None)
             val_trmse = getattr(val_metrics, "usage_trajectory_rmse", None)
+            val_tcontrast = getattr(val_metrics, "usage_tissue_contrast_loss", None)
             summary = (
                 f"Epoch {epoch}: "
                 f"train_loss={train_loss:.4f}  "
@@ -1398,7 +1400,8 @@ def main() -> None:
                 f"  Timing: {format_time(epoch_elapsed)} ({format_time(train_metrics.elapsed_s)} train + {format_time(val_metrics.elapsed_s)} val)"
             )
             if any(v is not None for v in (train_bce, train_delta, train_traj, train_tcorr, train_trmse,
-                                           val_bce, val_delta, val_traj, val_tcorr, val_trmse)):
+                                           train_tcontrast,
+                                           val_bce, val_delta, val_traj, val_tcorr, val_trmse, val_tcontrast)):
                 summary += "\n  [usage breakdown]"
                 train_parts = []
                 if train_bce is not None:
@@ -1411,6 +1414,9 @@ def main() -> None:
                     train_parts.append(f"train_trajectory_corr={train_tcorr:.3f}")
                 if train_trmse is not None:
                     train_parts.append(f"train_trajectory_rmse={train_trmse:.4f}")
+                if train_tcontrast is not None:
+                    train_parts.append(f"train_tissue_contrast_loss={train_tcontrast:.4f}")
+                    train_parts.append(f"train_n_marker_sites={train_metrics.n_usage_marker_sites}")
                 if train_parts:
                     summary += "\n    " + "  ".join(train_parts)
 
@@ -1425,6 +1431,9 @@ def main() -> None:
                     val_parts.append(f"val_trajectory_corr={val_tcorr:.3f}")
                 if val_trmse is not None:
                     val_parts.append(f"val_trajectory_rmse={val_trmse:.4f}")
+                if val_tcontrast is not None:
+                    val_parts.append(f"val_tissue_contrast_loss={val_tcontrast:.4f}")
+                    val_parts.append(f"val_n_marker_sites={val_metrics.n_usage_marker_sites}")
                 if val_parts:
                     summary += "\n    " + "  ".join(val_parts)
             print(summary)
@@ -1446,6 +1455,9 @@ def main() -> None:
                 extra["train_trajectory_corr"] = train_tcorr
             if train_trmse is not None:
                 extra["train_trajectory_rmse"] = train_trmse
+            if train_tcontrast is not None:
+                extra["train_tissue_contrast_loss"] = train_tcontrast
+                extra["train_n_marker_sites"] = train_metrics.n_usage_marker_sites
             if val_bce is not None:
                 extra["val_bce_loss"] = val_bce
             if val_delta is not None:
@@ -1456,6 +1468,9 @@ def main() -> None:
                 extra["val_trajectory_corr"] = val_tcorr
             if val_trmse is not None:
                 extra["val_trajectory_rmse"] = val_trmse
+            if val_tcontrast is not None:
+                extra["val_tissue_contrast_loss"] = val_tcontrast
+                extra["val_n_marker_sites"] = val_metrics.n_usage_marker_sites
             if val_metrics.species_metrics:
                 for org_idx, species_vals in sorted(val_metrics.species_metrics.items()):
                     species_name = species_name_by_org.get(org_idx, f"org_{org_idx}")

@@ -43,6 +43,13 @@
 # epochs=3 below lands in the few-hundred-step range without the ~2h+/epoch
 # the full fold0 splits would take. Point back at the fold0 paths (see
 # hqmrboc.yaml) for the full-scale run.
+#
+# test_bed (500-window subset, same pattern) is also set below for parity
+# with the fold0 layout, but finetune_splice.py never reads it -- it's only
+# consumed by evaluate_splice.py's --data-config JSON (which expects this
+# same species-spec shape: genome/annotation_parquet/usage_parquet/
+# train_bed/val_bed/test_bed/organism_index), for a held-out eval pass
+# against these pilot species after training.
 # ---------------------------------------------------------------------------
 species:
   - name: human
@@ -51,6 +58,7 @@ species:
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/test.bed
     organism_index: 0
 
   - name: mouse
@@ -59,6 +67,7 @@ species:
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/test.bed
     organism_index: 1
 
   - name: macaque
@@ -67,6 +76,7 @@ species:
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/test.bed
     organism_index: 5
 
 organism_embedding_init:
@@ -115,9 +125,9 @@ train_components: embedder_1bp
 # batch size (and per-step gradient-noise characteristics) match hqmrboc.yaml,
 # keeping the pilot's training dynamics representative of the full run.
 # ---------------------------------------------------------------------------
-epochs: 3
-batch_size: 3
-gradient_accumulation_steps: 32
+epochs: 10
+batch_size: 2
+gradient_accumulation_steps: 64
 lr: 1.0e-4
 weight_decay: 0.1
 warmup_steps: 100                # was 1000 — scaled down for the much shorter run
@@ -136,7 +146,7 @@ usage_loss_weights:
   bce: 1.0
   delta_mse: 5.0
   trajectory_pearson: 5.0
-  tissue_contrast: 0.0
+  tissue_contrast: 5.0
 
 usage_traj_warmup_epochs: 1
 
@@ -167,7 +177,7 @@ log_every: 10
 # collides with hqmrboc.yaml's checkpoints/logs.
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
-run_name: lora_64_emb_traj_hqm_phase1_pilot
+run_name: lora_64_emb_traj_hqm_phase1_pilot_tissue_contrast
 save_every: 1
 
 resume: auto

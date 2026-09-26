@@ -67,7 +67,7 @@ DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
 # PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=lora_64_emb_traj_hqmrboc__
+RUN=lora_64_emb_traj_hqm_phase1_pilot_tissue_contrast
 CHECKPOINT_PATH="${DIR}/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
@@ -75,7 +75,7 @@ PRED_DIR=preds_${TIMESTAMP}
 DATA_CONFIG="${DIR}/data/data_config_${TIMESTAMP}.json"
 
 # Evaluation on trained species
-for EVAL_SPECIES in human mouse rat rabbit opossum chicken macaque; do 
+for EVAL_SPECIES in human mouse macaque; do 
 OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 python ${WORK_DIR}/scripts/evaluate_splice.py \
@@ -94,7 +94,7 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
 done
 
 # Evaluation on left-out species
-for EVAL_SPECIES in chicken macaque; do 
+for EVAL_SPECIES in rat rabbit opossum chicken; do 
 OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 python ${WORK_DIR}/scripts/evaluate_splice.py \
