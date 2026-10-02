@@ -60,15 +60,15 @@ TIMESTAMP="intersect_protein_coding" # gtf usage intersect union intersect_usage
 WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Models directory
-DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai
+DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
 
 # Pretrained model for sanity check
 # CHECKPOINT_PATH=${WORK_DIR}/checkpoints/pretrained.pth
 # PRED_DIR=preds_pretrained_${TIMESTAMP}
 
 # Finetuned model
-RUN=lora_64_emb_traj_hqm_phase1_pilot_tissue_contrast
-CHECKPOINT_PATH="${DIR}/${RUN}"
+RUN=lora_64_emb_traj_hqm_phase1_pilot
+CHECKPOINT_PATH="${DIR}/models/${RUN}"
 PRED_DIR=preds_${TIMESTAMP}
 
 # Data configuration
@@ -76,7 +76,7 @@ DATA_CONFIG="${DIR}/data/data_config_${TIMESTAMP}.json"
 
 # Evaluation on trained species
 for EVAL_SPECIES in human mouse macaque; do 
-OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
+OUT_DIR=${DIR}/evals/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 python ${WORK_DIR}/scripts/evaluate_splice.py \
     --checkpoint "${CHECKPOINT_PATH}" \
@@ -85,6 +85,7 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --per-tissue \
     --observed-conditions-only \
     --trajectory-corr \
+    --tissue-contrast \
     --overwrite \
     --batch-size 6 \
     --max-windows 1000 \
@@ -95,7 +96,7 @@ done
 
 # Evaluation on left-out species
 for EVAL_SPECIES in rat rabbit opossum chicken; do 
-OUT_DIR=${DIR}/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
+OUT_DIR=${DIR}/evals/${RUN}/${PRED_DIR}/${EVAL_SPECIES}/
 mkdir -p ${OUT_DIR}
 python ${WORK_DIR}/scripts/evaluate_splice.py \
     --checkpoint "${CHECKPOINT_PATH}" \
@@ -105,6 +106,7 @@ python ${WORK_DIR}/scripts/evaluate_splice.py \
     --cross-species-usage \
     --observed-conditions-only \
     --trajectory-corr \
+    --tissue-contrast \
     --overwrite \
     --batch-size 6 \
     --max-windows 1000 \

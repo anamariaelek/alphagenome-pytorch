@@ -200,16 +200,37 @@ passes it (`class_weights` stays `None` throughout), so current training runs us
 
 The usage head is trained with a composite loss (`splice_usage_loss` in
 [`splice_losses.py`](../src/alphagenome_pytorch/extensions/finetuning/splice_losses.py)),
-combining up to three components, each isolating a different, otherwise-conflatable
+combining up to four components, each isolating a different, otherwise-conflatable
 kind of error. `usage_loss_weights` in the YAML config supplies each component's
 weight; a component with weight `0.0` (or an omitted key) is skipped entirely — its
 loss and any per-batch metrics it would log are simply not computed.
 
-- **`bce`** — binary cross-entropy on absolute usage (SSE) in `[0, 1]`, over every
-  observed `(position, condition)` pair, no eligibility filter. The baseline "get the
-  absolute level right" term — this is what actually calibrates predicted usage
-  fraction against the true one; the two trajectory terms below are deliberately
-  blind to absolute level.
+**Replicate-level targets.** `usage_values`/`usage_mask`/`usage_coverage` carry a
+trailing *replicate* axis — one entry per real biological replicate observation at a
+`(site, condition)` (`SpliceSiteUsageIndex.query()`), not a single pre-pooled value.
+`usage.parquet` genuinely carries several replicate rows per `(site, condition)`
+(93% of groups have 2+, each its own `Alpha`/`Beta`/`SSE`); `query()` used to collapse
+them to whichever row a numpy fancy-index overwrite happened to keep last, silently
+discarding the rest. `bce` (below) now sums an independently coverage-weighted term
+per real replicate, using every one of them. `delta_mse`/`trajectory_pearson`/
+`tissue_contrast` instead need one scalar per `(site, condition)` to define a
+trajectory or a tissue contrast — they consume a coverage-weighted mean across
+replicates, computed once internally and reused by all three (this also fixes the
+same collapsing bug for them, since that pooled mean now reflects every replicate
+instead of an arbitrary one).
+
+- **`bce`** — binary cross-entropy on absolute usage (SSE) in `[0, 1]`, summed over
+  every individual replicate observation (not one value per `(position, condition)`),
+  no eligibility filter. The baseline "get the absolute level right" term — this is
+  what actually calibrates predicted usage fraction against the true one; the other
+  terms below are deliberately blind to absolute level. Each replicate's term is
+  weighted by its own `Alpha + Beta` read coverage when `usage_coverage` is supplied
+  (equivalent to the correct Binomial log-likelihood over all real data) — floored at
+  `min_coverage` (default `10.0`, matching `SpliceSiteUsageIndex`'s own coverage
+  filter) so a genuinely low-coverage replicate, or a synthetic imputed-zero entry
+  (coverage `0`) for an unobserved tissue, isn't weighted to (near) zero and
+  effectively dropped. Falls back to a plain per-replicate mean when
+  `usage_coverage` isn't passed.
 - **`delta_mse`** — per-(site, tissue) centered MSE: both predicted and true
   trajectories are first mean-centered over their own observed timepoints
   (`_tissue_centered`), then squared error is computed between the two *centered*
@@ -225,6 +246,25 @@ loss and any per-batch metrics it would log are simply not computed.
   regularized by `var_floor` (fixed at `1e-3`, not YAML-configurable) so a flat
   *prediction* (near-zero variance) yields a bounded gradient (`r → 0`) instead of
   the correlation blowing up, rather than being skipped as ineligible.
+- **`tissue_contrast`** — per-(site, tissue) one-vs-rest usage contrast
+  (`_tissue_vs_rest_contrast`): for each tissue, compares that tissue's own mean
+  usage against the mean usage pooled across every *other* tissue, for both
+  predicted and true values, then penalizes `(diff_pred - diff_true)²` — i.e. does
+  the model reproduce the *magnitude* of the tissue's enrichment over the rest, not
+  just its own absolute level (`bce`'s job) or its developmental shape (`delta_mse`/
+  `trajectory_pearson`'s job). Addresses a finding in
+  `splicing_specificity_eval/report.md`'s "Differential tissue usage" section: the
+  model reproduces the right marker-site *block structure* but diffusely — predicted
+  usage at true tissue-marker sites is compressed toward the middle of the range
+  instead of sharply elevated in the marker's own tissue. Gated **one-directionally**
+  on `diff_true > marker_floor` (default `0.25`, not YAML-configurable) — i.e. only
+  sites where the tissue is a genuine one-vs-rest marker — so this only ever pulls a
+  marker tissue's predicted usage *up* toward its true enrichment, matching what the
+  report shows going wrong (own-tissue usage too low/diffuse, not rest-tissue usage
+  too high). `min_conditions=2` (also fixed) is a floor on how many observed
+  conditions both the tissue's own group and the rest-of-tissues group need before
+  their means are trusted. Eligible markers are weighted equally, same rationale as
+  `delta_mse`.
 
 `delta_mse` and `trajectory_pearson` are both restricted to the same eligibility
 gate: a trajectory must have `≥ min_tp` observed timepoints *and* its median-filtered
@@ -242,9 +282,10 @@ minority.
 
 `usage_traj_warmup_epochs` (integer, default `0` = off) linearly ramps
 `delta_mse`/`trajectory_pearson`'s weights from `0` up to their configured value
-over the first N epochs — `bce` is always at full weight from epoch 1. The scale
-factor is `min(1, max(0, (epoch - 1) / usage_traj_warmup_epochs))`, so it's `0` at
-epoch 1 and reaches `1.0` (full configured weight) at epoch
+over the first N epochs — `bce` and `tissue_contrast` are always at full weight from
+epoch 1 (only `delta_mse`/`trajectory_pearson` are in the warm-up's `_TRAJ_KEYS`).
+The scale factor is `min(1, max(0, (epoch - 1) / usage_traj_warmup_epochs))`, so it's
+`0` at epoch 1 and reaches `1.0` (full configured weight) at epoch
 `usage_traj_warmup_epochs + 1`. The point is to let the level fit (`bce`) get
 established before the trajectory terms start applying gradient pressure, rather
 than all three competing from epoch 1.
@@ -252,9 +293,19 @@ than all three competing from epoch 1.
 `tissue_cond_groups` (built automatically from each species' condition metadata, not
 a YAML key) splits a site's conditions by tissue, ordered by developmental
 timepoint, so `delta_mse`/`trajectory_pearson` measure *within-tissue* dynamics
-rather than between-tissue level offsets. Without it, both terms would collapse to
-one all-conditions group per site, dominated by between-tissue level differences
-rather than genuine developmental change within a tissue.
+rather than between-tissue level offsets, and `tissue_contrast` knows which
+conditions belong to each tissue (its own group) vs. every other tissue (the rest
+group). Without it, the trajectory terms would collapse to one all-conditions group
+per site (dominated by between-tissue level differences rather than genuine
+developmental change within a tissue), and `tissue_contrast` would have no tissue
+boundaries to compare across.
+
+`tissue_contrast_loss`/`n_marker_sites` (and `bce_loss`/`delta_loss`/
+`trajectory_loss`/`trajectory_corr`/`trajectory_rmse`) are logged per step, per
+epoch (`train_tissue_contrast_loss`/`train_n_marker_sites`, `val_tissue_contrast_loss`/
+`val_n_marker_sites` in `epoch_log.csv`), and per species in validation
+(`val_usage_tissue_contrast_loss_<species>`) — the same treatment as the other usage
+loss components, in `splice_training.py`/`finetune_splice.py`.
 
 ## Evaluate
 
@@ -271,6 +322,42 @@ python -u scripts/evaluate_splice.py \
 ```
 
 Alternativelly, paths to data can be read from config: `--data-config /data/data_config.json`.
+
+**Trajectory and tissue-specificity flags.** Beyond the base classification/usage
+Pearson r above, three opt-in flags compute additional eval-time metrics that mirror
+specific [usage-loss components](#usage-loss) — each adds its result to `metrics.json`
+(flat for a single usage head; nested under `<metric>_by_head` for cross-species
+usage heads, same pattern as `usage_by_head`) and prints a per-tissue breakdown.
+All three can run against already-saved predictions via `--skip-predictions`
+(no need to rerun inference just to recompute a metric):
+
+- **`--trajectory-corr`** (+ `--traj-min-timepoints` default `3`, `--traj-exc-floor`
+  default `0.08`) — computes `trajectory_correlation` (per-site, per-tissue Pearson
+  r, the eval-time counterpart of `trajectory_pearson`) and `trajectory_magnitude`
+  (rmse / amplitude R² / trajectory R², the counterpart of `delta_mse`). Same
+  tissue-grouping and eligibility gate as training (`≥ traj-min-timepoints` observed
+  timepoints and median-filtered excursion `> traj-exc-floor`) — nicknamed "exc5"
+  elsewhere in this codebase when run with `exc_floor=0.10`/`median_win=5`; pass
+  values matching whatever the checkpoint being evaluated actually trained with if
+  you want the two to line up exactly.
+- **`--tissue-contrast`** (+ `--tissue-contrast-marker-floor` default `0.25`) —
+  computes `tissue_contrast` (per-site, per-tissue one-vs-rest usage contrast, the
+  eval-time counterpart of the `tissue_contrast` loss), restricted to sites where a
+  tissue clears the one-vs-rest marker gate
+  (true contrast `> tissue-contrast-marker-floor`).
+  Reports, overall and per-tissue: `mean_true_gap`/`mean_pred_gap`,
+  `compression_ratio` (`mean_pred_gap / mean_true_gap` — a direct read on
+  `splicing_specificity_eval/report.md`'s "Differential tissue usage" finding that
+  marker-site predictions are compressed toward the middle; `1.0` = no compression,
+  `< 1` = under-predicted magnitude), `rmse`, `pearson_r`, and `sign_correct_frac`
+  (fraction of markers where the model at least predicts the right *direction* of
+  enrichment — mirrors the report's cross-species sign-correct-% statistic).
+- **`--per-tissue`** — a separate, older mechanism: per-tissue Pearson r **plots**
+  (`plot_usage_correlation_by_tissue`, written as `per_tissue_usage`/
+  `per_tissue_by_head` in `metrics.json`), scored *within* each tissue's own
+  conditions. Don't confuse with `--tissue-contrast` above, which scores the
+  *contrast between* a tissue and the rest — the two answer different questions and
+  can be combined freely.
 
 `evaluate_splice_submit.sh` is a SLURM wrapper that runs `evaluate_splice.py` for every species in a model's training set in turn, writing each species' output under `<run>/<pred_dir>/<species>/`.
 
