@@ -125,7 +125,7 @@ train_components: embedder_1bp
 # batch size (and per-step gradient-noise characteristics) match hqmrboc.yaml,
 # keeping the pilot's training dynamics representative of the full run.
 # ---------------------------------------------------------------------------
-epochs: 10
+epochs: 20
 batch_size: 2
 gradient_accumulation_steps: 64
 lr: 1.0e-4
@@ -146,7 +146,7 @@ usage_loss_weights:
   bce: 1.0
   delta_mse: 5.0
   trajectory_pearson: 5.0
-  tissue_contrast: 5.0
+  tissue_contrast: 0.0
 
 usage_traj_warmup_epochs: 1
 
@@ -177,7 +177,7 @@ log_every: 10
 # collides with hqmrboc.yaml's checkpoints/logs.
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
-run_name: lora_64_emb_traj_hqm_phase1_pilot_tissue_contrast
+run_name: lora_64_emb_traj_tiss_hqm_pilot_0
 save_every: 1
 
 resume: auto

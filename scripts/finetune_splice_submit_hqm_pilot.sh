@@ -64,7 +64,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Config file
-CONFIG="${WORK_DIR}/configs/hqmrboc_phase1_pilot.yaml"
+CONFIG="${WORK_DIR}/configs/hqm_pilot.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then
