@@ -48,6 +48,16 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+# The default "file_descriptor" sharing strategy leaks one open fd per tensor
+# passed from a DataLoader worker to the main process until both sides release
+# their reference; with num_workers>0 and several usage tensors per batch
+# (sequence/usage_positions/usage_values/usage_mask/usage_coverage/...), a long
+# inference run can exhaust the process' open-fd ulimit, failing partway
+# through with "RuntimeError: received 0 items of ancdata". "file_system"
+# avoids fd-based handles entirely (named /dev/shm segments instead), at the
+# cost of /dev/shm usage instead of fd usage.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 from alphagenome_pytorch.utils.paths import expand_path, expand_paths_in_dict
 
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ft-hqmrboc__524kb
+#SBATCH --job-name=ft-hqmrboc_132kb
 #SBATCH --partition=gpu-single
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
@@ -51,7 +51,7 @@ python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() els
 WORK_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code
 
 # Config file
-CONFIG="${WORK_DIR}/configs/hqmrboc_524kb.yaml"
+CONFIG="${WORK_DIR}/configs/hqmrboc_132kb.yaml"
 
 # Verify config file exists
 if [ ! -f "${CONFIG}" ]; then

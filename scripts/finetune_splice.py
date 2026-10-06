@@ -94,6 +94,16 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+# The default "file_descriptor" sharing strategy leaks one open fd per tensor
+# passed from a DataLoader worker to the main process until both sides release
+# their reference; with num_workers>0, persistent_workers=True, and several
+# usage tensors per batch (sequence/usage_positions/usage_values/usage_mask/
+# usage_coverage/...), a long multi-epoch run can exhaust the process' open-fd
+# ulimit, failing with "RuntimeError: received 0 items of ancdata" well into
+# training. "file_system" avoids fd-based handles entirely (named /dev/shm
+# segments instead), at the cost of /dev/shm usage instead of fd usage.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 # Workaround for torch.compile bug in quantization pattern matcher
 import torch._inductor.config
 torch._inductor.config.post_grad_fusion_options = {}
