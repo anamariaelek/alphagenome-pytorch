@@ -2564,27 +2564,36 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- Set up logging -------------------------------------------------------
-    log_path = out_dir / "eval.log"
-    logger = setup_logging(log_path)
-    
-    logger.info(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    logger.info(f"Log: {log_path}")
-
-    # -- Resolve checkpoint and model config ---------------------------------
+    # -- Resolve checkpoint/config paths BEFORE touching the log file --------
+    # setup_logging() opens eval.log with mode="w", which truncates it
+    # immediately -- including any historical "Checkpoint   :"/"Data config  :"
+    # lines list_prediction_dirs.sh relies on to rediscover this directory's
+    # inputs later. Validating these cheap, side-effect-free paths first (and
+    # sys.exit'ing via resolve_checkpoint/the checks below, same as before)
+    # means a stale/moved path fails fast without destroying that history --
+    # it's preserved for a future run once the path is fixed, rather than
+    # being wiped by every failed attempt in between.
     pth_path, default_cfg_path = resolve_checkpoint(args.checkpoint)
     model_cfg_path = Path(args.model_config) if args.model_config is not None else default_cfg_path
     if not model_cfg_path.exists():
         sys.exit(f"Model config not found: {model_cfg_path}")
+    data_cfg_path = Path(args.data_config)
+    if not data_cfg_path.exists():
+        sys.exit(f"Data config not found: {data_cfg_path}")
+
+    # -- Set up logging -------------------------------------------------------
+    log_path = out_dir / "eval.log"
+    logger = setup_logging(log_path)
+
+    logger.info(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    logger.info(f"Log: {log_path}")
+
+    # -- Load model config ----------------------------------------------------
     model_cfg = load_config(model_cfg_path, logger=logger)
     logger.info(f"Checkpoint   : {pth_path}")
     logger.info(f"Model config : {model_cfg_path}")
 
     # -- Load data config and resolve species --------------------------------
-    data_cfg_path = Path(args.data_config)
-    if not data_cfg_path.exists():
-        sys.exit(f"Data config not found: {data_cfg_path}")
-    
     species_specs = load_data_config(data_cfg_path, args.eval_species)
     logger.info(f"Data config  : {data_cfg_path}")
     logger.info(f"Eval species : {[s['name'] for s in species_specs]}")
@@ -3222,10 +3231,29 @@ def main() -> None:
             if vals:
                 logger.info(f"  {k:<38s} {np.mean(vals):.4f}")
 
-    # -- Save JSON -----------------------------------------------------------
+    # -- Save JSON -------------------------------------------------------------
+    # Merge onto any existing metrics.json rather than overwriting it outright:
+    # a run invoked with only one of --trajectory-corr/--tissue-contrast (as the
+    # backfill_*.sh scripts each do, to recompute one metric family without
+    # rerunning the other) only populates that family's key in all_results --
+    # dumping all_results alone would silently delete whatever metric family a
+    # previous run had already computed and this one didn't touch. --overwrite
+    # still governs whether *this run's own* keys get fresh values (vs. reusing
+    # cached predictions/metrics, checked earlier); it doesn't mean "discard
+    # every key this invocation didn't itself recompute".
     out_path = out_dir / "metrics.json"
+    existing_results: dict[str, dict] = {}
+    if out_path.exists():
+        try:
+            with open(out_path) as f:
+                existing_results = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not read existing {out_path} to merge ({e}); overwriting it.")
+            existing_results = {}
+    for org_name, org_results in all_results.items():
+        existing_results[org_name] = {**existing_results.get(org_name, {}), **org_results}
     with open(out_path, "w") as f:
-        json.dump(all_results, f, indent=2, default=lambda x: None)
+        json.dump(existing_results, f, indent=2, default=lambda x: None)
 
     logger.info(f"\nResults saved to {out_path}")
 

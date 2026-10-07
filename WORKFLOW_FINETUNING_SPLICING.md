@@ -379,8 +379,16 @@ python scripts/predict_splice_site.py \
 `backfill_trajectory_metrics.sh` reruns `evaluate_splice.py --skip-predictions --trajectory-corr --overwrite` 
 for every directory, (re)computing `trajectory_correlation` / `trajectory_magnitude` whether or not that directory had them before.  
 
+`backfill_tissue_contrast_metrics.sh` is the same pattern for `tissue_contrast`: reruns
+`evaluate_splice.py --skip-predictions --tissue-contrast --overwrite` for every directory,
+(re)computing `mean_true_gap`/`mean_pred_gap`/`compression_ratio`/`rmse`/`pearson_r`/
+`sign_correct_frac` whether or not that directory had them before. Separate from
+`backfill_trajectory_metrics.sh` so either metric family can be (re)computed independently
+without forcing the other to rerun too.
+
 `list_prediction_dirs.sh` is a general lister used under-the-hood by other scripts, includiing
-`backfill_trajectory_metrics.sh`. It scans every model run directory under `DIR` (default
+`backfill_trajectory_metrics.sh`/`backfill_tissue_contrast_metrics.sh`. It scans every model
+run directory under `DIR` (default
 `${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai`) for per-species prediction output
 directories — identified by a `metrics.json` inside them, under any `*/preds_*/<species>/`
 path, regardless of what the model run directory itself is named, or what follows the
@@ -392,6 +400,7 @@ already been computed inside it; its consumers decide what to do with each one.
 
 ```bash
 bash scripts/backfill_trajectory_metrics.sh # PARALLEL=8 to tune
+bash scripts/backfill_tissue_contrast_metrics.sh # same PARALLEL/JOBS_FILE knobs
 # run under the hood:
 bash scripts/list_prediction_dirs.sh   # -> /tmp/prediction_dirs.txt
 ```
