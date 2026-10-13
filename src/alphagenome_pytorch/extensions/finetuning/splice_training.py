@@ -78,9 +78,11 @@ class SpliceTrainMetrics:
     usage_trajectory_loss: float | None = None
     usage_trajectory_corr: float | None = None  # mean per-tissue temporal Pearson
     usage_trajectory_rmse: float | None = None  # literal true-vs-pred RMSE (level + magnitude)
+    usage_tissue_contrast_loss: float | None = None
     species_metrics: dict[int, dict[str, float]] = field(default_factory=dict)
     n_batches: int = 0
     n_usage_valid_pairs: int = 0  # total (position, condition) pairs with observed usage
+    n_usage_marker_sites: int = 0  # total tissue_contrast-eligible (site,tissue) slots
     elapsed_s: float = 0.0   # wall-clock seconds for this epoch
     latency_ms: float = 0.0  # average batch latency in milliseconds
 
@@ -171,11 +173,13 @@ def train_epoch_splice(
     usage_traj_sum = 0.0
     usage_tcorr_sum = 0.0
     usage_trmse_sum = 0.0
+    usage_tcontrast_sum = 0.0
     n_usage_bce_batches = 0
     n_usage_delta_batches = 0
     n_usage_traj_batches = 0
     n_usage_tcorr_batches = 0
     n_usage_trmse_batches = 0
+    n_usage_tcontrast_batches = 0
     step = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
@@ -252,6 +256,9 @@ def train_epoch_splice(
                     usage_pos = batch["usage_positions"].to(device)
                     usage_vals = batch["usage_values"].to(device)
                     usage_mask = batch["usage_mask"].to(device)
+                    usage_cov = batch.get("usage_coverage")
+                    if usage_cov is not None:
+                        usage_cov = usage_cov.to(device)
 
                     usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                     logits = usage_out["logits"]
@@ -263,6 +270,7 @@ def train_epoch_splice(
                         delta_from_mean=usage_delta_from_mean,
                         usage_loss_weights=epoch_usage_weights,
                         tissue_cond_groups=_groups_for(int(org_idx[0].item())),
+                        usage_coverage=usage_cov,
                     )
 
                 total_loss = total_loss + usage_weight * usage_loss_val
@@ -291,6 +299,9 @@ def train_epoch_splice(
             if _trmse is not None and math.isfinite(_trmse):
                 usage_trmse_sum += _trmse
                 n_usage_trmse_batches += 1
+            if "tissue_contrast_loss" in usage_corr and math.isfinite(usage_corr["tissue_contrast_loss"]):
+                usage_tcontrast_sum += usage_corr["tissue_contrast_loss"]
+                n_usage_tcontrast_batches += 1
 
             # Scale for accumulation
             (total_loss / accumulation_steps).backward()
@@ -328,6 +339,7 @@ def train_epoch_splice(
             metrics.usage_loss += usage_loss_val.item()
             # No correlation tracking
             metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
+            metrics.n_usage_marker_sites += usage_corr.get("n_marker_sites", 0)
             metrics.n_batches += 1
 
             if log_every > 0 and step % log_every == 0:
@@ -343,6 +355,7 @@ def train_epoch_splice(
                 usage_traj = usage_corr.get("trajectory_loss")
                 usage_tcorr = usage_corr.get("trajectory_corr")
                 usage_trmse = usage_corr.get("trajectory_rmse")
+                usage_tcontrast = usage_corr.get("tissue_contrast_loss")
                 usage_bce_str = f" usage_bce={usage_bce:.4f}" if usage_bce is not None else ""
                 usage_delta_str = f" usage_mse_delta={usage_delta:.4f}" if usage_delta is not None else ""
                 usage_traj_str = f" usage_traj={usage_traj:.4f}" if usage_traj is not None else ""
@@ -352,10 +365,12 @@ def train_epoch_splice(
                     usage_traj_str += f" [traj warmup: scale={_traj_scale:.2f}]"
                 usage_tcorr_str = f" traj_r={usage_tcorr:.3f}" if usage_tcorr is not None else ""
                 usage_trmse_str = f" traj_rmse={usage_trmse:.4f}" if usage_trmse is not None else ""
+                usage_tcontrast_str = f" tissue_contrast={usage_tcontrast:.4f}" if usage_tcontrast is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" +
                     usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str + usage_trmse_str +
+                    usage_tcontrast_str +
                     f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
                 )
                 # Add to logger
@@ -378,6 +393,9 @@ def train_epoch_splice(
                     log_metrics["train_usage_traj_weight_scale"] = _traj_scale
                 if usage_trmse is not None:
                     log_metrics["train_usage_trajectory_rmse"] = usage_trmse
+                if usage_tcontrast is not None:
+                    log_metrics["train_usage_tissue_contrast_loss"] = usage_tcontrast
+                    log_metrics["train_usage_n_marker_sites"] = usage_corr.get("n_marker_sites", 0)
                 if logger is not None:
                     logger.log_step(log_metrics)
                 step_start = time.perf_counter()
@@ -415,6 +433,8 @@ def train_epoch_splice(
         metrics.usage_trajectory_corr = usage_tcorr_sum / n_usage_tcorr_batches
     if n_usage_trmse_batches > 0:
         metrics.usage_trajectory_rmse = usage_trmse_sum / n_usage_trmse_batches
+    if n_usage_tcontrast_batches > 0:
+        metrics.usage_tissue_contrast_loss = usage_tcontrast_sum / n_usage_tcontrast_batches
 
     # Warn when usage head is present but received zero gradient signal.
     # This typically means there are no matching (position, condition) pairs
@@ -491,11 +511,13 @@ def validate_splice(
     usage_traj_sum = 0.0
     usage_tcorr_sum = 0.0
     usage_trmse_sum = 0.0
+    usage_tcontrast_sum = 0.0
     n_usage_bce_batches = 0
     n_usage_delta_batches = 0
     n_usage_traj_batches = 0
     n_usage_tcorr_batches = 0
     n_usage_trmse_batches = 0
+    n_usage_tcontrast_batches = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
 
@@ -541,6 +563,9 @@ def validate_splice(
                 usage_pos = batch["usage_positions"].to(device)
                 usage_vals = batch["usage_values"].to(device)
                 usage_mask = batch["usage_mask"].to(device)
+                usage_cov = batch.get("usage_coverage")
+                if usage_cov is not None:
+                    usage_cov = usage_cov.to(device)
 
                 usage_out = active_usage_head(emb_1bp, org_idx, channels_last=True)
                 logits = usage_out["logits"]
@@ -554,6 +579,7 @@ def validate_splice(
                     delta_from_mean=usage_delta_from_mean,
                     usage_loss_weights=usage_loss_weights,
                     tissue_cond_groups=_groups,
+                    usage_coverage=usage_cov,
                 )
 
                 if "bce_loss" in usage_corr:
@@ -573,6 +599,9 @@ def validate_splice(
                 if _trmse is not None and math.isfinite(_trmse):
                     usage_trmse_sum += _trmse
                     n_usage_trmse_batches += 1
+                if "tissue_contrast_loss" in usage_corr and math.isfinite(usage_corr["tissue_contrast_loss"]):
+                    usage_tcontrast_sum += usage_corr["tissue_contrast_loss"]
+                    n_usage_tcontrast_batches += 1
 
             total_loss = total_loss + usage_weight * usage_loss_val
 
@@ -588,6 +617,8 @@ def validate_splice(
         metrics.cls_loss += cls_loss_val.item()
         metrics.usage_loss += usage_loss_val.item()
         # No correlation tracking
+        metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
+        metrics.n_usage_marker_sites += usage_corr.get("n_marker_sites", 0)
         metrics.n_batches += 1
 
         if batch_org not in species_sums:
@@ -599,6 +630,8 @@ def validate_splice(
                 "n_traj_corr": 0.0,
                 "traj_rmse": 0.0,
                 "n_traj_rmse": 0.0,
+                "tissue_contrast_loss": 0.0,
+                "n_tissue_contrast_loss": 0.0,
                 "n_batches": 0.0,
             }
         species_sums[batch_org]["loss"] += total_loss.item()
@@ -612,6 +645,10 @@ def validate_splice(
         if _trmse is not None and math.isfinite(_trmse):
             species_sums[batch_org]["traj_rmse"] += _trmse
             species_sums[batch_org]["n_traj_rmse"] += 1.0
+        _ttc = usage_corr.get("tissue_contrast_loss")
+        if _ttc is not None and math.isfinite(_ttc):
+            species_sums[batch_org]["tissue_contrast_loss"] += _ttc
+            species_sums[batch_org]["n_tissue_contrast_loss"] += 1.0
         species_sums[batch_org]["n_batches"] += 1.0
         
         # Periodic memory cleanup in validation (RAM + GPU)
@@ -639,6 +676,8 @@ def validate_splice(
         metrics.usage_trajectory_corr = usage_tcorr_sum / n_usage_tcorr_batches
     if n_usage_trmse_batches > 0:
         metrics.usage_trajectory_rmse = usage_trmse_sum / n_usage_trmse_batches
+    if n_usage_tcontrast_batches > 0:
+        metrics.usage_tissue_contrast_loss = usage_tcontrast_sum / n_usage_tcontrast_batches
 
     for org_idx, sums in species_sums.items():
         n_batches = sums["n_batches"]
@@ -652,6 +691,8 @@ def validate_splice(
                 sm["val_usage_trajectory_corr"] = sums["traj_corr"] / sums["n_traj_corr"]
             if sums["n_traj_rmse"] > 0:
                 sm["val_usage_trajectory_rmse"] = sums["traj_rmse"] / sums["n_traj_rmse"]
+            if sums["n_tissue_contrast_loss"] > 0:
+                sm["val_usage_tissue_contrast_loss"] = sums["tissue_contrast_loss"] / sums["n_tissue_contrast_loss"]
             metrics.species_metrics[org_idx] = sm
 
     # No correlation logging

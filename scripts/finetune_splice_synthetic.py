@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
 
 def make_synthetic_batch(
     batch_size: int, seq_len: int, num_organisms: int, n_conditions: int,
-    max_sites: int, device: torch.device,
+    max_sites: int, device: torch.device, max_replicates: int = 3,
 ) -> dict:
     """Random data matching the real dataset's tensor shapes/dtypes."""
     seq = torch.zeros(batch_size, seq_len, 4, device=device)
@@ -94,8 +94,9 @@ def make_synthetic_batch(
     classification_labels = torch.randint(0, 5, (batch_size, seq_len), device=device)
 
     usage_positions = torch.randint(0, seq_len, (batch_size, max_sites), device=device)
-    usage_values = torch.rand(batch_size, max_sites, n_conditions, device=device)
-    usage_mask = torch.rand(batch_size, max_sites, n_conditions, device=device) > 0.5
+    usage_values = torch.rand(batch_size, max_sites, n_conditions, max_replicates, device=device)
+    usage_mask = torch.rand(batch_size, max_sites, n_conditions, max_replicates, device=device) > 0.5
+    usage_coverage = torch.randint(5, 50, (batch_size, max_sites, n_conditions, max_replicates), device=device).float()
 
     return dict(
         sequence=seq,
@@ -104,6 +105,7 @@ def make_synthetic_batch(
         usage_positions=usage_positions,
         usage_values=usage_values,
         usage_mask=usage_mask,
+        usage_coverage=usage_coverage,
     )
 
 
@@ -227,6 +229,7 @@ def main() -> None:
             usage_loss_val, _ = splice_usage_loss(
                 usage_out["logits"], batch["usage_positions"], batch["usage_values"], batch["usage_mask"],
                 usage_loss_weights={"bce": 1.0},
+                usage_coverage=batch["usage_coverage"],
             )
 
             total_loss = cls_loss_val + usage_loss_val

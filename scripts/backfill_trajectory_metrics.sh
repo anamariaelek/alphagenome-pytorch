@@ -21,7 +21,7 @@ echo "Recalculating trajectory metrics in ${N} directories (parallel=${PARALLEL}
 
 xargs -a "${JOBS_FILE}" -P "${PARALLEL}" -I {} -d '\n' bash -c '
     IFS=$'"'"'\t'"'"' read -r CKPT DCFG SP OUT <<< "{}"
-    python "'"${WORK_DIR}"'/scripts/evaluate_splice.py" \
+    if python "'"${WORK_DIR}"'/scripts/evaluate_splice.py" \
         --checkpoint "${CKPT}" \
         --data-config "${DCFG}" \
         --eval-species "${SP}" \
@@ -33,7 +33,11 @@ xargs -a "${JOBS_FILE}" -P "${PARALLEL}" -I {} -d '\n' bash -c '
         --device cpu \
         --output-dir "${OUT}" \
         > "${OUT}/refresh_traj_r2.log" 2>&1
-    echo "done: ${OUT}"
+    then
+        echo "done: ${OUT}"
+    else
+        echo "FAILED: ${OUT} (see ${OUT}/refresh_traj_r2.log)"
+    fi
 '
 
-echo "All done. Check each directory's refresh_traj_r2.log if a job failed."
+echo "All done. Check for any FAILED lines above, or grep -L trajectory_correlation */metrics.json."

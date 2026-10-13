@@ -153,17 +153,30 @@ usage_weight: 1.0
 # Dictionary of usage loss component weights. Trajectory terms are computed PER-TISSUE
 # over that tissue's developmental timepoints (not all conditions concatenated), so they
 # capture within-tissue dynamics rather than tissue-level offsets.
-#   bce:                BCE on absolute usage (level) -- every observed site.
+#   bce:                BCE on absolute usage (level), summed independently over every
+#                       real biological replicate observation (not a single collapsed
+#                       value per site/condition), coverage-weighted by each replicate's
+#                       own Alpha+Beta read count when available (equivalent to the
+#                       correct Binomial log-likelihood).
 #   delta_mse:          per-(site,tissue) centered MSE (trajectory magnitude), restricted
 #                       to sites that clear the exc5 excursion filter (genuinely dynamic,
 #                       not flat/noisy/an outlier timepoint); equal-weighted across sites.
 #   trajectory_pearson: 1 - PearsonR per (site,tissue) (trajectory direction), same exc5
 #                       filter as delta_mse.
+#   tissue_contrast:    per-(site,tissue) one-vs-rest usage contrast -- own-tissue mean
+#                       usage vs. the mean pooled across every other tissue, restricted to
+#                       genuine one-vs-rest markers (true contrast > marker_floor=0.25);
+#                       addresses splicing_specificity_eval/report.md's "Differential
+#                       tissue usage" finding that marker-site predictions are compressed
+#                       toward the middle instead of sharply elevated in their own tissue.
 # train_usage_trajectory_corr (per-tissue temporal Pearson) is logged regardless of weights.
+# tissue_contrast is NOT part of the usage_traj_warmup_epochs ramp below (always at full
+# weight from epoch 1, like bce) -- only delta_mse/trajectory_pearson are ramped.
 usage_loss_weights:
   bce: 1.0
   delta_mse: 5.0
   trajectory_pearson: 5.0
+  tissue_contrast: 5.0
 
 # BCE-only warm-up. The per-tissue traj_r / train_usage_trajectory_corr is still logged during warm-up.
 usage_traj_warmup_epochs: 1
@@ -193,7 +206,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
-run_name: lora_64_emb_traj_hqmrboc__524kb      # defaults to timestamp
+run_name: lora_64_emb_traj_tiss_hqmrboc_524kb      # defaults to timestamp
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir

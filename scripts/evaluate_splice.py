@@ -48,6 +48,16 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+# The default "file_descriptor" sharing strategy leaks one open fd per tensor
+# passed from a DataLoader worker to the main process until both sides release
+# their reference; with num_workers>0 and several usage tensors per batch
+# (sequence/usage_positions/usage_values/usage_mask/usage_coverage/...), a long
+# inference run can exhaust the process' open-fd ulimit, failing partway
+# through with "RuntimeError: received 0 items of ancdata". "file_system"
+# avoids fd-based handles entirely (named /dev/shm segments instead), at the
+# cost of /dev/shm usage instead of fd usage.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 from alphagenome_pytorch.utils.paths import expand_path, expand_paths_in_dict
 
 
@@ -209,6 +219,23 @@ def parse_args() -> argparse.Namespace:
         help="Minimum median-filtered excursion from baseline for a (site, tissue) "
              "trajectory to count as genuinely dynamic for --trajectory-corr "
              "(default: 0.08, matches training).",
+    )
+    parser.add_argument(
+        "--tissue-contrast", action="store_true",
+        help="Compute per-site, per-tissue one-vs-rest usage-contrast metrics, the "
+             "evaluation-time counterpart of the training-time tissue_contrast loss "
+             "(splice_losses._tissue_vs_rest_contrast) -- restricted to sites where "
+             "a tissue is a genuine one-vs-rest marker (true own-vs-rest contrast > "
+             "--tissue-contrast-marker-floor). Reports overall and per-tissue "
+             "compression_ratio/rmse/pearson_r/sign_correct_frac and adds them to "
+             "metrics.json as 'tissue_contrast'. Combine with --skip-predictions to "
+             "compute this on already-saved predictions without rerunning inference.",
+    )
+    parser.add_argument(
+        "--tissue-contrast-marker-floor", type=float, default=0.25,
+        help="Minimum true one-vs-rest usage contrast for a (site, tissue) to count "
+             "as a genuine marker for --tissue-contrast (default: 0.25, matches "
+             "training's marker_floor default).",
     )
     parser.add_argument(
         "--observed-conditions-only", action="store_true",
@@ -896,6 +923,7 @@ def collect_predictions(
                 condition_mapping=condition_mapping,
                 window_starts=batch["window_start"].numpy() if "window_start" in batch else None,
                 chrom_idxs=batch["chrom_idx"].numpy() if "chrom_idx" in batch else None,
+                coverage=batch["usage_coverage"].numpy() if "usage_coverage" in batch else None,
             )
 
     cls_probs = np.concatenate(all_cls_probs, axis=0)
@@ -926,15 +954,22 @@ def collect_predictions(
 def _accumulate_usage(
     usage_preds: np.ndarray,    # (B, S, T_model) where T_model = model n_conditions
     positions: np.ndarray,      # (B, max_sites)  -1 padded
-    values: np.ndarray,         # (B, max_sites, n_data_cond)
-    mask: np.ndarray,           # (B, max_sites, n_data_cond) bool
+    values: np.ndarray,         # (B, max_sites, n_data_cond, max_replicates)
+    mask: np.ndarray,           # (B, max_sites, n_data_cond, max_replicates) bool
     acc: dict,
     condition_mapping: dict[int, int] | None = None,
     window_starts: np.ndarray | None = None,  # (B,) int64 genomic start of each window
     chrom_idxs: np.ndarray | None = None,     # (B,) int32 chromosome index per window
+    coverage: np.ndarray | None = None,       # (B, max_sites, n_data_cond, max_replicates)
 ) -> None:
     """Accumulate usage predictions and ground truth.
-    
+
+    ``values``/``mask``/``coverage`` carry one entry per real biological
+    replicate (see ``SpliceSiteUsageIndex.query``); they're pooled here into a
+    single coverage-weighted representative true-usage value per (site,
+    condition) before comparison against the model's single per-condition
+    prediction.
+
     Args:
         usage_preds: Model predictions (B, S, T_model)
         condition_mapping: Optional mapping from data condition index -> model condition index
@@ -944,13 +979,22 @@ def _accumulate_usage(
     """
     B = positions.shape[0]
     n_data_cond = values.shape[2]
+
+    # Pool the replicate axis into one coverage-weighted value per (B, max_sites,
+    # n_data_cond), and a "any real replicate observed" mask of the same shape.
+    rep_w = (coverage if coverage is not None else mask.astype(np.float64)) * mask
+    denom = rep_w.sum(-1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        values_pooled = np.where(denom > 0, (values * rep_w).sum(-1) / np.where(denom > 0, denom, 1), 0.0)
+    mask_pooled = mask.any(-1)
+
     for i in range(B):
         valid = positions[i] != -1
         if not valid.any():
             continue
         valid_pos = positions[i][valid]
-        valid_vals = values[i][valid]       # (k, n_data_cond)
-        valid_mask = mask[i][valid]         # (k, n_data_cond) bool
+        valid_vals = values_pooled[i][valid]  # (k, n_data_cond)
+        valid_mask = mask_pooled[i][valid]    # (k, n_data_cond) bool
         valid_preds = usage_preds[i, valid_pos, :]  # (k, T_model)
 
         # Genomic coordinates for this window
@@ -1528,6 +1572,143 @@ def compute_trajectory_magnitude(
         },
         "per_tissue": per_tissue,
     }
+
+
+def compute_tissue_contrast(
+    usage_per_cond: dict,
+    idx_to_label: dict[int, str],
+    min_conditions: int = 2,
+    marker_floor: float = 0.25,
+) -> dict:
+    """Per-(site, tissue) one-vs-rest usage-contrast agreement -- the
+    evaluation-time counterpart of the training-time tissue_contrast loss
+    (splice_losses._tissue_vs_rest_contrast). For each site and tissue,
+    compares that tissue's own mean usage against the mean usage pooled
+    across every *other* tissue, for both true and predicted values, then
+    scores how well the predicted contrast (own - rest) reproduces the true
+    contrast -- restricted to sites where the tissue is a genuine one-vs-rest
+    marker (true contrast > marker_floor), the same additive-magnitude proxy
+    _tissue_vs_rest_contrast uses for Figure 8's marker-site definition in
+    splicing_specificity_eval/report.md (see that function's docstring for
+    why this isn't the report's exact Wilcoxon+BH statistic).
+
+    Unlike compute_trajectory_correlation/_magnitude (which only need one
+    tissue's own timepoints per site), this needs conditions from *every*
+    tissue present for a site, so it pivots once across ALL conditions in
+    usage_per_cond rather than per-tissue.
+
+    Returns ``{"overall": {...}, "per_tissue": {tissue: {...}, ...}}``, each
+    with:
+    - n_sites_eligible: markers passing the gate.
+    - mean_true_gap / mean_pred_gap: average one-vs-rest contrast, true vs
+      predicted -- Figure 8's core finding is that predicted usage at marker
+      sites is compressed toward the middle, i.e. mean_pred_gap noticeably
+      smaller than mean_true_gap.
+    - compression_ratio: mean_pred_gap / mean_true_gap (1.0 = no compression,
+      < 1 = under-predicted magnitude, matching that finding).
+    - rmse: sqrt(mean((pred_gap - true_gap)^2)), raw usage-fraction units.
+    - pearson_r: correlation of pred_gap vs true_gap across eligible sites --
+      scale/shift-invariant, so a uniformly compressed prediction can still
+      score r=1.0 here (that's what compression_ratio is for).
+    - sign_correct_frac: fraction of eligible sites where pred_gap > 0 (the
+      model at least predicts the right *direction* of enrichment) -- mirrors
+      the report's cross-species "sign-correct %" statistic (Fig 15).
+    """
+    from scipy.stats import pearsonr
+
+    tissue_to_idx: dict[str, list[int]] = {}
+    for cond_idx, name in idx_to_label.items():
+        tissue = name.split("_")[0]
+        tissue_to_idx.setdefault(tissue, []).append(cond_idx)
+
+    _empty_slot = {
+        "n_sites_eligible": 0, "mean_true_gap": float("nan"), "mean_pred_gap": float("nan"),
+        "compression_ratio": float("nan"), "rmse": float("nan"), "pearson_r": float("nan"),
+        "sign_correct_frac": float("nan"),
+    }
+
+    all_cond_idxs = sorted({c for idxs in tissue_to_idx.values() for c in idxs if c in usage_per_cond})
+    if len(tissue_to_idx) < 2 or not all_cond_idxs:
+        return {"overall": dict(_empty_slot), "per_tissue": {}}
+
+    col_of = {c: j for j, c in enumerate(all_cond_idxs)}
+
+    # Global per-site pivot across every condition (needed so "rest" can draw
+    # on other tissues' conditions for the same site) -- unlike the per-tissue
+    # pivot in compute_trajectory_correlation/_magnitude.
+    site_data: dict = {}
+    for c in all_cond_idxs:
+        entry = usage_per_cond[c]
+        keys = _site_keys_for(entry)
+        j = col_of[c]
+        for k, p, t in zip(keys, entry["pred"], entry["true"]):
+            site_data.setdefault(k, {})[j] = (float(p), float(t))
+
+    site_keys = list(site_data.keys())
+    N, T = len(site_keys), len(all_cond_idxs)
+    pred_mat = np.zeros((N, T), dtype=np.float64)
+    true_mat = np.zeros((N, T), dtype=np.float64)
+    mask_mat = np.zeros((N, T), dtype=bool)
+    for i, k in enumerate(site_keys):
+        for j, (p, t) in site_data[k].items():
+            pred_mat[i, j] = p
+            true_mat[i, j] = t
+            mask_mat[i, j] = True
+
+    def _own_rest_gap(cols_own: list[int]):
+        own_mask = np.zeros(T, dtype=bool)
+        own_mask[cols_own] = True
+        rest_mask = ~own_mask
+        own_n = mask_mat[:, own_mask].sum(axis=1)
+        rest_n = mask_mat[:, rest_mask].sum(axis=1)
+        own_denom = np.clip(own_n, 1, None).astype(np.float64)
+        rest_denom = np.clip(rest_n, 1, None).astype(np.float64)
+        own_pred = (pred_mat[:, own_mask] * mask_mat[:, own_mask]).sum(axis=1) / own_denom
+        own_true = (true_mat[:, own_mask] * mask_mat[:, own_mask]).sum(axis=1) / own_denom
+        rest_pred = (pred_mat[:, rest_mask] * mask_mat[:, rest_mask]).sum(axis=1) / rest_denom
+        rest_true = (true_mat[:, rest_mask] * mask_mat[:, rest_mask]).sum(axis=1) / rest_denom
+        return own_n, rest_n, own_pred - rest_pred, own_true - rest_true
+
+    def _summarize(pred_gap: np.ndarray, true_gap: np.ndarray) -> dict:
+        if pred_gap.size == 0:
+            return dict(_empty_slot)
+        mean_true_gap = float(true_gap.mean())
+        mean_pred_gap = float(pred_gap.mean())
+        rmse = float(np.sqrt(np.mean((pred_gap - true_gap) ** 2)))
+        sign_correct_frac = float((pred_gap > 0).mean())
+        if pred_gap.size >= 2 and pred_gap.std() > 1e-8 and true_gap.std() > 1e-8:
+            r, _ = pearsonr(pred_gap, true_gap)
+            pearson_r = float(r) if np.isfinite(r) else float("nan")
+        else:
+            pearson_r = float("nan")
+        compression_ratio = mean_pred_gap / mean_true_gap if abs(mean_true_gap) > 1e-8 else float("nan")
+        return {
+            "n_sites_eligible": int(pred_gap.size),
+            "mean_true_gap": mean_true_gap,
+            "mean_pred_gap": mean_pred_gap,
+            "compression_ratio": compression_ratio,
+            "rmse": rmse,
+            "pearson_r": pearson_r,
+            "sign_correct_frac": sign_correct_frac,
+        }
+
+    per_tissue: dict[str, dict] = {}
+    all_pred_gap: list[float] = []
+    all_true_gap: list[float] = []
+
+    for tissue in sorted(tissue_to_idx):
+        cols_own = [col_of[c] for c in tissue_to_idx[tissue] if c in col_of]
+        if not cols_own or len(cols_own) >= T:
+            continue
+        own_n, rest_n, pred_gap, true_gap = _own_rest_gap(cols_own)
+        eligible = (own_n >= min_conditions) & (rest_n >= min_conditions) & (true_gap > marker_floor)
+        pg, tg = pred_gap[eligible], true_gap[eligible]
+        per_tissue[tissue] = _summarize(pg, tg)
+        all_pred_gap.extend(pg.tolist())
+        all_true_gap.extend(tg.tolist())
+
+    overall = _summarize(np.array(all_pred_gap), np.array(all_true_gap))
+    return {"overall": overall, "per_tissue": per_tissue}
 
 
 # ---------------------------------------------------------------------------
@@ -2349,6 +2530,31 @@ def print_trajectory_magnitude_metrics(org_name: str, mag_m: dict, logger: loggi
         )
 
 
+def print_tissue_contrast_metrics(org_name: str, tc_m: dict, logger: logging.Logger | None = None) -> None:
+    log_func = logger.info if logger else print
+    overall = tc_m.get("overall", {})
+    log_func(f"\n{org_name} - Tissue Contrast (one-vs-rest marker sites, mirrors training tissue_contrast loss):")
+    log_func(
+        f"  {'Overall':<15s} true_gap={overall.get('mean_true_gap', float('nan')):>7.4f}  "
+        f"pred_gap={overall.get('mean_pred_gap', float('nan')):>7.4f}  "
+        f"compression={overall.get('compression_ratio', float('nan')):>6.2f}  "
+        f"rmse={overall.get('rmse', float('nan')):>7.4f}  "
+        f"r={overall.get('pearson_r', float('nan')):>7.4f}  "
+        f"sign_correct={overall.get('sign_correct_frac', float('nan')):>6.1%}  "
+        f"n={overall.get('n_sites_eligible', 0):,}"
+    )
+    for tissue, m in sorted(tc_m.get("per_tissue", {}).items()):
+        log_func(
+            f"  {tissue:<15s} true_gap={m['mean_true_gap']:>7.4f}  "
+            f"pred_gap={m['mean_pred_gap']:>7.4f}  "
+            f"compression={m['compression_ratio']:>6.2f}  "
+            f"rmse={m['rmse']:>7.4f}  "
+            f"r={m['pearson_r']:>7.4f}  "
+            f"sign_correct={m['sign_correct_frac']:>6.1%}  "
+            f"n={m['n_sites_eligible']:,}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2358,27 +2564,36 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- Set up logging -------------------------------------------------------
-    log_path = out_dir / "eval.log"
-    logger = setup_logging(log_path)
-    
-    logger.info(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    logger.info(f"Log: {log_path}")
-
-    # -- Resolve checkpoint and model config ---------------------------------
+    # -- Resolve checkpoint/config paths BEFORE touching the log file --------
+    # setup_logging() opens eval.log with mode="w", which truncates it
+    # immediately -- including any historical "Checkpoint   :"/"Data config  :"
+    # lines list_prediction_dirs.sh relies on to rediscover this directory's
+    # inputs later. Validating these cheap, side-effect-free paths first (and
+    # sys.exit'ing via resolve_checkpoint/the checks below, same as before)
+    # means a stale/moved path fails fast without destroying that history --
+    # it's preserved for a future run once the path is fixed, rather than
+    # being wiped by every failed attempt in between.
     pth_path, default_cfg_path = resolve_checkpoint(args.checkpoint)
     model_cfg_path = Path(args.model_config) if args.model_config is not None else default_cfg_path
     if not model_cfg_path.exists():
         sys.exit(f"Model config not found: {model_cfg_path}")
+    data_cfg_path = Path(args.data_config)
+    if not data_cfg_path.exists():
+        sys.exit(f"Data config not found: {data_cfg_path}")
+
+    # -- Set up logging -------------------------------------------------------
+    log_path = out_dir / "eval.log"
+    logger = setup_logging(log_path)
+
+    logger.info(f"=== evaluate_splice  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    logger.info(f"Log: {log_path}")
+
+    # -- Load model config ----------------------------------------------------
     model_cfg = load_config(model_cfg_path, logger=logger)
     logger.info(f"Checkpoint   : {pth_path}")
     logger.info(f"Model config : {model_cfg_path}")
 
     # -- Load data config and resolve species --------------------------------
-    data_cfg_path = Path(args.data_config)
-    if not data_cfg_path.exists():
-        sys.exit(f"Data config not found: {data_cfg_path}")
-    
     species_specs = load_data_config(data_cfg_path, args.eval_species)
     logger.info(f"Data config  : {data_cfg_path}")
     logger.info(f"Eval species : {[s['name'] for s in species_specs]}")
@@ -2494,8 +2709,8 @@ def main() -> None:
     # Trajectory correlation needs per-site raw pred/true arrays (to pair up
     # observations across a tissue's conditions) -- sufficient statistics alone
     # can't reconstruct which observations belong to the same site.
-    need_usage_arrays = (not args.skip_plots) or args.trajectory_corr
-    if args.skip_predictions and args.skip_plots and not args.trajectory_corr:
+    need_usage_arrays = (not args.skip_plots) or args.trajectory_corr or args.tissue_contrast
+    if args.skip_predictions and args.skip_plots and not args.trajectory_corr and not args.tissue_contrast:
         logger.info("Using stats-first loading mode: raw usage arrays are skipped for faster exact metrics.")
 
 
@@ -2853,12 +3068,17 @@ def main() -> None:
         per_tissue_by_head: dict[str, dict] = {}
         trajectory_metrics_by_head: dict[str, dict] = {}
         trajectory_magnitude_by_head: dict[str, dict] = {}
+        tissue_contrast_by_head: dict[str, dict] = {}
 
-        # Condition index -> "Tissue_Timepoint" label, needed for --trajectory-corr's
-        # tissue grouping. Read directly from the data species' own usage metadata
-        # regardless of which usage head produced the predictions (usage_per_cond is
-        # always keyed by data condition index, never the source head's own index).
-        idx_to_label = load_condition_labels(spec.get("usage_parquet")) if args.trajectory_corr else {}
+        # Condition index -> "Tissue_Timepoint" label, needed for --trajectory-corr's/
+        # --tissue-contrast's tissue grouping. Read directly from the data species'
+        # own usage metadata regardless of which usage head produced the predictions
+        # (usage_per_cond is always keyed by data condition index, never the source
+        # head's own index).
+        idx_to_label = (
+            load_condition_labels(spec.get("usage_parquet"))
+            if (args.trajectory_corr or args.tissue_contrast) else {}
+        )
 
         if usage_results:
             for suffix, (usage_per_cond, source_name) in usage_results.items():
@@ -2898,6 +3118,17 @@ def main() -> None:
                     print_trajectory_magnitude_metrics(
                         f"{org_name} ({source_name} head)" if suffix else org_name,
                         mag_m, logger=logger,
+                    )
+
+                if args.tissue_contrast and usage_per_cond and idx_to_label:
+                    tc_m = compute_tissue_contrast(
+                        usage_per_cond, idx_to_label,
+                        marker_floor=args.tissue_contrast_marker_floor,
+                    )
+                    tissue_contrast_by_head[result_key] = tc_m
+                    print_tissue_contrast_metrics(
+                        f"{org_name} ({source_name} head)" if suffix else org_name,
+                        tc_m, logger=logger,
                     )
 
                 # Plots for this usage head
@@ -2946,6 +3177,8 @@ def main() -> None:
                 all_results[org_name]["trajectory_correlation"] = next(iter(trajectory_metrics_by_head.values()))
             if trajectory_magnitude_by_head:
                 all_results[org_name]["trajectory_magnitude"] = next(iter(trajectory_magnitude_by_head.values()))
+            if tissue_contrast_by_head:
+                all_results[org_name]["tissue_contrast"] = next(iter(tissue_contrast_by_head.values()))
         elif len(usage_metrics_by_head) > 1:
             # Multiple usage heads - nest under "usage_by_head"
             all_results[org_name]["usage_by_head"] = usage_metrics_by_head
@@ -2956,6 +3189,8 @@ def main() -> None:
                 all_results[org_name]["trajectory_correlation_by_head"] = trajectory_metrics_by_head
             if trajectory_magnitude_by_head:
                 all_results[org_name]["trajectory_magnitude_by_head"] = trajectory_magnitude_by_head
+            if tissue_contrast_by_head:
+                all_results[org_name]["tissue_contrast_by_head"] = tissue_contrast_by_head
 
         del cls_probs, cls_labels, usage_results, usage_stats
 
@@ -2996,10 +3231,29 @@ def main() -> None:
             if vals:
                 logger.info(f"  {k:<38s} {np.mean(vals):.4f}")
 
-    # -- Save JSON -----------------------------------------------------------
+    # -- Save JSON -------------------------------------------------------------
+    # Merge onto any existing metrics.json rather than overwriting it outright:
+    # a run invoked with only one of --trajectory-corr/--tissue-contrast (as the
+    # backfill_*.sh scripts each do, to recompute one metric family without
+    # rerunning the other) only populates that family's key in all_results --
+    # dumping all_results alone would silently delete whatever metric family a
+    # previous run had already computed and this one didn't touch. --overwrite
+    # still governs whether *this run's own* keys get fresh values (vs. reusing
+    # cached predictions/metrics, checked earlier); it doesn't mean "discard
+    # every key this invocation didn't itself recompute".
     out_path = out_dir / "metrics.json"
+    existing_results: dict[str, dict] = {}
+    if out_path.exists():
+        try:
+            with open(out_path) as f:
+                existing_results = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not read existing {out_path} to merge ({e}); overwriting it.")
+            existing_results = {}
+    for org_name, org_results in all_results.items():
+        existing_results[org_name] = {**existing_results.get(org_name, {}), **org_results}
     with open(out_path, "w") as f:
-        json.dump(all_results, f, indent=2, default=lambda x: None)
+        json.dump(existing_results, f, indent=2, default=lambda x: None)
 
     logger.info(f"\nResults saved to {out_path}")
 

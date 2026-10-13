@@ -146,6 +146,14 @@ class SpliceSiteUsageIndex:
             post-processed the Spliser output to convert to 0-based).
         observed_conditions_only: If ``True``, usage targets will only be
             returned for conditions with observed coverage.
+        max_replicates: Maximum number of biological replicate observations
+            kept per (site, condition) in :meth:`query`'s output. Real
+            ``usage.parquet`` files carry several replicate rows per (site,
+            condition) (each its own ``Alpha``/``Beta``/``SSE``); every one is
+            treated as an independent training observation rather than being
+            collapsed into a single pooled value. Any replicates beyond this
+            cap are folded into the last slot as a coverage-weighted combined
+            pseudo-replicate, so no observation is silently dropped.
     """
 
     def __init__(
@@ -155,6 +163,7 @@ class SpliceSiteUsageIndex:
         alpha_min: int | None = None,
         usage_coord_base: int = 0,
         observed_conditions_only: bool = False,
+        max_replicates: int = 10,
     ) -> None:
         import pandas as pd
 
@@ -172,6 +181,7 @@ class SpliceSiteUsageIndex:
         self._condition_labels: dict[str, int] = metadata["condition_labels"]
         self.n_conditions: int = len(self._condition_labels)
         self.observed_conditions_only = observed_conditions_only
+        self.max_replicates = max_replicates
         none_class = self._class_labels.get("None", 4)
 
         # Small Python dicts kept for the tissue_cond_groups property and
@@ -216,6 +226,11 @@ class SpliceSiteUsageIndex:
         # making them copy-on-write safe in forked worker processes.
         self._entry_cond_indices: np.ndarray = df["Condition"].to_numpy(dtype=np.int32)
         self._entry_sse_values: np.ndarray = df["SSE"].to_numpy(dtype=np.float32)
+        # Per-replicate read coverage (Alpha+Beta) -- every row is one biological
+        # replicate observation, not a pre-pooled site/condition value. Used both
+        # as the BCE weight (Binomial-correct) and to coverage-weight the pooled
+        # reduction the trajectory/contrast loss terms consume.
+        self._entry_coverage_values: np.ndarray = (df["Alpha"] + df["Beta"]).to_numpy(dtype=np.float32)
 
         # ── Build site-level index (CSR-style) ────────────────────────────────
         # One row per unique (chrom_id, position) pair; stores the slice [start,
@@ -309,40 +324,57 @@ class SpliceSiteUsageIndex:
 
     def query(
         self, chrom: str, positions: np.ndarray
-    ) -> tuple[list[int], list[np.ndarray], list[np.ndarray]]:
+    ) -> tuple[list[int], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         """Return usage data for positions that have observed values.
+
+        Every real biological replicate row at a (site, condition) is kept as
+        its own entry along a trailing replicate axis (capped at
+        ``max_replicates``, with any overflow folded into the last slot as a
+        coverage-weighted combined pseudo-replicate) -- callers that want a
+        single representative value per (site, condition) should compute a
+        coverage-weighted mean over the replicate axis themselves (this is
+        what :func:`~alphagenome_pytorch.extensions.finetuning.splice_losses.
+        splice_usage_loss` does internally for its trajectory/contrast terms).
 
         Args:
             chrom: Chromosome name.
             positions: Array of 0-based genomic positions to query.
 
         Returns:
-            Tuple of three parallel lists:
+            Tuple of four parallel lists:
             - ``site_positions``: subset of input positions with at least one
               observation.
-            - ``values``: per-site float32 array of shape (n_conditions,) with
-              SSE values (0.0 for unobserved conditions).
-            - ``masks``: per-site bool array of shape (n_conditions,) with
-              True only for observed conditions when
-              ``observed_conditions_only=True``; otherwise True for all
-              conditions so that unobserved conditions are treated as value=0.
+            - ``values``: per-site float32 array of shape
+              ``(n_conditions, max_replicates)`` with SSE values (0.0 for
+              unobserved/padding replicate slots).
+            - ``masks``: per-site bool array of shape
+              ``(n_conditions, max_replicates)``, True for real replicate
+              observations. When ``observed_conditions_only=True``, a
+              condition in a tissue with zero observed timepoints instead
+              gets a single synthetic "biological zero" entry at replicate
+              slot 0 (mirroring the same behavior when False, where every
+              condition gets at least one True slot).
+            - ``coverages``: per-site float32 array of shape
+              ``(n_conditions, max_replicates)`` with each replicate's own
+              ``Alpha+Beta`` read count (0.0 for synthetic/padding slots).
         """
         out_positions: list[int] = []
         values_list: list[np.ndarray] = []
         masks_list: list[np.ndarray] = []
+        coverages_list: list[np.ndarray] = []
 
         if len(positions) == 0:
-            return out_positions, values_list, masks_list
+            return out_positions, values_list, masks_list, coverages_list
 
         chrom_id = self._chrom_to_id.get(chrom)
         if chrom_id is None:
-            return out_positions, values_list, masks_list
+            return out_positions, values_list, masks_list, coverages_list
 
         # Slice site arrays to this chromosome only
         chrom_lo = int(np.searchsorted(self._site_chrom_ids, chrom_id, side="left"))
         chrom_hi = int(np.searchsorted(self._site_chrom_ids, chrom_id, side="right"))
         if chrom_lo >= chrom_hi:
-            return out_positions, values_list, masks_list
+            return out_positions, values_list, masks_list, coverages_list
 
         chrom_pos = self._site_positions[chrom_lo:chrom_hi]          # view, no copy
         chrom_starts = self._site_entry_starts[chrom_lo:chrom_hi]    # view, no copy
@@ -351,6 +383,8 @@ class SpliceSiteUsageIndex:
         # Locate all queried positions in one vectorised searchsorted call
         positions_arr = np.asarray(positions, dtype=np.int64)
         idxs = np.searchsorted(chrom_pos, positions_arr, side="left")
+
+        max_rep = self.max_replicates
 
         for i in range(len(positions_arr)):
             pos = positions_arr[i]
@@ -362,35 +396,79 @@ class SpliceSiteUsageIndex:
             entry_count = int(chrom_counts[idx])
             cond_idx = self._entry_cond_indices[entry_start : entry_start + entry_count]
             sse_val = self._entry_sse_values[entry_start : entry_start + entry_count]
+            cov_val = self._entry_coverage_values[entry_start : entry_start + entry_count]
 
             # Filter to valid condition range
             valid = (cond_idx >= 0) & (cond_idx < self.n_conditions)
             valid_conds = cond_idx[valid]
+            valid_sse = sse_val[valid]
+            valid_cov = cov_val[valid]
 
-            vals = np.zeros(self.n_conditions, dtype=np.float32)
-            vals[valid_conds] = sse_val[valid]
+            vals = np.zeros((self.n_conditions, max_rep), dtype=np.float32)
+            mask = np.zeros((self.n_conditions, max_rep), dtype=bool)
+            covs = np.zeros((self.n_conditions, max_rep), dtype=np.float32)
+
+            if len(valid_conds) > 0:
+                # valid_conds is a subsequence of the globally
+                # [chrom_id, Position, Condition]-sorted parquet, so entries for
+                # this site are already grouped and sorted by Condition -- the
+                # "rank within group" (replicate index for a given condition)
+                # can be computed with a vectorised run-length scan instead of
+                # a per-replicate Python loop.
+                change = np.empty(len(valid_conds), dtype=bool)
+                change[0] = True
+                change[1:] = valid_conds[1:] != valid_conds[:-1]
+                group_starts = np.where(change)[0]
+                group_id = np.cumsum(change) - 1
+                rank = np.arange(len(valid_conds)) - group_starts[group_id]
+                capped_rank = np.minimum(rank, max_rep - 1)
+
+                # Scatter-accumulate coverage and coverage*SSE per (condition,
+                # replicate-slot); a single non-overflowing replicate reduces
+                # to its own (cov, cov*sse) pair, and any replicates beyond
+                # max_rep land in the last slot together, combining into a
+                # coverage-weighted pseudo-replicate rather than being dropped.
+                cov_acc = np.zeros((self.n_conditions, max_rep), dtype=np.float64)
+                val_acc = np.zeros((self.n_conditions, max_rep), dtype=np.float64)
+                np.add.at(cov_acc, (valid_conds, capped_rank), valid_cov.astype(np.float64))
+                np.add.at(
+                    val_acc, (valid_conds, capped_rank),
+                    valid_sse.astype(np.float64) * valid_cov.astype(np.float64),
+                )
+                nz = cov_acc > 0
+                vals[nz] = (val_acc[nz] / cov_acc[nz]).astype(np.float32)
+                covs = cov_acc.astype(np.float32)
+                mask[valid_conds, capped_rank] = True
+
+            rep_counter = np.bincount(valid_conds, minlength=self.n_conditions) if len(valid_conds) > 0 \
+                else np.zeros(self.n_conditions, dtype=np.int64)
 
             if not self.observed_conditions_only:
-                mask = np.ones(self.n_conditions, dtype=bool)
+                # Every condition contributes to the loss: real replicates via
+                # their own slots (already set above), unobserved conditions
+                # via a synthetic biological-zero entry at slot 0.
+                unobserved = rep_counter == 0
+                mask[unobserved, 0] = True
             else:
-                mask = np.zeros(self.n_conditions, dtype=bool)
                 # Tissues with at least one observed condition for this site
                 obs_tids = set(self._cond_tissue_id[valid_conds].tolist())
                 obs_tids.discard(-1)
-                # Unobserved tissues: set all their conditions to True (biological zero)
+                # Unobserved tissues: give every one of their conditions a
+                # single synthetic biological-zero entry. Individual
+                # unobserved timepoints *within* an otherwise-observed tissue
+                # stay unmasked, matching the pre-replicate behavior.
                 for tid in range(self._n_tissues):
                     if tid not in obs_tids:
                         ts = int(self._tissue_cond_starts[tid])
                         te = int(self._tissue_cond_starts[tid + 1])
-                        mask[self._tissue_cond_flat[ts:te]] = True
-                # Observed conditions: set exactly those to True
-                mask[valid_conds] = True
+                        mask[self._tissue_cond_flat[ts:te], 0] = True
 
             out_positions.append(int(pos))
             values_list.append(vals)
             masks_list.append(mask)
+            coverages_list.append(covs)
 
-        return out_positions, values_list, masks_list
+        return out_positions, values_list, masks_list, coverages_list
 
 
 def _load_intervals_from_bed(
@@ -608,15 +686,17 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
                 masked_site_pos = all_site_pos
             
             if len(masked_site_pos) > 0:
-                used_pos, val_arrays, mask_arrays = self.usage_index.query(
+                used_pos, val_arrays, mask_arrays, cov_arrays = self.usage_index.query(
                     chrom, masked_site_pos
                 )
             else:
                 used_pos = []
                 val_arrays = []
                 mask_arrays = []
+                cov_arrays = []
 
             n_cond = self.usage_index.n_conditions
+            max_rep = self.usage_index.max_replicates
             n_used = len(used_pos)
             n_pad = self.max_sites - min(n_used, self.max_sites)
 
@@ -624,6 +704,7 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
             used_pos = used_pos[: self.max_sites]
             val_arrays = val_arrays[: self.max_sites]
             mask_arrays = mask_arrays[: self.max_sites]
+            cov_arrays = cov_arrays[: self.max_sites]
 
             rel_positions = np.array(
                 [p - win_start for p in used_pos], dtype=np.int64
@@ -636,23 +717,29 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
                 )
 
             if val_arrays:
-                vals_2d = np.stack(val_arrays)         # (n_used, n_cond)
-                masks_2d = np.stack(mask_arrays)       # (n_used, n_cond)
+                vals_3d = np.stack(val_arrays)          # (n_used, n_cond, max_rep)
+                masks_3d = np.stack(mask_arrays)        # (n_used, n_cond, max_rep)
+                covs_3d = np.stack(cov_arrays)           # (n_used, n_cond, max_rep)
             else:
-                vals_2d = np.zeros((0, n_cond), dtype=np.float32)
-                masks_2d = np.zeros((0, n_cond), dtype=bool)
+                vals_3d = np.zeros((0, n_cond, max_rep), dtype=np.float32)
+                masks_3d = np.zeros((0, n_cond, max_rep), dtype=bool)
+                covs_3d = np.zeros((0, n_cond, max_rep), dtype=np.float32)
 
             if n_pad > 0:
-                vals_2d = np.concatenate(
-                    [vals_2d, np.zeros((n_pad, n_cond), dtype=np.float32)], axis=0
+                vals_3d = np.concatenate(
+                    [vals_3d, np.zeros((n_pad, n_cond, max_rep), dtype=np.float32)], axis=0
                 )
-                masks_2d = np.concatenate(
-                    [masks_2d, np.zeros((n_pad, n_cond), dtype=bool)], axis=0
+                masks_3d = np.concatenate(
+                    [masks_3d, np.zeros((n_pad, n_cond, max_rep), dtype=bool)], axis=0
+                )
+                covs_3d = np.concatenate(
+                    [covs_3d, np.zeros((n_pad, n_cond, max_rep), dtype=np.float32)], axis=0
                 )
 
             item["usage_positions"] = torch.from_numpy(rel_positions)   # (max_sites,) int64
-            item["usage_values"] = torch.from_numpy(vals_2d)            # (max_sites, n_cond)
-            item["usage_mask"] = torch.from_numpy(masks_2d)             # (max_sites, n_cond) bool
+            item["usage_values"] = torch.from_numpy(vals_3d)            # (max_sites, n_cond, max_rep)
+            item["usage_mask"] = torch.from_numpy(masks_3d)             # (max_sites, n_cond, max_rep) bool
+            item["usage_coverage"] = torch.from_numpy(covs_3d)          # (max_sites, n_cond, max_rep)
 
         return item
 
@@ -668,7 +755,7 @@ def collate_splice(
     Returns:
         Dict with keys ``sequence``, ``organism_index``,
         ``classification_labels``, ``loss_mask``, and optionally ``usage_positions``,
-        ``usage_values``, ``usage_mask``.
+        ``usage_values``, ``usage_mask``, ``usage_coverage``.
     """
     result: dict[str, Any] = {
         "sequence": torch.stack([b["sequence"] for b in batch]),
@@ -682,6 +769,7 @@ def collate_splice(
         result["usage_positions"] = torch.stack([b["usage_positions"] for b in batch])
         result["usage_values"] = torch.stack([b["usage_values"] for b in batch])
         result["usage_mask"] = torch.stack([b["usage_mask"] for b in batch])
+        result["usage_coverage"] = torch.stack([b["usage_coverage"] for b in batch])
     return result
 
 

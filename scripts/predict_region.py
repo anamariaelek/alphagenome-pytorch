@@ -474,22 +474,31 @@ def accumulate_usage_ground_truth(
     acc: dict,
 ) -> None:
     """Accumulate (pos, pred, true) triples per data-condition index into `acc`."""
-    site_positions, values_list, masks_list = usage_index.query(chrom, positions)
+    site_positions, values_list, masks_list, coverages_list = usage_index.query(chrom, positions)
     if not site_positions:
         return
 
     pos_to_row = {int(p): i for i, p in enumerate(positions)}
-    for site_pos, vals, mask in zip(site_positions, values_list, masks_list):
+    for site_pos, vals, mask, cov in zip(site_positions, values_list, masks_list, coverages_list):
+        # vals/mask/cov: (n_data_cond, max_replicates) -- pool every real
+        # replicate into one coverage-weighted representative value per
+        # condition (same reduction splice_usage_loss uses for its
+        # trajectory/contrast terms), since this is a single true-usage
+        # value for plotting/comparison, not a per-replicate training target.
         row = pos_to_row.get(int(site_pos))
         if row is None:
             continue
         for data_c, model_c in condition_mapping.items():
-            if not mask[data_c]:
+            m = mask[data_c]
+            if not m.any():
                 continue
+            w = cov[data_c] * m
+            wsum = w.sum()
+            true_val = float((vals[data_c] * w).sum() / wsum) if wsum > 0 else float(vals[data_c][m].mean())
             entry = acc.setdefault(data_c, {"pos": [], "pred": [], "true": []})
             entry["pos"].append(int(site_pos))
             entry["pred"].append(float(usage_preds[row, model_c]))
-            entry["true"].append(float(vals[data_c]))
+            entry["true"].append(true_val)
 
 
 # ---------------------------------------------------------------------------
