@@ -53,7 +53,7 @@ python scripts/convert_gtf_to_parquet.py \
 
 ## Prepare splice usage for training
 
-`convert_splice_usage_to_parquet.py` converts Spliser `.combined.tsv` files to a compact `_usage.parquet` + `_usage.json` (per-site-per-condition SSE/Alpha/Beta, plus condition/class label metadata).
+`convert_splice_usage_to_parquet.py` converts Spliser `.combined.tsv` files to a compact `_usage.parquet` + `_usage.json` (one row per site, condition and sample with SSE/Alpha/Beta, plus condition/class label metadata). The `Sample` column keeps replicates apart; without it, replicates with identical values in the same condition would be collapsed into one row.
 
 ```bash
 python -u scripts/convert_splice_usage_to_parquet.py \
@@ -62,6 +62,14 @@ python -u scripts/convert_splice_usage_to_parquet.py \
     --min-reproducibility 0.5 \
     --min-coverage 10 \
     --strip-chr-names > logs/usage_to_parquet_${species}.log
+```
+
+Usage files written before the `Sample` column was added can be regenerated in place with `slurm/jobs/update_usage_parquet.sh`. For each dataset it re-runs the converter to `usage.new.parquet` and checks the result against the old file with `scripts/compare_usage_parquets.py` (no lost sites, identical values per site and condition, and any new sites explained by the coverage filter). Only if that passes does it back up the old files to `usage.collapsed_bak.{parquet,json}` and move the new ones into place. The report is written to `usage.compare.json`. If it lists new sites, regenerate the `splice_sites_*usage*.parquet` files below.
+
+```bash
+# Homo_sapiens first, then the remaining Cardoso-Moreira and Brawand datasets
+slurm/submit.sh --cpu --mem 128G --time 24:00:00 --sbatch-arg --array=0 update_usage_parquet
+slurm/submit.sh --cpu --mem 128G --time 24:00:00 --sbatch-arg --array=1-12 update_usage_parquet
 ```
 
 ## Prepare splice site annotation for training
@@ -209,7 +217,7 @@ loss and any per-batch metrics it would log are simply not computed.
 trailing *replicate* axis — one entry per real biological replicate observation at a
 `(site, condition)` (`SpliceSiteUsageIndex.query()`), not a single pre-pooled value.
 `usage.parquet` genuinely carries several replicate rows per `(site, condition)`
-(93% of groups have 2+, each its own `Alpha`/`Beta`/`SSE`); `query()` used to collapse
+(93% of groups have 2+, each its own `Alpha`/`Beta`/`SSE`, identified by `Sample`); `query()` used to collapse
 them to whichever row a numpy fancy-index overwrite happened to keep last, silently
 discarding the rest. `bce` (below) now sums an independently coverage-weighted term
 per real replicate, using every one of them. `delta_mse`/`trajectory_pearson`/

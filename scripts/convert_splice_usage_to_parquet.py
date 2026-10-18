@@ -10,8 +10,12 @@ file that can be consumed by :class:`SpliceSiteUsageIndex` and by
 Output files
 ------------
 ``_usage.parquet``
-    One row per (site, condition) pair with columns:
-    ``Chromosome, Position, SSE, Alpha, Beta, Label, Condition``
+    One row per (site, condition, sample) with columns:
+    ``Chromosome, Position, SSE, Alpha, Beta, Label, Condition, Sample``
+
+    ``Sample`` (categorical) is the Spliser sample ID.  It keeps replicates
+    apart: without it, replicates with identical values in the same
+    condition would be collapsed into one row by ``drop_duplicates``.
 
 ``_usage.json``
     Companion metadata::
@@ -70,6 +74,14 @@ import os
 import time
 import numpy as np
 from pathlib import Path
+
+
+USAGE_COLUMNS = ["Chromosome", "Position", "SSE", "Alpha", "Beta", "Label", "Condition"]
+
+
+def _canonical_columns(has_sample: bool) -> list[str]:
+    """Output column order; ``Sample`` is appended when the input carries it."""
+    return USAGE_COLUMNS + (["Sample"] if has_sample else [])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -209,7 +221,11 @@ def convert_usage_to_parquet(
     if missing:
         raise ValueError(f"Input DataFrame missing required columns: {missing}")
 
-    df = df[list(required_cols)].drop_duplicates().copy()
+    # Keep the sample ID (when present) so that replicates with identical
+    # values in the same condition are not collapsed by drop_duplicates().
+    has_sample = "Sample" in df.columns
+    keep_cols = sorted(required_cols) + (["Sample"] if has_sample else [])
+    df = df[keep_cols].drop_duplicates().copy()
 
     # ── Beta = beta1 + beta2 ─────────────────────────────────────────────────
     df["beta_count"] = df["beta1_count"] + df["beta2_count"]
@@ -224,6 +240,8 @@ def convert_usage_to_parquet(
     df["SSE"] = df["SSE"].astype(float)
     df["alpha_count"] = df["alpha_count"].astype(int)
     df["beta_count"] = df["beta_count"].astype(int)
+    if has_sample:
+        df["Sample"] = df["Sample"].astype(str)
 
     # ── Expand "Both" rows ──────────────────────────────────────────────────
     # (annotate_splice_site_type now resolves ties by support; kept as safety net)
@@ -282,7 +300,7 @@ def convert_usage_to_parquet(
         df = df[df["Alpha"] >= min_alpha]
 
     # ── Canonical column order ───────────────────────────────────────────────
-    df = df[["Chromosome", "Position", "SSE", "Alpha", "Beta", "Label", "Condition"]]
+    df = df[_canonical_columns(has_sample)]
 
     # ── Metadata ──────────────────────────────────────────────────────────────
     metadata = {
@@ -562,9 +580,10 @@ def convert_spliser_dir_to_usage_parquet(
         if min_alpha is not None:
             mask &= site_agg["Alpha"] >= min_alpha
         # Get set of (Chromosome, Position) to keep
-        keep_sites = set(zip(site_agg.loc[mask, "Chromosome"], site_agg.loc[mask, "Position"]))
+        keep_sites = pd.MultiIndex.from_frame(site_agg.loc[mask, ["Chromosome", "Position"]])
         before_rows = len(df_final)
-        df_final = df_final[df_final.apply(lambda row: (row["Chromosome"], row["Position"]) in keep_sites, axis=1)]
+        row_sites = pd.MultiIndex.from_frame(df_final[["Chromosome", "Position"]])
+        df_final = df_final[row_sites.isin(keep_sites)]
         after_rows = len(df_final)
         print(f"Filtered sites by cross-condition min_coverage/min_alpha: {before_rows:,} → {after_rows:,} rows")
 
@@ -575,7 +594,10 @@ def convert_spliser_dir_to_usage_parquet(
     df_final["Condition"] = df_final["Condition_Key"].map(condition_labels)
     df_final = df_final.drop(columns=["Condition_Key"])
     # Reorder columns to canonical order
-    df_final = df_final[["Chromosome", "Position", "SSE", "Alpha", "Beta", "Label", "Condition"]]
+    has_sample = "Sample" in df_final.columns
+    df_final = df_final[_canonical_columns(has_sample)].copy()
+    if has_sample:
+        df_final["Sample"] = df_final["Sample"].astype("category")
     # Write final Parquet and JSON
     parquet_path = Path(output_path)
     df_final.to_parquet(parquet_path, index=False, compression=None if compression=="none" else compression)
