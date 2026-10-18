@@ -72,6 +72,25 @@ slurm/submit.sh --cpu --mem 128G --time 24:00:00 --sbatch-arg --array=0 update_u
 slurm/submit.sh --cpu --mem 128G --time 24:00:00 --sbatch-arg --array=1-12 update_usage_parquet
 ```
 
+## Prepare splice junctions for training
+
+`convert_splice_junctions_to_parquet.py` builds junction read counts (donor → acceptor, per condition and sample) from the `Partners` column of the same Spliser `.combined.tsv` files. Spliser reports each junction at both ends; only the donor end is used, so every junction appears once. Junction ends get the same −1 shift as the usage sites (`+` donors and `−` acceptors), and `--usage-json` reuses the usage file's condition labels so that condition indices match. The output is `junctions.parquet` (`Chromosome, Donor, Acceptor, Strand, Condition, Sample, Count`) with `junctions.json`, plus `junctions.check.json`, the fraction of junction ends found among the `usage.parquet` sites (about 0.9 for human; the same fraction shifted by one base is about 0.001).
+
+```bash
+python -u scripts/convert_splice_junctions_to_parquet.py \
+    --input-dir ${HOME}/sds/sd17d003/Anamaria/spliser/data/${species} \
+    --usage-json ${data_dir}/${species}/usage.json \
+    --output ${data_dir}/${species}/junctions.parquet \
+    --min-reproducibility 0.5 \
+    --strip-chr-names > logs/junctions_to_parquet_${species}.log
+```
+
+For all Cardoso-Moreira and Brawand datasets at once:
+
+```bash
+slurm/submit.sh --cpu --mem 64G --time 12:00:00 --sbatch-arg --array=0-12 convert_splice_junctions
+```
+
 ## Prepare splice site annotation for training
 
 To save parquet file with splice site annotations, run `convert_splice_sites_to_parquet.py`. It builds a splice-site annotation Parquet from a GTF (donor/acceptor positions per strand), optionally unioned or intersected with sites found in a Spliser usage file.
@@ -314,6 +333,33 @@ epoch (`train_tissue_contrast_loss`/`train_n_marker_sites`, `val_tissue_contrast
 `val_n_marker_sites` in `epoch_log.csv`), and per species in validation
 (`val_usage_tissue_contrast_loss_<species>`) — the same treatment as the other usage
 loss components, in `splice_training.py`/`finetune_splice.py`.
+
+### Junction loss
+
+With `junction_weight > 0` and a `junction_parquet` per species, each species also gets a splice-junction head (`SpliceSitesJunctionHead`, one track per condition and strand). It predicts read counts for every donor × acceptor pair in the window and is trained with the loss of the pretrained AlphaGenome junction head (`losses.splice_junction_loss`, a port of the JAX loss):
+
+- a Poisson loss on the total reads per donor and per acceptor (counts above 10 are soft-clipped by a square root), weighted 0.2, and
+- a cross-entropy on how those reads are split across partner sites, per donor and per acceptor.
+
+```yaml
+species:
+  - name: human
+    ...
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/junctions.parquet
+
+junction_weight: 1.0
+max_junction_sites: 256        # P: sites per list (donor+, acceptor+, donor-, acceptor-) per window
+junction_replicate_agg: sum    # combine a condition's samples: sum | mean
+junction_count_scale: 0.01     # see below
+junction_init_metadata:        # pretrained organism -> track metadata, for tissue-matched init
+  0: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_homo_sapiens.csv
+  1: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_mus_musculus.csv
+```
+
+- **Sites per window.** The four site lists come from the junctions with both ends inside the window's loss-mask region. When a list has more than `max_junction_sites` sites, the ones with the most reads are kept. The head's output is `(B, P, P, 2 × n_conditions)`, so memory grows with `P²`.
+- **Initialisation.** The projection is copied from the pretrained junction head for the organism given by `organism_embedding_init` (human if the pretrained model has no such organism). Each condition's per-tissue parameters are copied from the pretrained tracks of the same tissue (`biosample_name` match, plus the aliases in `JUNCTION_TISSUE_ALIASES` in `finetune_splice.py`; human midbrain uses brain). Without `junction_init_metadata`, every condition starts from the mean over all pretrained tissues instead. That mean is much weaker: the pretrained tissue parameters are nearly orthogonal, and on a test window the mean-initialised head predicted the same count for every pair.
+- **Count scale.** The pretrained head predicts far fewer reads than pooled samples give: about 0.6 versus about 230 per junction on a human test window (summed samples). This mismatch only affects the Poisson terms; the ratio terms are unaffected. On that window the tissue-matched head started at a loss of 54.6 with raw counts, 0.86 with `junction_count_scale: 0.01`, and 0.72 with 0.0025. The mean-initialised head stayed at 17–27 at every scale. The default of 1.0 keeps raw counts.
+- **Logging and checkpoints.** The loss is logged as `junction` per step, `train_junction_loss`/`val_junction_loss` per epoch and `val_junction_loss_<species>` in validation. The heads are stored in the checkpoint's `model_state_dict` under `splice_sites_junction_head.<organism_index>.*`, and `load_model_for_inference` rebuilds them from `species_n_junction_conditions` in the config.
 
 ## Evaluate
 

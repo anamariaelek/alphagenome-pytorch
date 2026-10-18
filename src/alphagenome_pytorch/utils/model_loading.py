@@ -162,7 +162,11 @@ def load_model_for_inference(checkpoint_path, device, strict=True, config_path=N
     if is_finetuned and cfg is not None:
         # Fine-tuned model: reconstruct architecture
         from alphagenome_pytorch.config import DtypePolicy
-        from alphagenome_pytorch.extensions.finetuning.heads import create_splice_classification_finetuning_head, create_splice_usage_finetuning_head
+        from alphagenome_pytorch.extensions.finetuning.heads import (
+            create_splice_classification_finetuning_head,
+            create_splice_junction_finetuning_head,
+            create_splice_usage_finetuning_head,
+        )
         from alphagenome_pytorch.extensions.finetuning.transfer import load_trunk, remove_all_heads, prepare_for_transfer, TransferConfig
         import torch.nn as nn
         species_specs = cfg["species_specs"]
@@ -194,6 +198,17 @@ def load_model_for_inference(checkpoint_path, device, strict=True, config_path=N
             model.splice_sites_usage_head = nn.ModuleDict({str(k): v for k, v in usage_heads.items()})
         else:
             model.splice_sites_usage_head = None
+
+        # Rebuild per-organism junction heads (weights come from model_state_dict).
+        junction_conds = _normalize_species_n_conditions(cfg.get("species_n_junction_conditions", {}))
+        junction_heads = {
+            str(int(org_idx)): create_splice_junction_finetuning_head(
+                n_conditions=int(n_cond), num_organisms=num_organisms,
+            )
+            for org_idx, n_cond in junction_conds.items() if int(n_cond) > 0
+        }
+        if junction_heads:
+            model.splice_sites_junction_head = nn.ModuleDict(junction_heads)
 
         # Use strict=False by default for fine-tuned checkpoints
         # Strip _orig_mod. prefix that torch.compile adds to state-dict keys

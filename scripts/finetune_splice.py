@@ -60,6 +60,7 @@ Usage:
     #       genome: hg38.fa
     #       annotation_parquet: human_splice.parquet
     #       usage_parquet: human_usage.parquet   # optional
+    #       junction_parquet: human_junctions.parquet   # optional (needs junction_weight > 0)
     #       train_bed: human_train.bed
     #       val_bed: human_val.bed
     #       organism_index: 0
@@ -137,6 +138,7 @@ from alphagenome_pytorch.extensions.finetuning.adapters import get_adapter_param
 from alphagenome_pytorch.extensions.finetuning.checkpointing import save_checkpoint, load_checkpoint
 from alphagenome_pytorch.extensions.finetuning.heads import (
     create_splice_classification_finetuning_head,
+    create_splice_junction_finetuning_head,
     create_splice_usage_finetuning_head,
 )
 from alphagenome_pytorch.extensions.finetuning.transfer import (
@@ -161,6 +163,9 @@ DEFAULTS = {
     "sequence_length": 131072,
     "organism_index": 0,
     "max_sites": 1024,
+    "max_junction_sites": 256,
+    "junction_replicate_agg": "sum",
+    "junction_count_scale": 1.0,
     "usage_coord_base": 0,
     "observed_conditions_only": False,
     "usage_delta_from_mean": False,
@@ -180,6 +185,7 @@ DEFAULTS = {
     "lr_schedule": "cosine",
     "cls_weight": 1.0,
     "usage_weight": 1.0,
+    "junction_weight": 0.0,
     "max_grad_norm": 1.0,
     "num_workers": 4,
     # Logging
@@ -255,6 +261,16 @@ def parse_args() -> argparse.Namespace:
             "When provided, enables the splice-usage head in addition to classification."
         ),
     )
+    data.add_argument(
+        "--junction-parquet",
+        type=str,
+        default=None,
+        help=(
+            "Splice-junction Parquet (junctions.parquet) produced by "
+            "convert_splice_junctions_to_parquet.py; the sibling junctions.json must exist. "
+            "Enables the splice-junction head when --junction-weight > 0."
+        ),
+    )
     data.add_argument("--train-bed", type=str, required=False, help="Training regions BED file")
     data.add_argument("--val-bed", type=str, required=False, help="Validation regions BED file")
     data.add_argument("--sequence-length", type=int, default=DEFAULTS["sequence_length"])
@@ -269,6 +285,26 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULTS["max_sites"],
         help="Maximum splice sites per sequence window for usage targets",
+    )
+    data.add_argument(
+        "--max-junction-sites",
+        type=int,
+        default=DEFAULTS["max_junction_sites"],
+        help="Length P of each junction site list (donor+/acceptor+/donor-/acceptor-) per window",
+    )
+    data.add_argument(
+        "--junction-replicate-agg",
+        type=str,
+        default=DEFAULTS["junction_replicate_agg"],
+        choices=["sum", "mean"],
+        help="How junction counts of a condition's samples are combined",
+    )
+    data.add_argument(
+        "--junction-count-scale",
+        type=float,
+        default=DEFAULTS["junction_count_scale"],
+        help="Factor applied to junction count targets (the pretrained head predicts "
+             "much smaller counts than pooled samples give; see WORKFLOW_FINETUNING_SPLICING.md)",
     )
     data.add_argument(
         "--cache-genome",
@@ -385,6 +421,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULTS["usage_weight"],
         help="Weight for the splice usage loss term (only used when --usage-parquet is provided)",
     )
+    train_grp.add_argument(
+        "--junction-weight",
+        type=float,
+        default=DEFAULTS["junction_weight"],
+        help="Weight for the splice-junction loss term (0 disables the junction head)",
+    )
     train_grp.add_argument("--num-workers", type=int, default=DEFAULTS["num_workers"])
     train_grp.add_argument(
         "--max-grad-norm",
@@ -448,7 +490,7 @@ def parse_args() -> argparse.Namespace:
         
         # Expand paths in config
         path_keys = {
-            "genome", "annotation_parquet", "usage_parquet",
+            "genome", "annotation_parquet", "usage_parquet", "junction_parquet",
             "train_bed", "val_bed", "test_bed", "pretrained_weights",
             "output_dir", "log_file"
         }
@@ -471,11 +513,15 @@ def parse_args() -> argparse.Namespace:
         "genome",
         "annotation_parquet",
         "usage_parquet",
+        "junction_parquet",
         "train_bed",
         "val_bed",
         "sequence_length",
         "organism_index",
         "max_sites",
+        "max_junction_sites",
+        "junction_replicate_agg",
+        "junction_count_scale",
         "cache_genome",
         "usage_coord_base",
         "observed_conditions_only",
@@ -498,6 +544,7 @@ def parse_args() -> argparse.Namespace:
         "lr_schedule",
         "cls_weight",
         "usage_weight",
+        "junction_weight",
         "max_grad_norm",
         "num_workers",
         "compile",
@@ -549,6 +596,7 @@ def parse_args() -> argparse.Namespace:
                 "genome": s["genome"],
                 "annotation_parquet": s["annotation_parquet"],
                 "usage_parquet": s.get("usage_parquet"),
+                "junction_parquet": s.get("junction_parquet"),
                 "train_bed": s["train_bed"],
                 "val_bed": s["val_bed"],
                 "organism_index": int(s.get("organism_index", i)),
@@ -577,6 +625,7 @@ def parse_args() -> argparse.Namespace:
             "genome": expand_path(args.genome),
             "annotation_parquet": expand_path(args.annotation_parquet),
             "usage_parquet": expand_path(args.usage_parquet),
+            "junction_parquet": expand_path(args.junction_parquet),
             "train_bed": expand_path(args.train_bed),
             "val_bed": expand_path(args.val_bed),
             "organism_index": args.organism_index,
@@ -599,6 +648,12 @@ def parse_args() -> argparse.Namespace:
     # torch.cuda.set_per_process_memory_fraction). Useful to leave headroom / share a GPU.
     args.cuda_memory_fraction = float(config_data.get("cuda_memory_fraction", 1.0) or 1.0)
 
+    # Pretrained organism index → AlphaGenome track metadata CSV, used to start each
+    # junction-head condition from the pretrained tracks of the same tissue.
+    args.junction_init_metadata = {
+        int(k): expand_path(v) for k, v in (config_data.get("junction_init_metadata") or {}).items()
+    }
+
     args.species_specs = species_specs
     return args
 
@@ -615,14 +670,18 @@ def create_datasets(args: argparse.Namespace, rank: int):
     are then concatenated with :class:`torch.utils.data.ConcatDataset`.
 
     Returns:
-        ``(train_dataset, val_dataset, species_n_conditions)`` where
+        ``(train_dataset, val_dataset, species_n_conditions,
+        tissue_cond_groups_by_org, species_junction_conditions)`` where
         *species_n_conditions* is a ``dict[organism_index, n_conditions]``
         containing only species that have a usage parquet.  This dict may be
         empty when no species provides usage data.  Different species are
         allowed to have different numbers of conditions.
+        *species_junction_conditions* maps organism_index → the junction
+        parquet's ``condition_labels`` (only filled when ``--junction-weight > 0``).
     """
     from alphagenome_pytorch.extensions.finetuning.datasets import CachedGenome
     from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
+        SpliceJunctionIndex,
         SpliceSiteAnnotation,
         SpliceSiteUsageIndex,
         SpliceSiteDataset,
@@ -633,6 +692,7 @@ def create_datasets(args: argparse.Namespace, rank: int):
     val_datasets: list = []
     species_n_conditions: dict[int, int] = {}  # organism_index → n_conditions
     tissue_cond_groups_by_org: dict[int, list] = {}  # organism_index → per-tissue condition groups
+    species_junction_conditions: dict[int, dict[str, int]] = {}  # organism_index → condition_labels
 
     for spec in args.species_specs:
         name = spec["name"]
@@ -655,6 +715,23 @@ def create_datasets(args: argparse.Namespace, rank: int):
             print_rank0(f"  [{name}] Usage conditions: {cond} "
                         f"({len(usage_index.tissue_cond_groups)} tissue groups for trajectory loss)", rank)
 
+        junction_index = None
+        if spec.get("junction_parquet") and args.junction_weight > 0:
+            print_rank0(f"[{name}] Loading junction index from: {spec['junction_parquet']}", rank)
+            junction_index = SpliceJunctionIndex(
+                spec["junction_parquet"],
+                usage_coord_base=args.usage_coord_base,
+                replicate_agg=args.junction_replicate_agg,
+                count_scale=args.junction_count_scale,
+            )
+            if usage_index is not None and junction_index.condition_labels != usage_index.condition_labels:
+                raise ValueError(
+                    f"[{name}] condition_labels of {spec['junction_parquet']} and "
+                    f"{spec['usage_parquet']} differ; rebuild the junction parquet with "
+                    f"--usage-json pointing at the usage file."
+                )
+            species_junction_conditions[spec["organism_index"]] = junction_index.condition_labels
+
         genome = CachedGenome(spec["genome"]) if args.cache_genome else spec["genome"]
 
         print_rank0(f"[{name}] Creating train dataset...", rank)
@@ -666,6 +743,8 @@ def create_datasets(args: argparse.Namespace, rank: int):
             sequence_length=args.sequence_length,
             organism_index=spec["organism_index"],
             max_sites=args.max_sites,
+            junction_index=junction_index,
+            max_junction_sites=args.max_junction_sites,
         )
 
         print_rank0(f"[{name}] Creating validation dataset...", rank)
@@ -677,6 +756,8 @@ def create_datasets(args: argparse.Namespace, rank: int):
             sequence_length=args.sequence_length,
             organism_index=spec["organism_index"],
             max_sites=args.max_sites,
+            junction_index=junction_index,
+            max_junction_sites=args.max_junction_sites,
         )
 
         print_rank0(f"  [{name}] Train: {len(train_ds):,}  Val: {len(val_ds):,}", rank)
@@ -693,7 +774,8 @@ def create_datasets(args: argparse.Namespace, rank: int):
             f"Combined — Train: {len(train_dataset):,}  Val: {len(val_dataset):,}", rank
         )
 
-    return train_dataset, val_dataset, species_n_conditions, tissue_cond_groups_by_org
+    return (train_dataset, val_dataset, species_n_conditions, tissue_cond_groups_by_org,
+            species_junction_conditions)
 
 
 def create_dataloaders(
@@ -751,11 +833,61 @@ def create_dataloaders(
 # Model Setup
 # =============================================================================
 
+# Pretrained junction-track biosample names used for each dataset tissue, on
+# top of an exact (case-insensitive) name match.
+JUNCTION_TISSUE_ALIASES: dict[str, set[str]] = {
+    "brain": {"brain", "frontal cortex", "cerebral cortex", "left cerebral cortex", "forebrain"},
+    "cerebellum": {"cerebellum", "cerebellar hemisphere"},
+    "midbrain": {"midbrain", "brain"},  # human has no midbrain junction tracks
+    "heart": {"heart", "heart left ventricle", "heart right ventricle"},
+    "liver": {"liver", "right lobe of liver", "left lobe of liver"},
+}
+
+
+def junction_tissue_init(
+    condition_labels: dict[str, int],
+    metadata_csvs: dict[int, str],
+    aliases: dict[str, set[str]] | None = None,
+) -> dict[int, dict[int, list[int]]]:
+    """Match dataset conditions to pretrained junction tracks by tissue name.
+
+    Args:
+        condition_labels: ``{"Testis_3": 5, ...}`` (tissue is the part before
+            the last ``_``).
+        metadata_csvs: pretrained organism index → AlphaGenome track metadata
+            CSV (``alphagenome_metadata_<organism>.csv``); the junction rows'
+            first column is the track index in the pretrained junction head.
+        aliases: tissue (lower case) → accepted ``biosample_name`` values;
+            defaults to :data:`JUNCTION_TISSUE_ALIASES`.
+
+    Returns:
+        ``{pretrained organism: {condition index: [track indices]}}`` for the
+        ``tissue_init`` argument of ``create_splice_junction_finetuning_head``.
+    """
+    import pandas as pd
+
+    aliases = JUNCTION_TISSUE_ALIASES if aliases is None else aliases
+    result: dict[int, dict[int, list[int]]] = {}
+    for src, csv in metadata_csvs.items():
+        meta = pd.read_csv(csv)
+        meta = meta[meta["output_type"].astype(str).str.contains("JUNCTION")]
+        track_idx = meta.iloc[:, 0].astype(int).to_numpy()
+        names = meta["biosample_name"].astype(str).str.lower().to_numpy()
+        per_cond: dict[int, list[int]] = {}
+        for cond_name, cond_idx in condition_labels.items():
+            tissue = cond_name.rsplit("_", 1)[0].lower()
+            wanted = aliases.get(tissue, set()) | {tissue}
+            per_cond[int(cond_idx)] = [int(t) for t, n in zip(track_idx, names) if n in wanted]
+        result[int(src)] = per_cond
+    return result
+
+
 def create_model(
     args: argparse.Namespace,
     species_n_conditions: dict[int, int],
     device: torch.device,
-) -> tuple[nn.Module, dict[int, nn.Module], list[torch.nn.Parameter]]:
+    species_junction_conditions: dict[int, dict[str, int]] | None = None,
+) -> tuple[nn.Module, dict[int, nn.Module], list[torch.nn.Parameter], dict[int, nn.Module]]:
     """Create and configure the model for splice fine-tuning.
 
     Args:
@@ -765,14 +897,19 @@ def create_model(
             Each species may have a different number of conditions, enabling
             independent per-species usage heads.
         device: Torch device.
+        species_junction_conditions: organism_index → condition_labels for
+            species with a junction parquet; one junction head is built per
+            entry, initialised from the pretrained junction head (per-condition
+            RoPE params from tissue-matched pretrained tracks when
+            ``junction_init_metadata`` is configured).
         rank: Process rank.
         world_size: Number of DDP processes.
         local_rank: Local rank for GPU assignment.
 
     Returns:
-        Tuple of ``(model, usage_heads, trainable_params)`` where
-        *usage_heads* is a ``dict[organism_index, nn.Module]``
-        (empty when no species provides usage data).
+        Tuple of ``(model, usage_heads, trainable_params, junction_heads)`` where
+        *usage_heads* and *junction_heads* are ``dict[organism_index, nn.Module]``
+        (empty when no species provides usage / junction data).
     """
     print(f"Loading pretrained model from {args.pretrained_weights}")
     dtype_policy = (
@@ -929,13 +1066,48 @@ def create_model(
     else:
         model.splice_sites_usage_head = None
 
+    # Per-species junction heads, initialised from the pretrained junction head
+    # (projection copied, per-condition RoPE params = mean over pretrained tissues).
+    junction_heads: dict[int, nn.Module] = {}
+    jx_prefix = "splice_sites_junction_head."
+    pretrained_jx = {k[len(jx_prefix):]: v for k, v in state_dict.items() if k.startswith(jx_prefix)}
+    jx_metadata = getattr(args, "junction_init_metadata", None) or {}
+    for org_idx, cond_labels in (species_junction_conditions or {}).items():
+        n_cond = len(cond_labels)
+        if n_cond == 0:
+            continue
+        tissue_init = junction_tissue_init(cond_labels, jx_metadata) if pretrained_jx and jx_metadata else None
+        junction_heads[org_idx] = create_splice_junction_finetuning_head(
+            n_conditions=n_cond,
+            num_organisms=num_organisms,
+            pretrained_state=pretrained_jx or None,
+            organism_init=organism_embedding_init,
+            tissue_init=tissue_init,
+        )
+        if not pretrained_jx:
+            init = "random init"
+        elif tissue_init is None:
+            init = "pretrained, all-tissue mean (set junction_init_metadata for tissue matching)"
+        else:
+            # Same source-organism choice as create_splice_junction_finetuning_head.
+            src = organism_embedding_init.get(org_idx, org_idx)
+            if src >= pretrained_jx["conv.weight"].shape[0]:
+                src = 0
+            matched = tissue_init.get(src, {})
+            n_matched = sum(1 for v in matched.values() if v)
+            init = f"pretrained, {n_matched}/{n_cond} conditions tissue-matched"
+        print(f"Created splice junction head for organism {org_idx} "
+              f"({n_cond} conditions × 2 strands, {init})")
+    if junction_heads:
+        model.splice_sites_junction_head = nn.ModuleDict({str(k): v for k, v in junction_heads.items()})
+
     # Configure trainable parameters based on training mode
     trainable_params: list[torch.nn.Parameter] = []
 
     if args.mode == "linear-probe":
         # Only splice heads are trainable (backbone frozen above)
         trainable_params.extend(list(cls_head.parameters()))
-        for h in usage_heads.values():
+        for h in [*usage_heads.values(), *junction_heads.values()]:
             trainable_params.extend(list(h.parameters()))
         if train_species_embeddings:
             for p in species_embedding_params:
@@ -958,7 +1130,7 @@ def create_model(
             trainable_params = get_adapter_params(model)
         # Always add head parameters (created after freeze → requires_grad=True)
         trainable_params.extend(list(cls_head.parameters()))
-        for h in usage_heads.values():
+        for h in [*usage_heads.values(), *junction_heads.values()]:
             trainable_params.extend(list(h.parameters()))
         if train_species_embeddings:
             for p in species_embedding_params:
@@ -1020,6 +1192,8 @@ def create_model(
         usage_heads = {int(k): v for k, v in model_module.splice_sites_usage_head.items()}
     else:
         usage_heads = {}
+    if junction_heads:
+        junction_heads = {int(k): v for k, v in model_module.splice_sites_junction_head.items()}
 
     # Optionally compile
     if args.compile:
@@ -1034,7 +1208,7 @@ def create_model(
     n_total = sum(p.numel() for p in model_module.parameters())
     print_rank0(f"Trainable: {n_trainable:,} / {n_total:,} ({100*n_trainable/n_total:.2f}%)", 0)
 
-    return model, usage_heads, trainable_params
+    return model, usage_heads, trainable_params, junction_heads
 
 
 # =============================================================================
@@ -1098,7 +1272,9 @@ def main() -> None:
         resume_path = Path(args.resume)
 
     # Create datasets
-    train_dataset, val_dataset, species_n_conditions, tissue_cond_groups_by_org = create_datasets(args, 0)
+    (train_dataset, val_dataset, species_n_conditions, tissue_cond_groups_by_org,
+     species_junction_conditions) = create_datasets(args, 0)
+    species_n_junction_conditions = {k: len(v) for k, v in species_junction_conditions.items()}
 
     # Set rank and world_size for single-process (no DDP)
     rank = 0
@@ -1120,8 +1296,8 @@ def main() -> None:
     class_weights: torch.Tensor | None = None
 
     # Create model
-    model, usage_heads, trainable_params = create_model(
-        args, species_n_conditions, device
+    model, usage_heads, trainable_params, junction_heads = create_model(
+        args, species_n_conditions, device, species_junction_conditions
     )
     # When torch.compile wraps the model, _orig_mod holds the original PyTorch module.
     # Always checkpoint from the uncompiled module so state-dict keys have no _orig_mod. prefix.
@@ -1192,8 +1368,13 @@ def main() -> None:
         "usage_loss_weights": getattr(args, "usage_loss_weights", None),
         "usage_traj_warmup_epochs": getattr(args, "usage_traj_warmup_epochs", 0),
         "species_n_conditions": species_n_conditions,
+        "species_n_junction_conditions": species_n_junction_conditions,
+        "max_junction_sites": args.max_junction_sites,
+        "junction_replicate_agg": args.junction_replicate_agg,
+        "junction_count_scale": args.junction_count_scale,
         "cls_weight": args.cls_weight,
         "usage_weight": args.usage_weight,
+        "junction_weight": args.junction_weight,
         "pretrained_weights": args.pretrained_weights,
         "lora_rank": args.lora_rank if args.mode == "lora" else None,
         "lora_alpha": args.lora_alpha if args.mode == "lora" else None,
@@ -1341,6 +1522,8 @@ def main() -> None:
                 usage_loss_weights=args.usage_loss_weights,
                 tissue_cond_groups=tissue_cond_groups_by_org,
                 usage_traj_warmup_epochs=getattr(args, "usage_traj_warmup_epochs", 0),
+                junction_head=junction_heads or None,
+                junction_weight=args.junction_weight,
             )
 
             if handler.preempted:
@@ -1361,6 +1544,8 @@ def main() -> None:
                 usage_delta_from_mean=args.usage_delta_from_mean,
                 usage_loss_weights=args.usage_loss_weights,
                 tissue_cond_groups=tissue_cond_groups_by_org,
+                junction_head=junction_heads or None,
+                junction_weight=args.junction_weight,
             )
 
             if torch.cuda.is_available():
@@ -1406,7 +1591,10 @@ def main() -> None:
                 f"val_loss={val_loss:.4f}  "
                 f"val_cls_loss={val_metrics.cls_loss:.4f}  "
                 f"val_usage_loss={val_metrics.usage_loss:.4f}  "
-                f"lr={current_lr:.2e}\n"
+                + (f"train_junction_loss={train_metrics.junction_loss:.4f}  "
+                   f"val_junction_loss={val_metrics.junction_loss:.4f}  "
+                   if junction_heads else "")
+                + f"lr={current_lr:.2e}\n"
                 f"  Timing: {format_time(epoch_elapsed)} ({format_time(train_metrics.elapsed_s)} train + {format_time(val_metrics.elapsed_s)} val)"
             )
             if any(v is not None for v in (train_bce, train_delta, train_traj, train_tcorr, train_trmse,
@@ -1455,6 +1643,9 @@ def main() -> None:
                 "val_cls_loss": val_metrics.cls_loss,
                 "val_usage_loss": val_metrics.usage_loss,
             }
+            if junction_heads:
+                extra["train_junction_loss"] = train_metrics.junction_loss
+                extra["val_junction_loss"] = val_metrics.junction_loss
             if train_bce is not None:
                 extra["train_bce_loss"] = train_bce
             if train_delta is not None:

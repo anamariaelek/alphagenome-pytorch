@@ -471,6 +471,227 @@ class SpliceSiteUsageIndex:
         return out_positions, values_list, masks_list, coverages_list
 
 
+class SpliceJunctionIndex:
+    """In-memory index of per-condition splice-junction read counts.
+
+    Loads a ``junctions.parquet`` produced by
+    ``scripts/convert_splice_junctions_to_parquet.py`` (one row per junction,
+    condition and sample), aggregates the samples of each condition, and keeps
+    the result as flat numpy arrays (fork-safe in DataLoader workers, like
+    :class:`SpliceSiteUsageIndex`).
+
+    Args:
+        junction_parquet: Path to ``junctions.parquet``; ``junctions.json``
+            (``condition_labels``) must sit next to it.
+        usage_coord_base: Coordinate base of the parquet (same as for the
+            species' usage parquet, since junction ends use its coordinates).
+        replicate_agg: How to combine the samples of a condition: ``"sum"``
+            (pooled reads, default) or ``"mean"`` (sum divided by the number of
+            samples of that condition in the file).
+        min_count: Optional minimum aggregated count per (junction, condition),
+            applied before *count_scale*.
+        count_scale: Factor applied to the aggregated counts.  The pretrained
+            junction head predicts far fewer reads than pooled RNA-seq samples
+            give (≈0.6 vs ≈230 per junction on a human test window), so a scale
+            below 1 lets the pretrained head start near the right magnitude.
+            The ratio terms of the loss do not depend on it.
+    """
+
+    def __init__(
+        self,
+        junction_parquet: str | Path,
+        usage_coord_base: int = 0,
+        replicate_agg: str = "sum",
+        min_count: float | None = None,
+        count_scale: float = 1.0,
+    ) -> None:
+        import pandas as pd
+
+        junction_parquet = Path(junction_parquet)
+        junction_json = junction_parquet.with_suffix(".json")
+        for p in (junction_parquet, junction_json):
+            if not p.exists():
+                raise FileNotFoundError(f"Required file not found: {p}")
+        if replicate_agg not in ("sum", "mean"):
+            raise ValueError(f"replicate_agg must be 'sum' or 'mean', got {replicate_agg!r}")
+
+        with open(junction_json) as f:
+            self._condition_labels: dict[str, int] = json.load(f)["condition_labels"]
+        self.n_conditions: int = len(self._condition_labels)
+
+        df = pd.read_parquet(junction_parquet)
+        df["Chromosome"] = df["Chromosome"].astype(str)
+        df["Strand"] = df["Strand"].astype(str)
+        key = ["Chromosome", "Donor", "Acceptor", "Strand", "Condition"]
+        agg = df.groupby(key, as_index=False, observed=True)["Count"].sum()
+        if replicate_agg == "mean":
+            n_samples = df.groupby("Condition", observed=True)["Sample"].nunique()
+            agg["Count"] = agg["Count"] / agg["Condition"].map(n_samples).to_numpy()
+        if min_count is not None:
+            agg = agg[agg["Count"] >= min_count]
+        agg["Count"] = agg["Count"] * count_scale
+        if usage_coord_base == 1:
+            agg["Donor"] -= 1
+            agg["Acceptor"] -= 1
+
+        all_chroms = sorted(agg["Chromosome"].unique())
+        self._chrom_to_id: dict[str, int] = {c: i for i, c in enumerate(all_chroms)}
+        agg["_chrom_id"] = agg["Chromosome"].map(self._chrom_to_id).astype(np.int32)
+        # Sort by the leftmost end so that a window query is one searchsorted.
+        agg["_left"] = np.minimum(agg["Donor"], agg["Acceptor"])
+        agg = agg.sort_values(["_chrom_id", "_left"]).reset_index(drop=True)
+
+        self._chrom_ids = agg["_chrom_id"].to_numpy(dtype=np.int32)
+        self._left = agg["_left"].to_numpy(dtype=np.int64)
+        self._right = np.maximum(agg["Donor"], agg["Acceptor"]).to_numpy(dtype=np.int64)
+        self._donor = agg["Donor"].to_numpy(dtype=np.int64)
+        self._acceptor = agg["Acceptor"].to_numpy(dtype=np.int64)
+        self._plus = (agg["Strand"] == "+").to_numpy()
+        self._cond = agg["Condition"].to_numpy(dtype=np.int32)
+        self._count = agg["Count"].to_numpy(dtype=np.float32)
+
+        n_junctions = len(agg[["_chrom_id", "Donor", "Acceptor", "Strand"]].drop_duplicates())
+        print(
+            f"SpliceJunctionIndex: loaded {n_junctions:,} junctions "
+            f"({len(agg):,} junction×condition entries), {self.n_conditions} conditions "
+            f"from {junction_parquet.name}"
+        )
+
+    @property
+    def condition_labels(self) -> dict[str, int]:
+        return self._condition_labels
+
+    def query(
+        self, chrom: str, start: int, end: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Junctions with both ends in ``[start, end)``.
+
+        Returns:
+            ``(donor, acceptor, plus_strand, condition, count)`` arrays, one
+            entry per (junction, condition), genomic 0-based coordinates.
+        """
+        chrom_id = self._chrom_to_id.get(chrom)
+        if chrom_id is None:
+            empty_i = np.empty(0, dtype=np.int64)
+            return (empty_i, empty_i, np.empty(0, dtype=bool),
+                    np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float32))
+        c_lo = int(np.searchsorted(self._chrom_ids, chrom_id, side="left"))
+        c_hi = int(np.searchsorted(self._chrom_ids, chrom_id, side="right"))
+        left = self._left[c_lo:c_hi]
+        lo = c_lo + int(np.searchsorted(left, start, side="left"))
+        hi = c_lo + int(np.searchsorted(left, end, side="left"))
+        keep = self._right[lo:hi] < end
+        sl = slice(lo, hi)
+        return (
+            self._donor[sl][keep],
+            self._acceptor[sl][keep],
+            self._plus[sl][keep],
+            self._cond[sl][keep],
+            self._count[sl][keep],
+        )
+
+
+def build_junction_targets(
+    donor: np.ndarray,
+    acceptor: np.ndarray,
+    plus: np.ndarray,
+    cond: np.ndarray,
+    count: np.ndarray,
+    n_conditions: int,
+    max_sites: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Turn window-relative junctions into junction-head inputs and sparse targets.
+
+    Site lists are built per strand and type (donor+, acceptor+, donor−,
+    acceptor−) from the junction ends.  When a list holds more than
+    *max_sites* sites, the ones with the most reads (summed over conditions)
+    are kept; junctions touching a dropped site are dropped too.
+
+    Args:
+        donor, acceptor: Window-relative junction ends.
+        plus: True for ``+`` strand junctions.
+        cond: Condition index per entry.
+        count: Read count per entry.
+        n_conditions: Number of conditions T; ``−`` strand entries go to
+            track ``T + cond`` (the head's output is ``[+ strand | − strand]``).
+        max_sites: P, the length of each site list.
+
+    Returns:
+        ``splice_site_positions`` (4, P) int64 padded with −1, ``index``
+        (J, 3) int64 rows ``(donor slot, acceptor slot, track)``, and
+        ``counts`` (J,) float32.
+    """
+    positions = np.full((4, max_sites), -1, dtype=np.int64)
+    index_parts: list[np.ndarray] = []
+    count_parts: list[np.ndarray] = []
+
+    for strand_i, is_plus in enumerate((True, False)):
+        sel = plus == is_plus
+        if not sel.any():
+            continue
+        d, a, c, n = donor[sel], acceptor[sel], cond[sel], count[sel]
+        keep = np.ones(len(d), dtype=bool)
+        slot_maps = []
+        for ends in (d, a):
+            sites, inv = np.unique(ends, return_inverse=True)
+            if len(sites) > max_sites:
+                totals = np.bincount(inv, weights=n, minlength=len(sites))
+                top = np.sort(np.argsort(-totals, kind="stable")[:max_sites])
+                kept = np.zeros(len(sites), dtype=bool)
+                kept[top] = True
+                keep &= kept[inv]
+                sites = sites[top]
+            slot_maps.append(sites)
+        d_sites, a_sites = slot_maps
+        positions[2 * strand_i, : len(d_sites)] = d_sites
+        positions[2 * strand_i + 1, : len(a_sites)] = a_sites
+        d, a, c, n = d[keep], a[keep], c[keep], n[keep]
+        track = c.astype(np.int64) + (0 if is_plus else n_conditions)
+        index_parts.append(np.stack(
+            [np.searchsorted(d_sites, d), np.searchsorted(a_sites, a), track], axis=1
+        ).astype(np.int64))
+        count_parts.append(n.astype(np.float32))
+
+    if index_parts:
+        index = np.concatenate(index_parts)
+        counts = np.concatenate(count_parts)
+    else:
+        index = np.empty((0, 3), dtype=np.int64)
+        counts = np.empty(0, dtype=np.float32)
+    return positions, index, counts
+
+
+def densify_junction_targets(
+    junction_index: torch.Tensor,
+    junction_counts: torch.Tensor,
+    num_sites: int,
+    num_tracks: int,
+) -> torch.Tensor:
+    """Scatter sparse junction targets into a dense ``(B, P, P, num_tracks)`` tensor.
+
+    Args:
+        junction_index: (B, J, 3) rows ``(donor slot, acceptor slot, track)``,
+            padded with −1 (see :func:`collate_splice`).
+        junction_counts: (B, J) counts (0 for padding).
+        num_sites: P.
+        num_tracks: 2 × number of conditions.
+    """
+    B = junction_index.shape[0]
+    dense = torch.zeros(
+        (B, num_sites, num_sites, num_tracks),
+        dtype=torch.float32, device=junction_counts.device,
+    )
+    valid = junction_index[..., 0] >= 0
+    b = torch.arange(B, device=junction_index.device)[:, None].expand_as(valid)
+    idx = junction_index[valid]
+    dense.index_put_(
+        (b[valid], idx[:, 0], idx[:, 1], idx[:, 2]),
+        junction_counts[valid].float(),
+        accumulate=True,
+    )
+    return dense
+
+
 def _load_intervals_from_bed(
     bed_path: str,
 ) -> tuple[list[tuple[str, int, int, int, int]], set[str]]:
@@ -540,6 +761,14 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         max_sites: Maximum number of usage sites returned per window.
             Positions are sorted by genomic coordinate; surplus sites are
             dropped.  Padded with ``-1`` up to ``max_sites``.
+        junction_index: Optional :class:`SpliceJunctionIndex` for junction
+            count targets.  When given, items carry
+            ``splice_site_positions`` (4, ``max_junction_sites``) and sparse
+            ``junction_index`` / ``junction_counts`` (see
+            :func:`build_junction_targets`).  Only junctions with both ends
+            inside the loss-mask region are used.
+        max_junction_sites: Length P of each junction site list (donor+,
+            acceptor+, donor−, acceptor−).
     """
 
     def __init__(
@@ -552,6 +781,8 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         organism_index: int = 0,
         max_sites: int = 1024,
         lazy_genome: bool = True,
+        junction_index: SpliceJunctionIndex | None = None,
+        max_junction_sites: int = 256,
     ) -> None:
         # Defer heavy import to avoid hard dep at module import time
         from alphagenome_pytorch.extensions.finetuning.datasets import (
@@ -569,6 +800,8 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
         self.max_sites = max_sites
         self.annotation = annotation
         self.usage_index = usage_index
+        self.junction_index = junction_index
+        self.max_junction_sites = max_junction_sites
 
         # Load BED intervals first so we know which chromosomes are needed
         all_intervals, chromosomes = _load_intervals_from_bed(bed_file)
@@ -741,6 +974,20 @@ datasets.CachedGenome` instance **or** a path string (FASTA).
             item["usage_mask"] = torch.from_numpy(masks_3d)             # (max_sites, n_cond, max_rep) bool
             item["usage_coverage"] = torch.from_numpy(covs_3d)          # (max_sites, n_cond, max_rep)
 
+        # ── Junction targets (sparse) ─────────────────────────────────────────
+        if self.junction_index is not None:
+            donor, acceptor, plus, cond, count = self.junction_index.query(
+                chrom, win_start + mask_start_rel, win_start + mask_end_rel
+            )
+            positions, jx_index, jx_counts = build_junction_targets(
+                donor - win_start, acceptor - win_start, plus, cond, count,
+                n_conditions=self.junction_index.n_conditions,
+                max_sites=self.max_junction_sites,
+            )
+            item["splice_site_positions"] = torch.from_numpy(positions)  # (4, P) int64
+            item["junction_index"] = torch.from_numpy(jx_index)          # (J, 3) int64
+            item["junction_counts"] = torch.from_numpy(jx_counts)        # (J,) float32
+
         return item
 
 
@@ -755,7 +1002,10 @@ def collate_splice(
     Returns:
         Dict with keys ``sequence``, ``organism_index``,
         ``classification_labels``, ``loss_mask``, and optionally ``usage_positions``,
-        ``usage_values``, ``usage_mask``, ``usage_coverage``.
+        ``usage_values``, ``usage_mask``, ``usage_coverage``, and
+        ``splice_site_positions`` (B, 4, P), ``junction_index`` (B, J, 3) and
+        ``junction_counts`` (B, J), with J padded to the batch maximum
+        (index −1, count 0).
     """
     result: dict[str, Any] = {
         "sequence": torch.stack([b["sequence"] for b in batch]),
@@ -770,6 +1020,17 @@ def collate_splice(
         result["usage_values"] = torch.stack([b["usage_values"] for b in batch])
         result["usage_mask"] = torch.stack([b["usage_mask"] for b in batch])
         result["usage_coverage"] = torch.stack([b["usage_coverage"] for b in batch])
+    if "junction_index" in batch[0]:
+        result["splice_site_positions"] = torch.stack([b["splice_site_positions"] for b in batch])
+        n_max = max(1, max(len(b["junction_counts"]) for b in batch))
+        index = torch.full((len(batch), n_max, 3), -1, dtype=torch.int64)
+        counts = torch.zeros((len(batch), n_max), dtype=torch.float32)
+        for i, b in enumerate(batch):
+            n = len(b["junction_counts"])
+            index[i, :n] = b["junction_index"]
+            counts[i, :n] = b["junction_counts"]
+        result["junction_index"] = index
+        result["junction_counts"] = counts
     return result
 
 

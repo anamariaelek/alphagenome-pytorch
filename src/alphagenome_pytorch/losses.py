@@ -264,3 +264,75 @@ def cross_entropy_loss(
     
     log_loss = log_normalizer - log_likelihood
     return _safe_masked_mean(log_loss, mask.any(dim=axis))
+
+
+# Junction counts above this are compressed by a square root (JAX _SOFT_CLIP_VALUE).
+_JUNCTION_SOFT_CLIP_VALUE = 10.0
+
+
+def _scale_junction_counts(counts: Tensor) -> Tensor:
+    return torch.where(
+        counts > _JUNCTION_SOFT_CLIP_VALUE,
+        2.0 * torch.sqrt(counts * _JUNCTION_SOFT_CLIP_VALUE) - _JUNCTION_SOFT_CLIP_VALUE,
+        counts,
+    )
+
+
+def splice_junction_loss(
+    *,
+    y_true: Tensor,
+    y_pred: Tensor,
+    mask: Tensor,
+) -> Dict[str, Tensor]:
+    """Splice-junction count loss of the pretrained AlphaGenome junction head.
+
+    Port of ``alphagenome_research.model.heads.SpliceSitesJunctionHead.loss``:
+    a Poisson loss on the (soft-clipped) total reads per donor and per acceptor,
+    plus a cross-entropy on how those reads are split across partner sites::
+
+        loss = donor_ratios + acceptor_ratios + 0.2 * (accept_total + donor_total)
+
+    Args:
+        y_true: Target junction counts, shape (B, D, A, T).
+        y_pred: Predicted junction counts, shape (B, D, A, T)
+            (``pred_counts`` of :class:`~alphagenome_pytorch.heads.SpliceSitesJunctionHead`).
+        mask: Boolean mask, shape (B, D, A, T)
+            (``splice_junction_mask`` of the same head).
+
+    Returns:
+        Dictionary with ``loss`` and its four components.
+    """
+    assert y_true.shape == y_pred.shape == mask.shape, (
+        f"{y_true.shape=} {y_pred.shape=} {mask.shape=}"
+    )
+    assert y_pred.ndim == 4, f"expected (B, D, A, T), got {y_pred.shape}"
+
+    y_true = y_true.float()
+    y_pred = y_pred.float()
+    mask_f = mask.float()
+
+    accept_total_loss = poisson_loss(
+        y_true=_scale_junction_counts((y_true * mask_f).sum(dim=-2)),
+        y_pred=(y_pred * mask_f).sum(dim=-2),
+        mask=mask.any(dim=-2),
+    )
+    donor_total_loss = poisson_loss(
+        y_true=_scale_junction_counts((y_true * mask_f).sum(dim=-3)),
+        y_pred=(y_pred * mask_f).sum(dim=-3),
+        mask=mask.any(dim=-3),
+    )
+    donor_ratios_loss = cross_entropy_loss(y_true=y_true, y_pred=y_pred, mask=mask, axis=-3)
+    acceptor_ratios_loss = cross_entropy_loss(y_true=y_true, y_pred=y_pred, mask=mask, axis=-2)
+
+    loss = (
+        donor_ratios_loss
+        + acceptor_ratios_loss
+        + 0.2 * (accept_total_loss + donor_total_loss)
+    )
+    return {
+        'loss': loss,
+        'donor_ratios_loss': donor_ratios_loss,
+        'acceptor_ratios_loss': acceptor_ratios_loss,
+        'accept_total_loss': accept_total_loss,
+        'donor_total_loss': donor_total_loss,
+    }

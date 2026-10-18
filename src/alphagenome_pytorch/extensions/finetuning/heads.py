@@ -6,6 +6,8 @@ Provides factory functions to create fine-tuning heads:
   classification (5-class softmax).
 - :func:`create_splice_usage_finetuning_head` for per-condition splice-site
   usage prediction (sigmoid, n_conditions outputs).
+- :func:`create_splice_junction_finetuning_head` for per-condition splice
+  junction read counts (donor × acceptor pairs).
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from typing import Literal
 from alphagenome_pytorch.heads import (
     GenomeTracksHead,
     SpliceSitesClassificationHead,
+    SpliceSitesJunctionHead,
     SpliceSitesUsageHead,
     TRUNK_DIM,
 )
@@ -185,6 +188,80 @@ def create_splice_usage_finetuning_head(
     )
 
 
+def create_splice_junction_finetuning_head(
+    n_conditions: int,
+    num_organisms: int = 1,
+    pretrained_state: dict[str, torch.Tensor] | None = None,
+    organism_init: dict[int, int] | None = None,
+    pretrained_num_tissues: tuple[int, ...] = (367, 90),
+    tissue_init: dict[int, dict[int, list[int]]] | None = None,
+) -> SpliceSitesJunctionHead:
+    """Create a :class:`~alphagenome_pytorch.heads.SpliceSitesJunctionHead`
+    with a dataset-specific number of conditions for fine-tuning.
+
+    The head predicts read counts for every (donor, acceptor) pair of the
+    splice sites passed to it, one track per condition and strand
+    (``2 * n_conditions`` outputs).
+
+    Args:
+        n_conditions: Number of conditions (tissue × timepoint).
+        num_organisms: Number of organisms in the model.
+        pretrained_state: Optional state dict of the pretrained junction head
+            (keys without the ``splice_sites_junction_head.`` prefix).  When
+            given, the shared projection is copied per organism and each
+            per-condition RoPE scale/offset is initialised from pretrained
+            tissues: the mean of the tissues listed in *tissue_init* for that
+            condition, or else the mean over all pretrained tissues.  The
+            pretrained tissue parameters are nearly orthogonal, so the
+            all-tissue mean is close to zero and a much weaker start than a
+            matched tissue.
+        organism_init: Mapping new organism index → pretrained organism index
+            (default: identity, falling back to 0 = human when the pretrained
+            model has no such organism).
+        pretrained_num_tissues: Number of valid pretrained tissues per
+            pretrained organism (human 367, mouse 90); only those are averaged.
+        tissue_init: ``{pretrained organism: {condition: [pretrained tissue
+            indices]}}``, e.g. condition ``Testis_3`` → the pretrained testis
+            tracks (see ``scripts/finetune_splice.py:junction_tissue_init``).
+
+    Returns:
+        Configured :class:`~alphagenome_pytorch.heads.SpliceSitesJunctionHead`.
+    """
+    head = SpliceSitesJunctionHead(
+        in_channels=TRUNK_DIM,
+        num_tissues=n_conditions,
+        num_organisms=num_organisms,
+    )
+    if pretrained_state is None:
+        # The head initialises its RoPE params to zeros (they are normally loaded);
+        # all-zero scales would make every condition identical, so follow the JAX
+        # initialiser instead.
+        for p in head.rope_params.values():
+            torch.nn.init.trunc_normal_(p, std=0.1)
+        return head
+
+    conv_w = pretrained_state["conv.weight"]
+    conv_b = pretrained_state["conv.bias"]
+    n_pretrained = conv_w.shape[0]
+    organism_init = organism_init or {}
+    with torch.no_grad():
+        for org in range(num_organisms):
+            src = organism_init.get(org, org)
+            if src >= n_pretrained:
+                src = 0
+            head.conv.weight[org] = conv_w[src]
+            head.conv.bias[org] = conv_b[src]
+            n_valid = pretrained_num_tissues[src] if src < len(pretrained_num_tissues) else None
+            matched = (tissue_init or {}).get(src, {})
+            for name, param in head.rope_params.items():
+                src_params = pretrained_state[f"rope_params.{name}"][src][:, :n_valid]  # (2, T_pre, H)
+                param[org] = src_params.mean(dim=1, keepdim=True).expand_as(param[org])
+                for cond, tissues in matched.items():
+                    if tissues and cond < n_conditions:
+                        param[org, :, cond] = src_params[:, tissues].mean(dim=1)
+    return head
+
+
 # Embedding dimension of the raw CNN encoder output (before transformer/decoder).
 ENCODER_EMBEDDING_DIM = 1536
 
@@ -193,5 +270,6 @@ __all__ = [
     'ENCODER_EMBEDDING_DIM',
     'create_finetuning_head',
     'create_splice_classification_finetuning_head',
+    'create_splice_junction_finetuning_head',
     'create_splice_usage_finetuning_head',
 ]

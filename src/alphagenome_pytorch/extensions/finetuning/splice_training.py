@@ -7,8 +7,12 @@ optimise two heads:
    ``model.splice_sites_classification_head`` (5-class softmax at 1 bp).
 2. **Usage** – a new :class:`~alphagenome_pytorch.heads.SpliceSitesUsageHead`
    with ``n_conditions`` outputs specific to your dataset (sigmoid, BCE loss).
+3. **Junctions** (optional) – a :class:`~alphagenome_pytorch.heads.SpliceSitesJunctionHead`
+   with ``n_conditions`` tissues, trained on junction read counts with the
+   pretrained AlphaGenome junction loss
+   (:func:`~alphagenome_pytorch.losses.splice_junction_loss`).
 
-Both heads receive the same NCL 1 bp trunk embeddings.  The model trunk is
+All heads receive the same NCL 1 bp trunk embeddings.  The model trunk is
 called with ``embeddings_only=True, channels_last=False`` to skip all other
 heads and avoid the full decoder overhead when only 1 bp embeddings are needed.
 
@@ -53,10 +57,12 @@ import torch.nn as nn
 from torch import Tensor
 from torch.amp import autocast
 
+from alphagenome_pytorch.extensions.finetuning.splice_datasets import densify_junction_targets
 from alphagenome_pytorch.extensions.finetuning.splice_losses import (
     splice_classification_loss,
     splice_usage_loss,
 )
+from alphagenome_pytorch.losses import splice_junction_loss
 
 if TYPE_CHECKING:
     from torch.optim import Optimizer
@@ -79,12 +85,39 @@ class SpliceTrainMetrics:
     usage_trajectory_corr: float | None = None  # mean per-tissue temporal Pearson
     usage_trajectory_rmse: float | None = None  # literal true-vs-pred RMSE (level + magnitude)
     usage_tissue_contrast_loss: float | None = None
+    junction_loss: float = 0.0
     species_metrics: dict[int, dict[str, float]] = field(default_factory=dict)
     n_batches: int = 0
     n_usage_valid_pairs: int = 0  # total (position, condition) pairs with observed usage
     n_usage_marker_sites: int = 0  # total tissue_contrast-eligible (site,tissue) slots
     elapsed_s: float = 0.0   # wall-clock seconds for this epoch
     latency_ms: float = 0.0  # average batch latency in milliseconds
+
+
+def _junction_loss(
+    junction_head: "nn.Module | dict[int, nn.Module] | None",
+    emb_1bp: Tensor,
+    org_idx: Tensor,
+    batch: dict[str, Any],
+    device: torch.device,
+) -> Tensor:
+    """Junction-count loss for one single-species batch (0 when not applicable)."""
+    if isinstance(junction_head, dict):
+        junction_head = junction_head.get(int(org_idx[0].item()))
+    if junction_head is None or "junction_index" not in batch:
+        return torch.tensor(0.0, device=device)
+    positions = batch["splice_site_positions"].to(device)
+    out = junction_head(emb_1bp, org_idx, splice_site_positions=positions)
+    pred = out["pred_counts"]
+    target = densify_junction_targets(
+        batch["junction_index"].to(device),
+        batch["junction_counts"].to(device),
+        num_sites=pred.shape[1],
+        num_tracks=pred.shape[-1],
+    )
+    return splice_junction_loss(
+        y_true=target, y_pred=pred, mask=out["splice_junction_mask"]
+    )["loss"]
 
 
 def train_epoch_splice(
@@ -107,6 +140,8 @@ def train_epoch_splice(
     usage_loss_weights: dict | None = None,
     tissue_cond_groups: "list | dict | None" = None,
     usage_traj_warmup_epochs: int = 0,
+    junction_head: "nn.Module | dict[int, nn.Module] | None" = None,
+    junction_weight: float = 0.0,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -151,6 +186,10 @@ def train_epoch_splice(
         accumulation_steps: Gradient accumulation steps (default: 1).
         log_every: Print training stats every N optimizer steps.
         epoch: Current epoch number (used for logging only).
+        junction_head: Optional junction head, or ``dict[organism_index,
+            nn.Module]`` like *usage_head*.  Used when batches carry junction
+            targets (``SpliceSiteDataset(junction_index=...)``).
+        junction_weight: Weight of the junction loss (default 0: off).
 
     Returns:
         :class:`SpliceTrainMetrics` with averaged losses and accuracies.
@@ -274,6 +313,12 @@ def train_epoch_splice(
                     )
 
                 total_loss = total_loss + usage_weight * usage_loss_val
+
+                # ── Junction loss (optional) ─────────────────────────────────────
+                junction_loss_val = torch.tensor(0.0, device=device)
+                if junction_weight > 0:
+                    junction_loss_val = _junction_loss(junction_head, emb_1bp, org_idx, batch, device)
+                    total_loss = total_loss + junction_weight * junction_loss_val
             if not torch.isfinite(total_loss):
                 continue
 
@@ -337,6 +382,7 @@ def train_epoch_splice(
             metrics.loss += total_loss.item()
             metrics.cls_loss += cls_loss_val.item()
             metrics.usage_loss += usage_loss_val.item()
+            metrics.junction_loss += junction_loss_val.item()
             # No correlation tracking
             metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
             metrics.n_usage_marker_sites += usage_corr.get("n_marker_sites", 0)
@@ -346,6 +392,8 @@ def train_epoch_splice(
                 avg = metrics.loss / metrics.n_batches
                 avg_cls = metrics.cls_loss / metrics.n_batches
                 avg_usg = metrics.usage_loss / metrics.n_batches
+                avg_jx = metrics.junction_loss / metrics.n_batches
+                junction_str = f"  junction={avg_jx:.4f}" if junction_weight > 0 else ""
                 # Compute rolling average of recent batch times (in seconds)
                 avg_batch_time = sum(recent_batch_times) / len(recent_batch_times) if recent_batch_times else 0.0
                 elapsed = time.perf_counter() - step_start
@@ -368,7 +416,7 @@ def train_epoch_splice(
                 usage_tcontrast_str = f" tissue_contrast={usage_tcontrast:.4f}" if usage_tcontrast is not None else ""
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
-                    f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" +
+                    f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" + junction_str +
                     usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str + usage_trmse_str +
                     usage_tcontrast_str +
                     f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
@@ -382,6 +430,8 @@ def train_epoch_splice(
                     "steps_per_sec": sps,
                     "avg_batch_time_s": avg_batch_time,
                 }
+                if junction_weight > 0:
+                    log_metrics["train_junction_loss"] = avg_jx
                 if usage_bce is not None:
                     log_metrics["train_usage_bce_loss"] = usage_bce
                 if usage_delta is not None:
@@ -421,6 +471,7 @@ def train_epoch_splice(
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
+        metrics.junction_loss /= metrics.n_batches
     metrics.elapsed_s = time.perf_counter() - epoch_start
 
     if n_usage_bce_batches > 0:
@@ -475,6 +526,8 @@ def validate_splice(
     usage_delta_from_mean: bool = False,
     usage_loss_weights: dict | None = None,
     tissue_cond_groups: "list | dict | None" = None,
+    junction_head: "nn.Module | dict[int, nn.Module] | None" = None,
+    junction_weight: float = 0.0,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -491,6 +544,8 @@ def validate_splice(
         usage_weight: Usage loss weight (default: 1.0).
         class_weights: Optional class weights for classification loss.
         use_amp: Use ``torch.amp.autocast`` (default: ``True``).
+        junction_head: Optional junction head(s); see :func:`train_epoch_splice`.
+        junction_weight: Junction loss weight (default 0: off).
 
     Returns:
         :class:`SpliceTrainMetrics` averaged over the validation set.
@@ -605,6 +660,11 @@ def validate_splice(
 
             total_loss = total_loss + usage_weight * usage_loss_val
 
+            junction_loss_val = torch.tensor(0.0, device=device)
+            if junction_weight > 0:
+                junction_loss_val = _junction_loss(junction_head, emb_1bp, org_idx, batch, device)
+                total_loss = total_loss + junction_weight * junction_loss_val
+
         if not torch.isfinite(total_loss):
             print(
                 f"  WARNING: Non-finite validation loss at batch {batch_idx+1} "
@@ -616,6 +676,7 @@ def validate_splice(
         metrics.loss += total_loss.item()
         metrics.cls_loss += cls_loss_val.item()
         metrics.usage_loss += usage_loss_val.item()
+        metrics.junction_loss += junction_loss_val.item()
         # No correlation tracking
         metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
         metrics.n_usage_marker_sites += usage_corr.get("n_marker_sites", 0)
@@ -626,6 +687,7 @@ def validate_splice(
                 "loss": 0.0,
                 "cls_loss": 0.0,
                 "usage_loss": 0.0,
+                "junction_loss": 0.0,
                 "traj_corr": 0.0,
                 "n_traj_corr": 0.0,
                 "traj_rmse": 0.0,
@@ -637,6 +699,7 @@ def validate_splice(
         species_sums[batch_org]["loss"] += total_loss.item()
         species_sums[batch_org]["cls_loss"] += cls_loss_val.item()
         species_sums[batch_org]["usage_loss"] += usage_loss_val.item()
+        species_sums[batch_org]["junction_loss"] += junction_loss_val.item()
         _tc = usage_corr.get("trajectory_corr")
         if _tc is not None and math.isfinite(_tc):
             species_sums[batch_org]["traj_corr"] += _tc
@@ -664,6 +727,7 @@ def validate_splice(
         metrics.loss /= metrics.n_batches
         metrics.cls_loss /= metrics.n_batches
         metrics.usage_loss /= metrics.n_batches
+        metrics.junction_loss /= metrics.n_batches
     metrics.elapsed_s = time.perf_counter() - val_start
 
     if n_usage_bce_batches > 0:
@@ -687,6 +751,8 @@ def validate_splice(
                 "val_cls_loss": sums["cls_loss"] / n_batches,
                 "val_usage_loss": sums["usage_loss"] / n_batches,
             }
+            if junction_weight > 0:
+                sm["val_junction_loss"] = sums["junction_loss"] / n_batches
             if sums["n_traj_corr"] > 0:
                 sm["val_usage_trajectory_corr"] = sums["traj_corr"] / sums["n_traj_corr"]
             if sums["n_traj_rmse"] > 0:
