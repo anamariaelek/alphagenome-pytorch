@@ -238,7 +238,7 @@ batch_size: 4
 device: cuda
 ```
 
-Then run a wrapper script `scripts/evaluate_splice_brawand_submit.sh` to evaluate predictions for all species.
+Then evaluate predictions for all species with `slurm/submit.sh evaluate_splice_brawand <RUN>` (see `slurm/jobs/evaluate_splice_brawand.sh`).
 
 
 ## Post-Prediction Analysis

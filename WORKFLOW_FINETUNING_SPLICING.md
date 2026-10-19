@@ -200,10 +200,10 @@ Finetune model for multiple species:
 python -u scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
 ```
 
-`finetune_splice_submit.sh` / `finetune_splice_submit_*.sh` are SLURM submission wrappers around `finetune_splice.py`. The suffix encodes which species are included in that training run (`h`=human, `m`=mouse, `r`=rat, `b`=rabbit, `o`=opossum, `c`=chicken).
+On a cluster (Helix, bwUniCluster3) or the workstation, submit with the cluster-agnostic wrapper in [`slurm/`](slurm/README.md), which takes the config as an argument. Config names encode the training species (`h`=human, `q`=macaque, `m`=mouse, `r`=rat, `b`=rabbit, `o`=opossum, `c`=chicken). See `slurm/README.md` for resource values that have worked per config.
 
 ```bash
-sbatch scripts/finetune_splice_submit_hmrro.sh
+slurm/submit.sh --gpu-mem 80 --mem 24G --time 36:00:00 finetune_splice configs/hqmrboc_132kb.yaml
 ```
 
 `finetune_splice_synthetic.py` reproduces the splice fine-tuning GPU workload (forward → loss → backward → optimizer step) with random weights and synthetic batches, for isolating training-loop performance from data loading.
@@ -413,10 +413,10 @@ All three can run against already-saved predictions via `--skip-predictions`
   *contrast between* a tissue and the rest — the two answer different questions and
   can be combined freely.
 
-`evaluate_splice_submit.sh` is a SLURM wrapper that runs `evaluate_splice.py` for every species in a model's training set in turn, writing each species' output under `<run>/<pred_dir>/<species>/`.
+`slurm/jobs/evaluate_splice.sh` runs `evaluate_splice.py` for every species in a model's training set in turn (`TRAIN_SPECIES`), plus any held-out species with `--cross-species-usage` (`HELDOUT_SPECIES`), writing each species' output under `evals/<run>/preds_<DATA_TAG>/<species>/`.
 
 ```bash
-sbatch scripts/evaluate_splice_submit.sh
+slurm/submit.sh --gpu-mem 40 --mem 40G --time 12:00:00 evaluate_splice lora_64_emb_traj_hqmrboc___524kb
 ```
 
 `predict_splice_site.py` predicts splice-site classification probabilities for a single genomic region — a

@@ -12,15 +12,15 @@
 # Checkpoint fallback: if eval.log has no usable "Checkpoint   :" line (missing/truncated
 # log) or the recorded path no longer exists (e.g. checkpoints later reorganised under
 # models/), falls back to models/<RUN>/ -- the same directory-style --checkpoint path the
-# submit scripts already use -- where <RUN> is found by walking up from the species folder
+# slurm/jobs/evaluate_splice.sh uses -- where <RUN> is found by walking up from the species folder
 # past any number of preds_*-named ancestors (.../<RUN>/preds_*/<species>/, or
 # .../<RUN>/preds_*/preds_*/<species>/ for an older nested layout a few nested runs used).
 # Only used if models/<RUN>/best_model.pth actually exists, so a wrong guess never produces
 # a bad job line, just no fallback.
 #
 # data_config fallback: same idea, guessing data/data_config_<X>.json from the pred_dir
-# name (preds_<X> -- matching the PRED_DIR=preds_${TIMESTAMP} / DATA_CONFIG=data_config_
-# ${TIMESTAMP}.json convention the submit scripts already use), also trying with a leading
+# name (preds_<X> -- matching the PRED_DIR=preds_${DATA_TAG} / DATA_CONFIG=data_config_
+# ${DATA_TAG}.json convention the slurm/jobs/evaluate_splice.sh uses), also trying with a leading
 # "all_" or trailing "_all" token stripped (a few historical runs' pred_dir names don't
 # exactly match their data_config's). Only used if the guessed file actually exists.
 # Neither fallback is needed for a directory whose eval.log is intact -- both only kick in

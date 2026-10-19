@@ -78,7 +78,9 @@ docs/_build/
 src/alphagenome_pytorch/_version.py
 
 ._*
-slurm*
+# Slurm job logs (not the slurm/ job scripts)
+slurm_*
+slurm-*.out
 logs*
 tmp
 examples/notebooks/*png
