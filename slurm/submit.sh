@@ -7,7 +7,8 @@
 #
 # Options (all optional):
 #   --gpu-mem N  GPU memory in GB (default 40). On Helix it becomes gpumem_per_gpu:NGB;
-#                on UC3 it is ignored, since the partition determines the GPU.
+#                on UC3 it is ignored, since the partition determines the GPU; on HoreKa
+#                it only picks the default partition (<=40: A100, <=80: H100, else H200).
 #   --cpu        CPU-only job: no GPU requested, the cluster's CPU partition is used
 #   --mem M      host memory, e.g. 24G (default 32G)
 #   --cpus N     cpus-per-task (default 2)
@@ -18,7 +19,7 @@
 #   --sbatch-arg X  extra raw sbatch argument, repeatable (e.g. --sbatch-arg --dependency=afterok:123)
 #   --dry-run    print the command instead of running it
 #
-# The cluster comes from $AG_CLUSTER (helix|uc3|sasselab3), or else from the hostname;
+# The cluster comes from $AG_CLUSTER (helix|uc3|horeka|sasselab3), or else from the hostname;
 # see slurm/clusters/. On sasselab3 there is no Slurm: the job runs in the background
 # with nohup, and the resource options are ignored.
 #
@@ -103,7 +104,8 @@ if [[ "${AG_USE_SLURM}" == 1 ]]; then
     EXPORT_VARS=("AG_ROOT=${AG_ROOT}" "AG_CLUSTER=${AG_CLUSTER}" "AG_REQUIRE_CUDA=$((1 - CPU_ONLY))")
     for v in AG_CONDA_SH AG_CONDA_ENV DATA_TAG TRAIN_SPECIES HELDOUT_SPECIES BATCH_SIZE \
              HELDOUT_BATCH_SIZE MAX_WINDOWS CHECKPOINT_PATH PRED_DIR RESUME MIN_COUNT \
-             MIN_COVERAGE MIN_REPRODUCIBILITY ORGANISMS SPECIES SPLISER_DIR; do
+             MIN_COVERAGE MIN_REPRODUCIBILITY ORGANISMS SPECIES SPLISER_DIR \
+             AG_SDS_REMOTE AG_SDS_MOUNT; do
         # ${!v+isset}, not ${!v:-}: RESUME= (set but empty) is a meaningful override
         # (disables auto-resume) distinct from RESUME being unset entirely.
         [[ "${!v+isset}" == "isset" ]] && EXPORT_VARS+=("${v}=${!v}")

@@ -1,4 +1,4 @@
-# Job submission (Helix, bwUniCluster3, sasselab3)
+# Job submission (Helix, bwUniCluster3, HoreKa, sasselab3)
 
 Python entry points live in `scripts/`. This directory holds the batch-job layer around them.
 It is split by layer, not by cluster:
@@ -11,6 +11,7 @@ slurm/
     detect.sh          # sets AG_CLUSTER from $AG_CLUSTER or the hostname
     helix.sh           # partition/gres syntax + modules for Helix
     uc3.sh             # ... for bwUniCluster 3.0
+    horeka.sh          # ... for HoreKa (KIT), incl. per-job rclone mount of ~/sds
     sasselab3.sh       # no Slurm: runs the job directly with nohup
   jobs/                # cluster-agnostic job bodies, parameterised by arguments/env
     finetune_splice.sh  evaluate_splice.sh  evaluate_splice_brawand.sh  predict_region.sh
@@ -25,7 +26,7 @@ them as flags.
 Add this to `~/.bashrc` (if it's missing, `submit.sh` falls back to hostname matching):
 
 ```bash
-export AG_CLUSTER=helix        # or uc3, sasselab3
+export AG_CLUSTER=helix        # or uc3, horeka, sasselab3
 # export AG_SLURM_ACCOUNT=...  # only if the cluster needs --account
 ```
 
@@ -44,6 +45,27 @@ env name, set `AG_CONDA_SH` / `AG_CONDA_ENV`.
   `slurm/submit.sh --partition dev_gpu_h100 --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`
   (check the dev partition name in `sinfo -s`).
 
+**HoreKa, first use:**
+- **Keep the code checkout outside `~/sds`.** sds is rclone-mounted at `~/sds` on the login
+  node only, so on a compute node `~/sds` is an empty directory. `clusters/horeka.sh` mounts
+  it again at the same path at the start of each job, so the `$HOME/sds/...` paths in
+  configs keep working. The job reads `slurm/env.sh` before that mount exists, so clone the
+  repo into `$HOME` or a workspace and submit from that clone.
+- **rclone remote.** The job uses the `sds-sftp:` remote. Check the name with
+  `rclone listremotes`; if yours differs, export `AG_SDS_REMOTE=<name>:` before submitting
+  (`submit.sh` forwards it).
+- **Mounting from a compute node.** Check that `rclone` and `fusermount` work there before a
+  long run, e.g. `slurm/submit.sh --partition dev_accelerated --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`.
+  The dev queues allow one job at a time and at most 1 hour (4 hours for `dev_cpuonly`).
+- **Writes to `~/sds`.** Checkpoints written there go through rclone's cache in `$TMPDIR` and
+  are uploaded in the background. At job end the mount is released and the job waits up
+  to 10 minutes for rclone to finish uploading. For long runs, an `output_dir` on a
+  HoreKa workspace avoids this.
+- **Conda env.** Create the env on HoreKa's own `$HOME`:
+  `conda env create -f env_alphagenome_pytorch_genomicsxai.yml`.
+- **Account.** If your user belongs to more than one project, set `AG_SLURM_ACCOUNT`.
+- **Limits.** GPU partitions allow at most 2 days per job, and `cpuonly` 3 days.
+
 ## Usage
 
 ```bash
@@ -56,6 +78,8 @@ HELDOUT_SPECIES="rat rabbit" TRAIN_SPECIES="human mouse" slurm/submit.sh evaluat
 slurm/submit.sh --dry-run ...    # print the command without running it
 ```
 
+- On HoreKa, `--gpu-mem` only selects the default partition: up to 40 picks `accelerated`
+  (A100), up to 80 picks `accelerated-h100`, and anything larger picks `accelerated-h200`.
 - `--gpu-mem` maps to `gpumem_per_gpu:<N>GB` on Helix. UC3 ignores it, because there the
   partition selects the GPU.
 - Logs go to `logs/slurm/<job-name>_<jobid>.log`, with stdout and stderr in one file.
