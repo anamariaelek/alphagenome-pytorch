@@ -47,13 +47,16 @@ env name, set `AG_CONDA_SH` / `AG_CONDA_ENV`.
 
 **HoreKa, first use:**
 - **Keep the code checkout outside `~/sds`.** sds is rclone-mounted at `~/sds` on the login
-  node only, so on a compute node `~/sds` is an empty directory. `clusters/horeka.sh` mounts
-  it again at the same path at the start of each job, so the `$HOME/sds/...` paths in
-  configs keep working. The job reads `slurm/env.sh` before that mount exists, so clone the
-  repo into `$HOME` or a workspace and submit from that clone.
+  node only. Each job mounts it again in its own `$TMPDIR` and sets `HOME` to a per-job
+  directory that links everything in your real home except `sds`, which is the job's mount.
+  The `$HOME/sds/...` paths in configs keep working, a dead `~/sds` mount left on a node by
+  an earlier job doesn't matter, and jobs sharing a node don't interfere. The job reads
+  `slurm/env.sh` before mounting, so clone the repo into `$HOME` or a workspace and submit
+  from that clone.
 - **rclone remote.** The job uses the `sds-sftp:` remote. Check the name with
   `rclone listremotes`; if yours differs, export `AG_SDS_REMOTE=<name>:` before submitting
-  (`submit.sh` forwards it).
+  (`submit.sh` forwards it). The job looks for `rclone` on `PATH`, then in `~/bin` and
+  `~/.local/bin`; set `AG_RCLONE=/path/to/rclone` otherwise.
 - **Mounting from a compute node.** Check that `rclone` and `fusermount` work there before a
   long run, e.g. `slurm/submit.sh --partition dev_accelerated --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`.
   The dev queues allow one job at a time and at most 1 hour (4 hours for `dev_cpuonly`).

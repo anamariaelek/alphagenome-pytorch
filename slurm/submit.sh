@@ -105,7 +105,7 @@ if [[ "${AG_USE_SLURM}" == 1 ]]; then
     for v in AG_CONDA_SH AG_CONDA_ENV DATA_TAG TRAIN_SPECIES HELDOUT_SPECIES BATCH_SIZE \
              HELDOUT_BATCH_SIZE MAX_WINDOWS CHECKPOINT_PATH PRED_DIR RESUME COMPILE MIN_COUNT \
              MIN_COVERAGE MIN_REPRODUCIBILITY ORGANISMS SPECIES SPLISER_DIR \
-             AG_SDS_REMOTE AG_SDS_MOUNT; do
+             AG_SDS_REMOTE AG_RCLONE; do
         # ${!v+isset}, not ${!v:-}: RESUME= (set but empty) is a meaningful override
         # (disables auto-resume) distinct from RESUME being unset entirely.
         [[ "${!v+isset}" == "isset" ]] && EXPORT_VARS+=("${v}=${!v}")
