@@ -290,3 +290,18 @@ def test_junction_tissue_init_matches_by_name(tmp_path):
     torch.testing.assert_close(rope[:, 0], src[:, 0])                      # testis
     torch.testing.assert_close(rope[:, 1], src[:, 1:3].mean(dim=1))        # liver
     torch.testing.assert_close(rope[:, 2], src.mean(dim=1))                # unmatched → mean
+
+
+def test_converter_skips_conditions_missing_from_labels(tmp_path):
+    df = _spliser_rows()
+    df["Gene"] = "G"
+    kept = tmp_path / "Human.Brain.1.combined.tsv"
+    df.to_csv(kept, sep="\t", index=False)
+    empty = tmp_path / "Human.Liver.13.combined.tsv"
+    df.iloc[:0].to_csv(empty, sep="\t", index=False)
+    out = tmp_path / "junctions.parquet"
+    convert_spliser_to_junction_parquet([kept, empty], out, condition_labels={"Brain_1": 0})
+    assert set(pd.read_parquet(out)["Condition"]) == {0}
+    # Without labels, the empty file contributes no condition either.
+    convert_spliser_to_junction_parquet([kept, empty], out)
+    assert json.loads(out.with_suffix(".json").read_text())["condition_labels"] == {"Brain_1": 0}

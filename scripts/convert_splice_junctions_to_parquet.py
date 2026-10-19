@@ -130,8 +130,10 @@ def convert_spliser_to_junction_parquet(
         output_path: Destination ``junctions.parquet``.
         tissue_index, timepoint_index: Position of tissue / timepoint in the
             dot-split filename (as in ``convert_splice_usage_to_parquet.py``).
-        condition_labels: ``Tissue_Timepoint`` → index.  When ``None`` it is
-            built from the files in alphabetical order (as for usage files).
+        condition_labels: ``Tissue_Timepoint`` → index.  When given, files
+            for conditions not in it are skipped (e.g. empty files that the
+            usage converter skipped as well).  When ``None`` it is built from
+            the non-empty files in alphabetical order (as for usage files).
         compression: Parquet compression codec.
         strip_chr: Remove ``chr`` prefix from chromosome names.
         min_count: Minimum split-read count per (junction, sample).
@@ -148,7 +150,10 @@ def convert_spliser_to_junction_parquet(
     for p in tsv_files:
         tissue, timepoint = _parse_tissue_timepoint(p.name, tissue_index, timepoint_index)
         key = f"{tissue}_{timepoint}"
-        keys.add(key)
+        if condition_labels is not None and key not in condition_labels:
+            # e.g. an empty .combined.tsv, which the usage converter skips too
+            print(f"  {p.name}: skipped, {key} is not a condition of the usage file")
+            continue
         t0 = time.perf_counter()
         df = pd.read_csv(p, sep="\t", usecols=["Sample", "Region", "Site", "Strand", "Partners"],
                          dtype={"Sample": str, "Region": str, "Site": "Int64", "Strand": str,
@@ -160,6 +165,10 @@ def convert_spliser_to_junction_parquet(
         n_raw = len(jx)
         jx = jx[jx["Count"] >= min_count]
         jx = filter_reproducible(jx, min_reproducibility)
+        if len(jx) == 0:
+            print(f"  {p.name}: no junctions, skipped")
+            continue
+        keys.add(key)
         jx["Condition_Key"] = key
         chunks.append(jx)
         print(f"  {p.name}: {n_raw:,} → {len(jx):,} (junction, sample) rows "
@@ -170,9 +179,9 @@ def convert_spliser_to_junction_parquet(
 
     if condition_labels is None:
         condition_labels = {c: i for i, c in enumerate(sorted(keys))}
-    unknown = keys - set(condition_labels)
-    if unknown:
-        raise ValueError(f"Conditions missing from condition_labels: {sorted(unknown)}")
+    missing = sorted(set(condition_labels) - keys)
+    if missing:
+        print(f"  Note: no junctions for conditions {missing} (no or empty .combined.tsv)")
     df["Condition"] = df["Condition_Key"].map(condition_labels).astype(np.int32)
 
     df = df.rename(columns={"Region": "Chromosome"})
