@@ -22,6 +22,12 @@
 # see slurm/clusters/. On sasselab3 there is no Slurm: the job runs in the background
 # with nohup, and the resource options are ignored.
 #
+# Jobs get a clean environment (--export=NONE) plus AG_ROOT/AG_CLUSTER/AG_REQUIRE_CUDA
+# and a known allowlist of job-script overrides (DATA_TAG, RESUME, BATCH_SIZE, ...; see
+# EXPORT_VARS below) -- NOT the submitting shell's full environment. On UC3, forwarding
+# everything (--export=ALL) from a shell with conda already activated makes the job sit
+# PENDING forever with reason "user env retrieval error".
+#
 # Examples:
 #   slurm/submit.sh --gpu-mem 80 --mem 24G --time 36:00:00 finetune_splice configs/hqmrboc_132kb.yaml
 #   slurm/submit.sh --gpu-mem 40 --mem 40G --time 12:00:00 evaluate_splice lora_64_emb_traj_hqmrboc___524kb
@@ -94,6 +100,14 @@ if [[ "${AG_USE_SLURM}" == 1 ]]; then
     else
         GPU_ARGS=($(cluster_gpu_args "${GPU_MEM}" ${PARTITION:+"${PARTITION}"}))
     fi
+    EXPORT_VARS=("AG_ROOT=${AG_ROOT}" "AG_CLUSTER=${AG_CLUSTER}" "AG_REQUIRE_CUDA=$((1 - CPU_ONLY))")
+    for v in AG_CONDA_SH AG_CONDA_ENV DATA_TAG TRAIN_SPECIES HELDOUT_SPECIES BATCH_SIZE \
+             HELDOUT_BATCH_SIZE MAX_WINDOWS CHECKPOINT_PATH PRED_DIR RESUME MIN_COUNT \
+             MIN_COVERAGE MIN_REPRODUCIBILITY ORGANISMS SPECIES SPLISER_DIR; do
+        # ${!v+isset}, not ${!v:-}: RESUME= (set but empty) is a meaningful override
+        # (disables auto-resume) distinct from RESUME being unset entirely.
+        [[ "${!v+isset}" == "isset" ]] && EXPORT_VARS+=("${v}=${!v}")
+    done
     CMD=(sbatch
         --job-name="${NAME}"
         "${GPU_ARGS[@]}"
@@ -101,7 +115,7 @@ if [[ "${AG_USE_SLURM}" == 1 ]]; then
         --mem="${MEM}"
         --time="${TIME}"
         --output="${LOG_DIR}/%x_%j.log"
-        --export=ALL,AG_ROOT="${AG_ROOT}",AG_CLUSTER="${AG_CLUSTER}",AG_REQUIRE_CUDA="$((1 - CPU_ONLY))")
+        --export="NONE,$(IFS=,; echo "${EXPORT_VARS[*]}")")
     [[ -n "${ACCOUNT}" ]] && CMD+=(--account="${ACCOUNT}")
     CMD+=(${EXTRA[@]+"${EXTRA[@]}"} "${JOB_SCRIPT}" "$@")
     echo "[${AG_CLUSTER}] submitting ${NAME}"
