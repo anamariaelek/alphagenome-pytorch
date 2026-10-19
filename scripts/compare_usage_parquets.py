@@ -45,6 +45,9 @@ VALUES = ["SSE", "Alpha", "Beta"]
 def _load(path: Path) -> tuple[pd.DataFrame, dict]:
     df = pd.read_parquet(path)
     df["Chromosome"] = df["Chromosome"].astype(str)
+    # Unstranded Spliser data (Strand "?", e.g. Brawand) has no Label at all; use a
+    # sentinel so groupby/merge/equality treat these rows like any other label.
+    df["Label"] = df["Label"].fillna(-1).astype(int)
     with open(path.with_suffix(".json")) as f:
         meta = json.load(f)
     return df, meta
