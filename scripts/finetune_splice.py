@@ -651,6 +651,13 @@ def parse_args() -> argparse.Namespace:
     # torch.cuda.set_per_process_memory_fraction). Useful to leave headroom / share a GPU.
     args.cuda_memory_fraction = float(config_data.get("cuda_memory_fraction", 1.0) or 1.0)
 
+    # New organism index → pretrained organism index whose embeddings and head
+    # weights it starts from (e.g. rat from mouse). Unset → identity mapping.
+    raw_init = config_data.get("organism_embedding_init")
+    args.organism_embedding_init = (
+        {int(k): int(v) for k, v in raw_init.items()} if raw_init else None
+    )
+
     # Pretrained organism index → AlphaGenome track metadata CSV, used to start each
     # junction-head condition from the pretrained tracks of the same tissue.
     args.junction_init_metadata = {
@@ -1370,6 +1377,7 @@ def main() -> None:
         "oversample_species": args.oversample_species,
         "usage_loss_weights": getattr(args, "usage_loss_weights", None),
         "usage_traj_warmup_epochs": getattr(args, "usage_traj_warmup_epochs", 0),
+        "organism_embedding_init": args.organism_embedding_init,
         "species_n_conditions": species_n_conditions,
         "species_n_junction_conditions": species_n_junction_conditions,
         "max_junction_sites": args.max_junction_sites,
