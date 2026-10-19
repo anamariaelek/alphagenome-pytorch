@@ -45,6 +45,7 @@ Example
 from __future__ import annotations
 
 import math
+import resource
 import time
 
 from contextlib import nullcontext
@@ -414,12 +415,16 @@ def train_epoch_splice(
                 usage_tcorr_str = f" traj_r={usage_tcorr:.3f}" if usage_tcorr is not None else ""
                 usage_trmse_str = f" traj_rmse={usage_trmse:.4f}" if usage_trmse is not None else ""
                 usage_tcontrast_str = f" tissue_contrast={usage_tcontrast:.4f}" if usage_tcontrast is not None else ""
+                # Peak RSS so far (never decreases) -- cheap way to see host-memory
+                # growth trends directly in the training log, e.g. to tell a genuine
+                # per-step leak apart from a one-time startup/warmup cost.
+                rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
                 print(
                     f"  Epoch {epoch} step {step:5d} | "
                     f"loss={avg:.4f}  cls={avg_cls:.4f}  usage={avg_usg:.4f}" + junction_str +
                     usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str + usage_trmse_str +
                     usage_tcontrast_str +
-                    f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s"
+                    f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s  rss_peak={rss_gb:.2f}GB"
                 )
                 # Add to logger
                 log_metrics = {

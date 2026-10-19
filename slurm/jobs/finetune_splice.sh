@@ -10,6 +10,14 @@
 # CONFIG may be absolute or relative to the repo root. Any extra arguments are passed on
 # to finetune_splice.py. RESUME (env) defaults to "auto" (latest epoch_*.pth in the run
 # dir); set RESUME=path/to/checkpoint.pth or RESUME= (empty) to override.
+#
+# COMPILE (env) defaults to 1 (torch.compile the model); set COMPILE=0 to disable it.
+# With species-grouped multi-species batches, dynamo appears to compile and permanently
+# cache a separate graph per newly-encountered species rather than reusing one graph
+# (observed as a handful of discrete, several-GB host-memory step increases -- one per
+# species transition, each followed by a long flat plateau -- eventually OOM-killing a
+# full 7-species run). Set COMPILE=0 until that's root-caused (e.g. via
+# TORCH_LOGS=recompiles) and fixed, e.g. with torch.compile(model, dynamic=True).
 
 source "${AG_ROOT:-${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code}/slurm/env.sh"
 
@@ -42,16 +50,21 @@ RESUME=${RESUME-auto}
 RESUME_ARGS=()
 [[ -n "${RESUME}" ]] && RESUME_ARGS=(--resume "${RESUME}")
 
+COMPILE=${COMPILE:-1}
+COMPILE_ARGS=()
+[[ "${COMPILE}" == 1 ]] && COMPILE_ARGS=(--compile)
+
 echo "Starting finetuning at $(date)"
 echo "Config: ${CONFIG}"
 echo "Resume: ${RESUME:-<none>}"
+echo "Compile: ${COMPILE}"
 echo "Log file: ${LOG_FILE}"
 echo "---"
 
 # Python's setup_output_logging will handle the tee to LOG_FILE
 python -u "${AG_ROOT}/scripts/finetune_splice.py" \
     --config "${CONFIG}" \
-    --compile \
+    "${COMPILE_ARGS[@]}" \
     "${RESUME_ARGS[@]}" \
     --log-file "${LOG_FILE}" \
     "$@"
