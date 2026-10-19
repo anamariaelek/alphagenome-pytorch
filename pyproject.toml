@@ -40,6 +40,13 @@ jax = [
 finetuning = [
     "pybigwig",
     "pandas",
+    "pyarrow",
+    "pyyaml",
+    "safetensors",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
     "tqdm",
     "pyfaidx",
 ]
