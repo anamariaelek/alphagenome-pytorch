@@ -52,7 +52,14 @@ RESUME_ARGS=()
 
 COMPILE=${COMPILE:-1}
 COMPILE_ARGS=()
-[[ "${COMPILE}" == 1 ]] && COMPILE_ARGS=(--compile)
+# --no-compile is required to actually disable it: a bare absence of --compile
+# falls through to the config.yaml's own compile:true, so COMPILE=0 must pass
+# the explicit override flag rather than just omitting --compile.
+if [[ "${COMPILE}" == 1 ]]; then
+    COMPILE_ARGS=(--compile)
+else
+    COMPILE_ARGS=(--no-compile)
+fi
 
 echo "Starting finetuning at $(date)"
 echo "Config: ${CONFIG}"

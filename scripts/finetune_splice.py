@@ -439,6 +439,11 @@ def parse_args() -> argparse.Namespace:
     )
     train_grp.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision")
     train_grp.add_argument("--compile", action="store_true", help="Use torch.compile on the model")
+    train_grp.add_argument(
+        "--no-compile", action="store_true",
+        help="Force-disable torch.compile, overriding a config.yaml compile:true (--compile alone cannot "
+             "turn it off since omitting it just falls through to the config value)",
+    )
     train_grp.add_argument("--seed", type=int, default=None, help="Random seed")
 
     # Logging arguments
@@ -562,6 +567,9 @@ def parse_args() -> argparse.Namespace:
         "resume",
     ):
         _apply_config_scalar(attr, config_data)
+
+    if args.no_compile:
+        args.compile = False
 
     if "--no-amp" not in cli_flags:
         if "use_amp" in config_data:
