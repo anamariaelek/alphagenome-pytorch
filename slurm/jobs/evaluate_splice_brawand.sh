@@ -9,7 +9,7 @@
 #
 # Positional: RUN (directory under ${AG_DATA}/)
 # Env overrides: DATA_TAG (default intersect_protein_coding), SPECIES, BATCH_SIZE (6),
-#                MAX_WINDOWS (1000), CHECKPOINT_PATH
+#                MAX_WINDOWS (default: unset -- evaluate every window), CHECKPOINT_PATH
 
 source "${AG_ROOT:-${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code}/slurm/env.sh"
 
@@ -17,7 +17,9 @@ RUN=${1:?usage: evaluate_splice_brawand.sh RUN}
 DATA_TAG=${DATA_TAG:-intersect_protein_coding}
 SPECIES=${SPECIES:-human gorilla chimpanzee bonobo macaque mouse}
 BATCH_SIZE=${BATCH_SIZE:-6}
-MAX_WINDOWS=${MAX_WINDOWS:-1000}
+MAX_WINDOWS=${MAX_WINDOWS-}
+MAX_WINDOWS_ARGS=()
+[[ -n "${MAX_WINDOWS}" ]] && MAX_WINDOWS_ARGS=(--max-windows "${MAX_WINDOWS}")
 
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-${AG_DATA}/${RUN}}
 PRED_DIR=${PRED_DIR:-preds_${DATA_TAG}}
@@ -34,7 +36,7 @@ for EVAL_SPECIES in ${SPECIES}; do
         --observed-conditions-only \
         --overwrite \
         --batch-size "${BATCH_SIZE}" \
-        --max-windows "${MAX_WINDOWS}" \
+        "${MAX_WINDOWS_ARGS[@]}" \
         --device cuda \
         --seed 1950 \
         --output-dir "${OUT_DIR}"

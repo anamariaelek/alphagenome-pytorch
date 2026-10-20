@@ -16,7 +16,7 @@
 #   TRAIN_SPECIES    species the model was trained on      (default: all 7)
 #   HELDOUT_SPECIES  left-out species, evaluated with --cross-species-usage (default: none)
 #   BATCH_SIZE       (default 3)   HELDOUT_BATCH_SIZE (default 6)
-#   MAX_WINDOWS      (default 1000)
+#   MAX_WINDOWS      (default: unset -- evaluate every window, no subsampling)
 #   CHECKPOINT_PATH  override the checkpoint (e.g. ${AG_ROOT}/checkpoints/pretrained.pth for
 #                    a sanity check; then also set PRED_DIR=preds_pretrained_<tag>)
 
@@ -28,7 +28,9 @@ TRAIN_SPECIES=${TRAIN_SPECIES:-human mouse macaque rat rabbit opossum chicken}
 HELDOUT_SPECIES=${HELDOUT_SPECIES:-}
 BATCH_SIZE=${BATCH_SIZE:-3}
 HELDOUT_BATCH_SIZE=${HELDOUT_BATCH_SIZE:-6}
-MAX_WINDOWS=${MAX_WINDOWS:-1000}
+MAX_WINDOWS=${MAX_WINDOWS-}
+MAX_WINDOWS_ARGS=()
+[[ -n "${MAX_WINDOWS}" ]] && MAX_WINDOWS_ARGS=(--max-windows "${MAX_WINDOWS}")
 
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-${AG_DATA}/models/${RUN}}
 PRED_DIR=${PRED_DIR:-preds_${DATA_TAG}}
@@ -54,7 +56,7 @@ for EVAL_SPECIES in ${TRAIN_SPECIES}; do
         --tissue-contrast \
         --overwrite \
         --batch-size "${BATCH_SIZE}" \
-        --max-windows "${MAX_WINDOWS}" \
+        "${MAX_WINDOWS_ARGS[@]}" \
         --device cuda \
         --seed 1950 \
         --output-dir "${OUT_DIR}"
@@ -75,7 +77,7 @@ for EVAL_SPECIES in ${HELDOUT_SPECIES}; do
         --tissue-contrast \
         --overwrite \
         --batch-size "${HELDOUT_BATCH_SIZE}" \
-        --max-windows "${MAX_WINDOWS}" \
+        "${MAX_WINDOWS_ARGS[@]}" \
         --device cuda \
         --seed 1950 \
         --output-dir "${OUT_DIR}"
