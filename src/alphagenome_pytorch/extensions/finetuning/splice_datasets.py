@@ -485,23 +485,32 @@ class SpliceJunctionIndex:
             (``condition_labels``) must sit next to it.
         usage_coord_base: Coordinate base of the parquet (same as for the
             species' usage parquet, since junction ends use its coordinates).
-        replicate_agg: How to combine the samples of a condition: ``"sum"``
-            (pooled reads, default) or ``"mean"`` (sum divided by the number of
-            samples of that condition in the file).
+        count_norm: How raw read counts are turned into targets:
+
+            - ``"cpm"`` (default): divide each sample's counts by its total
+              junction reads (a library-size proxy; Spliser gives no total
+              mapped reads) × 1e6, combine the samples of a condition with
+              *replicate_agg*, clip at the *clip_quantile* quantile of the
+              non-zero values and divide by their mean, so typical non-zero
+              targets are about 1 (as for the pretrained head, which predicts
+              ≈0.6 reads per junction, versus ≈230 raw pooled reads).
+            - ``"none"``: raw counts, combined with *replicate_agg*.
+        replicate_agg: How to combine the samples of a condition: ``"mean"``
+            (default; sum divided by the number of samples of that condition)
+            or ``"sum"`` (pooled reads).
+        clip_quantile: Upper quantile of non-zero targets to clip at (``cpm``).
         min_count: Optional minimum aggregated count per (junction, condition),
-            applied before *count_scale*.
-        count_scale: Factor applied to the aggregated counts.  The pretrained
-            junction head predicts far fewer reads than pooled RNA-seq samples
-            give (≈0.6 vs ≈230 per junction on a human test window), so a scale
-            below 1 lets the pretrained head start near the right magnitude.
-            The ratio terms of the loss do not depend on it.
+            applied after normalisation and before *count_scale*.
+        count_scale: Extra factor applied at the end (default 1).
     """
 
     def __init__(
         self,
         junction_parquet: str | Path,
         usage_coord_base: int = 0,
-        replicate_agg: str = "sum",
+        count_norm: str = "cpm",
+        replicate_agg: str = "mean",
+        clip_quantile: float = 0.9999,
         min_count: float | None = None,
         count_scale: float = 1.0,
     ) -> None:
@@ -514,6 +523,8 @@ class SpliceJunctionIndex:
                 raise FileNotFoundError(f"Required file not found: {p}")
         if replicate_agg not in ("sum", "mean"):
             raise ValueError(f"replicate_agg must be 'sum' or 'mean', got {replicate_agg!r}")
+        if count_norm not in ("cpm", "none"):
+            raise ValueError(f"count_norm must be 'cpm' or 'none', got {count_norm!r}")
 
         with open(junction_json) as f:
             self._condition_labels: dict[str, int] = json.load(f)["condition_labels"]
@@ -522,11 +533,25 @@ class SpliceJunctionIndex:
         df = pd.read_parquet(junction_parquet)
         df["Chromosome"] = df["Chromosome"].astype(str)
         df["Strand"] = df["Strand"].astype(str)
+        df["Count"] = df["Count"].astype(np.float64)
+        if count_norm == "cpm":
+            library = df.groupby(["Condition", "Sample"], observed=True)["Count"].transform("sum")
+            df["Count"] = df["Count"] / library * 1e6
         key = ["Chromosome", "Donor", "Acceptor", "Strand", "Condition"]
         agg = df.groupby(key, as_index=False, observed=True)["Count"].sum()
         if replicate_agg == "mean":
             n_samples = df.groupby("Condition", observed=True)["Sample"].nunique()
             agg["Count"] = agg["Count"] / agg["Condition"].map(n_samples).to_numpy()
+        self.clip_value: float | None = None
+        self.norm_mean: float | None = None
+        if count_norm == "cpm":
+            nonzero = agg["Count"].to_numpy()
+            nonzero = nonzero[nonzero > 0]
+            if len(nonzero):
+                self.clip_value = float(np.quantile(nonzero, clip_quantile))
+                agg["Count"] = agg["Count"].clip(upper=self.clip_value)
+                self.norm_mean = float(agg.loc[agg["Count"] > 0, "Count"].mean())
+                agg["Count"] = agg["Count"] / self.norm_mean
         if min_count is not None:
             agg = agg[agg["Count"] >= min_count]
         agg["Count"] = agg["Count"] * count_scale
@@ -555,6 +580,8 @@ class SpliceJunctionIndex:
             f"SpliceJunctionIndex: loaded {n_junctions:,} junctions "
             f"({len(agg):,} junction×condition entries), {self.n_conditions} conditions "
             f"from {junction_parquet.name}"
+            + (f"; targets: CPM, clipped at {self.clip_value:.4g}, divided by mean {self.norm_mean:.4g}"
+               if self.norm_mean else "")
         )
 
     @property

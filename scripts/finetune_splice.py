@@ -167,7 +167,8 @@ DEFAULTS = {
     "organism_index": 0,
     "max_sites": 1024,
     "max_junction_sites": 256,
-    "junction_replicate_agg": "sum",
+    "junction_count_norm": "cpm",
+    "junction_replicate_agg": "mean",
     "junction_count_scale": 1.0,
     "usage_coord_base": 0,
     "observed_conditions_only": False,
@@ -296,6 +297,14 @@ def parse_args() -> argparse.Namespace:
         help="Length P of each junction site list (donor+/acceptor+/donor-/acceptor-) per window",
     )
     data.add_argument(
+        "--junction-count-norm",
+        type=str,
+        default=DEFAULTS["junction_count_norm"],
+        choices=["cpm", "none"],
+        help="Junction targets: 'cpm' (per-sample CPM, clipped at the 99.99th percentile, "
+             "scaled so typical non-zero values are ~1) or 'none' (raw counts)",
+    )
+    data.add_argument(
         "--junction-replicate-agg",
         type=str,
         default=DEFAULTS["junction_replicate_agg"],
@@ -306,8 +315,7 @@ def parse_args() -> argparse.Namespace:
         "--junction-count-scale",
         type=float,
         default=DEFAULTS["junction_count_scale"],
-        help="Factor applied to junction count targets (the pretrained head predicts "
-             "much smaller counts than pooled samples give; see WORKFLOW_FINETUNING_SPLICING.md)",
+        help="Extra factor applied to junction count targets after --junction-count-norm",
     )
     data.add_argument(
         "--cache-genome",
@@ -528,6 +536,7 @@ def parse_args() -> argparse.Namespace:
         "organism_index",
         "max_sites",
         "max_junction_sites",
+        "junction_count_norm",
         "junction_replicate_agg",
         "junction_count_scale",
         "cache_genome",
@@ -739,6 +748,7 @@ def create_datasets(args: argparse.Namespace, rank: int):
             junction_index = SpliceJunctionIndex(
                 spec["junction_parquet"],
                 usage_coord_base=args.usage_coord_base,
+                count_norm=args.junction_count_norm,
                 replicate_agg=args.junction_replicate_agg,
                 count_scale=args.junction_count_scale,
             )
@@ -1389,6 +1399,7 @@ def main() -> None:
         "species_n_conditions": species_n_conditions,
         "species_n_junction_conditions": species_n_junction_conditions,
         "max_junction_sites": args.max_junction_sites,
+        "junction_count_norm": args.junction_count_norm,
         "junction_replicate_agg": args.junction_replicate_agg,
         "junction_count_scale": args.junction_count_scale,
         "cls_weight": args.cls_weight,

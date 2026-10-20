@@ -200,8 +200,8 @@ usage_traj_warmup_epochs: 1
 # batches train classification + usage only.
 junction_weight: 1.0
 max_junction_sites: 256        # sites per list (donor+, acceptor+, donor-, acceptor-) per window
-junction_replicate_agg: sum    # sum | mean over a condition's samples
-junction_count_scale: 0.01     # pretrained head predicts ~0.6 reads/junction vs ~230 pooled
+junction_count_norm: cpm       # per-sample CPM, clip at 99.99th pct, typical non-zero ~1
+junction_replicate_agg: mean   # mean | sum over a condition's samples
 junction_init_metadata:        # pretrained organism -> track metadata, for tissue-matched init
   0: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_homo_sapiens.csv
   1: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_mus_musculus.csv

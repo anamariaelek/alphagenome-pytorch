@@ -349,8 +349,8 @@ species:
 
 junction_weight: 1.0
 max_junction_sites: 256        # P: sites per list (donor+, acceptor+, donor-, acceptor-) per window
-junction_replicate_agg: sum    # combine a condition's samples: sum | mean
-junction_count_scale: 0.01     # see below
+junction_count_norm: cpm       # see below
+junction_replicate_agg: mean   # combine a condition's samples: mean | sum
 junction_init_metadata:        # pretrained organism -> track metadata, for tissue-matched init
   0: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_homo_sapiens.csv
   1: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_mus_musculus.csv
@@ -358,7 +358,8 @@ junction_init_metadata:        # pretrained organism -> track metadata, for tiss
 
 - **Sites per window.** The four site lists come from the junctions with both ends inside the window's loss-mask region. When a list has more than `max_junction_sites` sites, the ones with the most reads are kept. The head's output is `(B, P, P, 2 × n_conditions)`, so memory grows with `P²`.
 - **Initialisation.** The projection is copied from the pretrained junction head for the organism given by `organism_embedding_init` (human if the pretrained model has no such organism). Each condition's per-tissue parameters are copied from the pretrained tracks of the same tissue (`biosample_name` match, plus the aliases in `JUNCTION_TISSUE_ALIASES` in `finetune_splice.py`; human midbrain uses brain). Without `junction_init_metadata`, every condition starts from the mean over all pretrained tissues instead. That mean is much weaker: the pretrained tissue parameters are nearly orthogonal, and on a test window the mean-initialised head predicted the same count for every pair.
-- **Count scale.** The pretrained head predicts far fewer reads than pooled samples give: about 0.6 versus about 230 per junction on a human test window (summed samples). This mismatch only affects the Poisson terms; the ratio terms are unaffected. On that window the tissue-matched head started at a loss of 54.6 with raw counts, 0.86 with `junction_count_scale: 0.01`, and 0.72 with 0.0025. The mean-initialised head stayed at 17–27 at every scale. The default of 1.0 keeps raw counts.
+- **Targets.** With `junction_count_norm: cpm` (default), each sample's junction counts are divided by its total junction reads (Spliser gives no total mapped reads, so this stands in for library size) and multiplied by 10⁶. The samples of a condition are then averaged, the values are clipped at the 99.99th percentile of the non-zero targets, and divided by their mean, so typical non-zero targets are about 1. This follows the target preparation in [the genomicsxai fine-tuning post](https://genomicsxai.github.io/blogs/2026-009/), and matches the pretrained head's scale: it predicts about 0.6 reads per junction, while raw pooled counts are about 230. `junction_count_norm: none` keeps raw counts, and `junction_count_scale` multiplies the targets afterwards.
+- **Cross-entropy on zero-read sites.** A donor or acceptor with no reads in a condition gets a uniform target distribution (`eps` is added to the counts, as in the JAX loss), so the ratio terms are never negative. An earlier port turned such sites into `log(sum of predictions)`, which drove the junction loss below zero.
 - **Logging and checkpoints.** The loss is logged as `junction` per step, `train_junction_loss`/`val_junction_loss` per epoch and `val_junction_loss_<species>` in validation. The heads are stored in the checkpoint's `model_state_dict` under `splice_sites_junction_head.<organism_index>.*`, and `load_model_for_inference` rebuilds them from `species_n_junction_conditions` in the config.
 
 ## Evaluate

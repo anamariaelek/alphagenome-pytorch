@@ -89,7 +89,7 @@ def test_converter_output(junction_parquet):
 
 
 def test_index_query_and_targets(junction_parquet):
-    index = SpliceJunctionIndex(junction_parquet)
+    index = SpliceJunctionIndex(junction_parquet, count_norm="none", replicate_agg="sum")
     assert index.n_conditions == 2
 
     donor, acceptor, plus, cond, count = index.query("1", 0, 1000)
@@ -305,3 +305,19 @@ def test_converter_skips_conditions_missing_from_labels(tmp_path):
     # Without labels, the empty file contributes no condition either.
     convert_spliser_to_junction_parquet([kept, empty], out)
     assert json.loads(out.with_suffix(".json").read_text())["condition_labels"] == {"Brain_1": 0}
+
+
+def test_index_cpm_normalisation(junction_parquet):
+    index = SpliceJunctionIndex(junction_parquet, clip_quantile=1.0)
+    donor, acceptor, plus, cond, count = index.query("1", 0, 1000)
+    got = dict(zip(zip(donor.tolist(), acceptor.tolist()), count.tolist()))
+    # Library sizes: s1 = 5 + 2 + 4 = 11 reads, s2 = 1 read (2 samples in condition 1).
+    cpm = {
+        (99, 200): (5 / 11 + 1 / 1) * 1e6 / 2,
+        (99, 300): (2 / 11) * 1e6 / 2,
+        (900, 799): (4 / 11) * 1e6 / 2,
+    }
+    mean = sum(cpm.values()) / 3
+    for k, v in cpm.items():
+        assert got[k] == pytest.approx(v / mean, rel=1e-5)
+    assert np.mean(count) == pytest.approx(1.0, rel=1e-5)
