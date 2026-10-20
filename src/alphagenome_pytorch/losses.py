@@ -241,29 +241,35 @@ def cross_entropy_loss(
     eps: float = 1e-7,
 ) -> Tensor:
     """Cross entropy loss on counts.
-    
+
+    Mirrors ``alphagenome_research.model.losses.cross_entropy_loss``: *eps* is
+    added to both counts before normalising along *axis*, so a slice with no
+    true counts gets a uniform target distribution (and a non-negative loss)
+    rather than contributing ``log(sum(y_pred))``.
+
     Args:
         y_true: Target counts.
         y_pred: Predicted counts.
-        mask: Boolean mask.
-        axis: Axis for normalization.
-        eps: Small epsilon for numerical stability.
-        
+        mask: Boolean mask, broadcastable to ``y_true``.
+        axis: Axis to normalise over.
+        eps: Small epsilon added to both counts.
+
     Returns:
-        Scalar loss.
+        Scalar loss: mean over slices along *axis* that have any unmasked entry.
     """
-    mask = mask.expand_as(y_true)
+    y_true = y_true.float() + eps
+    y_pred = y_pred.float() + eps
+    mask = mask.expand_as(y_true).bool()
     assert y_true.shape == y_pred.shape == mask.shape
-    
-    y_true = torch.where(mask, y_true.float(), torch.zeros_like(y_true.float()))
-    p_true = y_true / torch.clamp(y_true.sum(dim=axis, keepdim=True), min=eps)
-    
-    masked_pred = torch.where(mask, y_pred, torch.zeros_like(y_pred))
-    log_normalizer = torch.log((masked_pred + eps).sum(dim=axis))
-    log_likelihood = (p_true * torch.log(y_pred + eps)).sum(dim=axis)
-    
-    log_loss = log_normalizer - log_likelihood
-    return _safe_masked_mean(log_loss, mask.any(dim=axis))
+
+    axis_mask = mask.sum(dim=axis, keepdim=True) > 0
+    # Fully masked slices: use every entry so the normalisers stay finite; these
+    # slices are excluded from the mean below.
+    mask = torch.where(axis_mask, mask, torch.ones_like(mask))
+    p_true = y_true / torch.where(mask, y_true, 0.0).sum(dim=axis, keepdim=True)
+    p_pred = y_pred / torch.where(mask, y_pred, 0.0).sum(dim=axis, keepdim=True)
+    log_loss = torch.where(mask, -p_true * torch.log(p_pred), 0.0).sum(dim=axis)
+    return _safe_masked_mean(log_loss, axis_mask.squeeze(axis))
 
 
 # Junction counts above this are compressed by a square root (JAX _SOFT_CLIP_VALUE).

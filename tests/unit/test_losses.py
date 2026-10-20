@@ -510,3 +510,22 @@ class TestGoldenValues:
         assert torch.isclose(result['loss'], torch.tensor(26.4599399567), atol=1e-4)
         assert torch.isclose(result['loss_total'], torch.tensor(17.7364959717), atol=1e-4)
         assert torch.isclose(result['loss_positional'], torch.tensor(8.7234439850), atol=1e-4)
+
+
+@pytest.mark.unit
+def test_cross_entropy_loss_zero_count_slice_is_non_negative():
+    """A slice with no true counts gets a uniform target (JAX: eps added before
+    normalising), not log(sum(y_pred)), which is negative for small predictions."""
+    eps = 1e-7
+    y_true = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 3.0]])
+    y_pred = torch.tensor([[0.01, 0.02, 0.03], [0.5, 0.1, 0.4]])
+    mask = torch.ones_like(y_true, dtype=torch.bool)
+    loss = losses.cross_entropy_loss(y_true=y_true, y_pred=y_pred, mask=mask, axis=-1)
+
+    def ce(t, p):
+        t, p = t + eps, p + eps
+        return -(t / t.sum() * torch.log(p / p.sum())).sum()
+
+    expected = (ce(y_true[0], y_pred[0]) + ce(y_true[1], y_pred[1])) / 2
+    torch.testing.assert_close(loss, expected)
+    assert loss.item() >= 0
