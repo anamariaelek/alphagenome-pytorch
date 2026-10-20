@@ -46,6 +46,20 @@ mkdir -p "${LOG_DIR}"
 LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/train_${LOG_TIMESTAMP}.log"
 
+# On clusters where the run dir is on an rclone mount (HoreKa), a file only reaches
+# sds once it is closed, and the training log stays open for the whole job. There the
+# cluster profile sets AG_LOCAL_LOG_DIR: write the log locally and copy it into the
+# run dir every 10 minutes and at exit (the profile's exit trap calls _ag_sync_log
+# before unmounting, so this also happens at walltime/scancel).
+RUN_LOG_FILE=${LOG_FILE}
+if [[ -n "${AG_LOCAL_LOG_DIR:-}" ]]; then
+    mkdir -p "${AG_LOCAL_LOG_DIR}"
+    LOG_FILE="${AG_LOCAL_LOG_DIR}/$(basename "${RUN_LOG_FILE}")"
+    _ag_sync_log() { [[ -f "${LOG_FILE}" ]] && cp -f "${LOG_FILE}" "${RUN_LOG_FILE}" 2>/dev/null || true; }
+    ( while sleep 600; do _ag_sync_log; done ) &
+    LOG_SYNC_PID=$!
+fi
+
 RESUME=${RESUME-auto}
 RESUME_ARGS=()
 [[ -n "${RESUME}" ]] && RESUME_ARGS=(--resume "${RESUME}")
@@ -65,7 +79,8 @@ echo "Starting finetuning at $(date)"
 echo "Config: ${CONFIG}"
 echo "Resume: ${RESUME:-<none>}"
 echo "Compile: ${COMPILE}"
-echo "Log file: ${LOG_FILE}"
+echo "Log file: ${RUN_LOG_FILE}"
+[[ "${LOG_FILE}" != "${RUN_LOG_FILE}" ]] && echo "  (written to ${LOG_FILE}, copied there every 10 min and at exit)"
 echo "---"
 
 # Python's setup_output_logging will handle the tee to LOG_FILE
@@ -74,7 +89,12 @@ python -u "${AG_ROOT}/scripts/finetune_splice.py" \
     "${COMPILE_ARGS[@]}" \
     "${RESUME_ARGS[@]}" \
     --log-file "${LOG_FILE}" \
-    "$@"
+    "$@" || STATUS=$?
 
+if [[ -n "${LOG_SYNC_PID:-}" ]]; then
+    kill "${LOG_SYNC_PID}" 2>/dev/null || true
+    _ag_sync_log
+fi
 echo "---"
-echo "Finetuning completed at $(date). Logs saved to ${LOG_FILE}"
+echo "Finetuning finished at $(date) (exit ${STATUS:-0}). Logs saved to ${RUN_LOG_FILE}"
+exit "${STATUS:-0}"

@@ -101,6 +101,9 @@ cluster_env() {
     trap 'exit 143' TERM   # walltime/scancel: run the EXIT trap too
 
     export HOME=${job_home}
+    # Files only reach sds once closed, so job scripts keep long-open logs here and
+    # copy them into the run dir (see slurm/jobs/finetune_splice.sh).
+    export AG_LOCAL_LOG_DIR=${job_dir}/logs
     # env.sh derived AG_DATA from the real HOME before this ran.
     [[ "${AG_DATA:-}" == "${real_home}/sds/"* ]] && export AG_DATA="${HOME}/sds/${AG_DATA#"${real_home}/sds/"}"
     echo "Mounted ${remote} at ${mnt} (HOME=${HOME})"
@@ -112,6 +115,8 @@ cluster_env() {
 _ag_unmount_sds() {
     local mnt=${AG_SDS_MOUNTED:-}
     [[ -n "${mnt}" ]] || return 0
+    # Last copy of a locally written log into the run dir, while sds is still mounted.
+    declare -F _ag_sync_log >/dev/null && _ag_sync_log
     fusermount -u "${mnt}" 2>/dev/null || fusermount3 -u "${mnt}" 2>/dev/null || true
     local i
     for i in $(seq 1 600); do
