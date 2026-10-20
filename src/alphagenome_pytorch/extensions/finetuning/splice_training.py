@@ -108,17 +108,46 @@ def _junction_loss(
     if junction_head is None or "junction_index" not in batch:
         return torch.tensor(0.0, device=device)
     positions = batch["splice_site_positions"].to(device)
-    out = junction_head(emb_1bp, org_idx, splice_site_positions=positions)
-    pred = out["pred_counts"]
-    target = densify_junction_targets(
-        batch["junction_index"].to(device),
-        batch["junction_counts"].to(device),
-        num_sites=pred.shape[1],
-        num_tracks=pred.shape[-1],
+    # Under CUDA autocast (float16 by default) the donor x acceptor products and the
+    # per-site sums can overflow; the pretrained JAX head accumulates in float32 too.
+    with autocast(device.type if hasattr(device, "type") else str(device).split(":")[0],
+                  enabled=False):
+        out = junction_head(emb_1bp, org_idx, splice_site_positions=positions)
+        pred = out["pred_counts"].float()
+        target = densify_junction_targets(
+            batch["junction_index"].to(device),
+            batch["junction_counts"].to(device),
+            num_sites=pred.shape[1],
+            num_tracks=pred.shape[-1],
+        )
+        losses = splice_junction_loss(y_true=target, y_pred=pred, mask=out["splice_junction_mask"])
+    if not torch.isfinite(losses["loss"]):
+        _report_nonfinite_junction(emb_1bp, pred, target, out["splice_junction_mask"], losses)
+    return losses["loss"]
+
+
+_N_NONFINITE_JUNCTION_REPORTS = 0
+
+
+def _report_nonfinite_junction(emb_1bp, pred, target, mask, losses) -> None:
+    """Print, for the first few non-finite junction losses, where they come from."""
+    global _N_NONFINITE_JUNCTION_REPORTS
+    if _N_NONFINITE_JUNCTION_REPORTS >= 5:
+        return
+    _N_NONFINITE_JUNCTION_REPORTS += 1
+
+    def _stats(x: Tensor) -> str:
+        x = x.detach().float()
+        finite = torch.isfinite(x)
+        top = x[finite].abs().max().item() if finite.any() else float("nan")
+        return f"{x.dtype if x.dtype != torch.float32 else 'fp32'} finite={finite.all().item()} max|x|={top:.3g}"
+
+    parts = ", ".join(f"{k}={v.item():.4g}" for k, v in losses.items())
+    print(
+        f"  WARNING: non-finite junction loss ({_N_NONFINITE_JUNCTION_REPORTS}/5 shown): "
+        f"emb_1bp[{emb_1bp.dtype}] {_stats(emb_1bp)}; pred {_stats(pred)}; "
+        f"target {_stats(target)}; mask sites={int(mask.any(dim=-1).sum())}; {parts}"
     )
-    return splice_junction_loss(
-        y_true=target, y_pred=pred, mask=out["splice_junction_mask"]
-    )["loss"]
 
 
 def train_epoch_splice(
