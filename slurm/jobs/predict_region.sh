@@ -7,8 +7,11 @@
 #   slurm/submit.sh --gpu-mem 20 --mem 60G --time 8:00:00 \
 #       predict_region lora_32_human_mouse_rat_rabbit_opossum chr17:41196312-41277500
 #
-# Positional: RUN (directory under ${AG_DATA}/), REGION
+# Positional: RUN (directory under ${AG_DATA}/models/), REGION
 # Env overrides: DATA_TAG (default intersect_usage), ORGANISMS, CHECKPOINT_PATH
+#
+# Output goes under ${AG_DATA}/predictions/${RUN}/ (not models/${RUN}/), to keep
+# ad-hoc region-prediction output separate from the checkpoint/training-log directory.
 
 source "${AG_ROOT:-${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code}/slurm/env.sh"
 
@@ -22,7 +25,7 @@ PRED_DIR=region_preds_$(date +%Y%m%d_%H%M%S)
 DATA_CONFIG="${AG_DATA}/data/data_config_${DATA_TAG}.json"
 
 for ORGANISM in ${ORGANISMS}; do
-    OUT_DIR=${AG_DATA}/models/${RUN}/${PRED_DIR}/${ORGANISM}/
+    OUT_DIR=${AG_DATA}/predictions/${RUN}/${PRED_DIR}/${ORGANISM}/
     mkdir -p "${OUT_DIR}"
     python "${AG_ROOT}/scripts/predict_region.py" \
         --checkpoint "${CHECKPOINT_PATH}" \
