@@ -6,6 +6,17 @@
 # for the same species set with the pre-retuning loss weights and no
 # tissue_contrast.
 #
+# Update Oct 2026: run_name bumped to lora_64_emb_traj_tiss2_hqmrboc_132kb.
+# Evaluation of the original run (lora_64_emb_traj_tiss_hqmrboc_132kb) against
+# lora_64_emb_traj_hqmrboc__ (no tissue_contrast) found the one-sided
+# tissue_contrast term let predicted usage bleed into non-marker tissues
+# instead of suppressing it (see splice_losses.py::_tissue_vs_rest_contrast).
+# The loss is now two-sided; this config is otherwise byte-for-byte the same
+# (same loss weights, same everything), so this run and the original one-sided
+# run and the no-tissue-contrast baseline are directly comparable -- only the
+# run_name changed, so this starts fresh from pretrained_weights rather than
+# resuming the old one-sided-trained checkpoint.
+#
 # Usage:
 #   python scripts/finetune_splice.py --config scripts/configs/finetune_splice_example.yaml
 #
@@ -211,7 +222,7 @@ log_every: 10
 # Output / checkpoin1ting
 # ---------------------------------------------------------------------------
 output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
-run_name: lora_64_emb_traj_tiss_hqmrboc_132kb      # defaults to timestamp
+run_name: lora_64_emb_traj_tiss2_hqmrboc_132kb      # defaults to timestamp; "tiss2" = two-sided tissue_contrast
 save_every: 1
 
 # Resume: path to checkpoint, or "auto" to find latest in output_dir
