@@ -6,7 +6,13 @@
 # Regenerate existing usage.parquet files with the Sample column kept, so that
 # replicates with identical values in the same condition are no longer collapsed.
 # For each dataset:
-#   1. convert Spliser .combined.tsv -> usage.new.parquet (same flags as the originals)
+#   1. convert Spliser .combined.tsv -> usage.new.parquet (same flags as the originals),
+#      restricted to the conditions already in usage.parquet (--restrict-conditions-from):
+#      if the Spliser input dir has since grown new condition files, they are skipped
+#      rather than folded in, since including them would shift every condition's index
+#      (condition_labels is a fresh sort+enumerate over whatever is found, not an append)
+#      and fail the comparison below anyway -- this script only restores collapsed
+#      replicate rows on the existing data, it is not meant to pick up new conditions.
 #   2. compare against the old usage.parquet (scripts/compare_usage_parquets.py),
 #      writing usage.compare.json next to it
 #   3. only if the comparison passes: back up the old files to
@@ -72,7 +78,8 @@ update_one() {
         --output "${new}" \
         --min-reproducibility "${MIN_REPRODUCIBILITY}" \
         --min-coverage "${MIN_COVERAGE}" \
-        --strip-chr-names
+        --strip-chr-names \
+        --restrict-conditions-from "${old}"
 
     if ! python -u "${AG_ROOT}/scripts/compare_usage_parquets.py" \
         --old "${old}" \

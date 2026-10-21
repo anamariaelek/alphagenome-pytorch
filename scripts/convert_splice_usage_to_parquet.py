@@ -428,6 +428,10 @@ def convert_spliser_dir_to_usage_parquet(
     for idx, p in enumerate(tsv_files):
         # Step 1: Load TSV, drop duplicates, and keep only reproducible sites
         tissue, timepoint = _parse_tissue_timepoint(p.name, tissue_index, timepoint_index)
+        condition_key = f"{tissue}_{timepoint}"
+        if condition_labels is not None and condition_key not in condition_labels:
+            print(f"  Skipping {p.name} (condition {condition_key!r} not in restrict-conditions set)")
+            continue
         print(f"  Loading {p.name} (tissue={tissue}, timepoint={timepoint})", end="\n")
         t0 = time.perf_counter()
         df = pd.read_csv(p, sep="\t", dtype={
@@ -530,8 +534,6 @@ def convert_spliser_dir_to_usage_parquet(
         print(f"    Adjusting splice site positions …", end=" ")
         df = adjust_splice_site_position(df)
         print("done.")
-        # Build condition key from tissue/timepoint before transformation
-        condition_key = f"{tissue}_{timepoint}"
         all_condition_keys.add(condition_key)
         all_tissues.add(tissue)
         all_timepoints.add(timepoint)
@@ -587,9 +589,22 @@ def convert_spliser_dir_to_usage_parquet(
         after_rows = len(df_final)
         print(f"Filtered sites by cross-condition min_coverage/min_alpha: {before_rows:,} → {after_rows:,} rows")
 
-    # Rebuild condition_labels
-    all_condition_keys = sorted(all_condition_keys)
-    condition_labels = {cond: idx for idx, cond in enumerate(all_condition_keys)}
+    if condition_labels is None:
+        # No restriction given: condition_labels is derived fresh from whatever
+        # conditions were actually found, which can shift every condition's
+        # index (not just append new ones) if the input directory now has more
+        # files than it did last time -- see --restrict-conditions-from to pin
+        # the mapping to an existing usage.json instead.
+        all_condition_keys = sorted(all_condition_keys)
+        condition_labels = {cond: idx for idx, cond in enumerate(all_condition_keys)}
+    else:
+        # Restricted mode: defensively drop any row whose condition slipped
+        # through despite the early per-file skip above (e.g. --files given
+        # directly rather than --input-dir).
+        unknown = all_condition_keys - condition_labels.keys()
+        if unknown:
+            print(f"Dropping {len(unknown)} condition(s) not in the restrict-conditions set: {sorted(unknown)}")
+            df_final = df_final[df_final["Condition_Key"].isin(condition_labels)]
     # Map Condition_Key to proper Condition index
     df_final["Condition"] = df_final["Condition_Key"].map(condition_labels)
     df_final = df_final.drop(columns=["Condition_Key"])
@@ -722,9 +737,34 @@ Examples:
         type=float,
         default=None,
         metavar="F",
-        help="Optional minimum reproducibility filter given as minimum fraction of samples in which the site is observed (e.g. 0.5 to keep sites observed in at least 50% of samples).",
+        help="Optional minimum reproducibility filter given as minimum fraction of samples in which the site is observed (e.g. 0.5 to keep sites observed in at least 50%% of samples).",
+    )
+    parser.add_argument(
+        "--restrict-conditions-from",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to an existing _usage.parquet (or its .json sidecar directly). Pin "
+             "condition_labels to exactly that file's mapping instead of deriving it "
+             "fresh from whatever conditions are found now: .combined.tsv files for any "
+             "other condition are skipped, and the output's condition_labels is "
+             "guaranteed identical to the given file's. Use this to regenerate an "
+             "existing usage.parquet (e.g. to restore collapsed replicate rows) without "
+             "the run failing, or silently reindexing every condition, just because new "
+             "conditions have since appeared in --input-dir.",
     )
     args = parser.parse_args()
+
+    restrict_condition_labels = None
+    if args.restrict_conditions_from is not None:
+        json_path = args.restrict_conditions_from
+        if json_path.suffix != ".json":
+            json_path = json_path.with_suffix(".json")
+        if not json_path.exists():
+            parser.error(f"--restrict-conditions-from sidecar not found: {json_path}")
+        with open(json_path) as f:
+            restrict_condition_labels = json.load(f)["condition_labels"]
+        print(f"Restricting to {len(restrict_condition_labels)} condition(s) from {json_path}")
 
     # ── Resolve input files ───────────────────────────────────────────────────
     if args.input_dir is not None:
@@ -746,6 +786,7 @@ Examples:
         output_path=args.output,
         tissue_index=args.tissue_index,
         timepoint_index=args.timepoint_index,
+        condition_labels=restrict_condition_labels,
         compression=args.compression,
         strip_chr=args.strip_chr_names,
         min_alpha=args.min_alpha,
