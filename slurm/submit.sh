@@ -21,7 +21,9 @@
 #
 # The cluster comes from $AG_CLUSTER (helix|uc3|horeka|sasselab3), or else from the hostname;
 # see slurm/clusters/. On sasselab3 there is no Slurm: the job runs in the background
-# with nohup, and the resource options are ignored.
+# with nohup, and the resource options are ignored. A --sbatch-arg --array=SPEC is still
+# honored there: tasks run one after another (not concurrently, to avoid overcommitting a
+# single shared workstation), each with its own SLURM_ARRAY_TASK_ID and log file.
 #
 # Jobs get a clean environment (--export=NONE) plus AG_ROOT/AG_CLUSTER/AG_REQUIRE_CUDA
 # and a known allowlist of job-script overrides (DATA_TAG, RESUME, BATCH_SIZE, ...; see
@@ -94,6 +96,23 @@ run() {
     fi
 }
 
+# Expand a Slurm-style --array spec ("4", "0-12", "1,3,5-7", with an optional
+# ":STEP" on a range and/or a trailing "%THROTTLE") into one index per line.
+# THROTTLE is ignored here: local emulation always runs tasks one at a time.
+expand_array_spec() {
+    local spec=${1%%%*} part lo hi step idx
+    IFS=',' read -ra parts <<< "${spec}"
+    for part in "${parts[@]}"; do
+        if [[ "${part}" == *-* ]]; then
+            lo=${part%-*}; hi=${part#*-}; step=1
+            if [[ "${hi}" == *:* ]]; then step=${hi#*:}; hi=${hi%%:*}; fi
+            for ((idx = lo; idx <= hi; idx += step)); do echo "${idx}"; done
+        else
+            echo "${part}"
+        fi
+    done
+}
+
 if [[ "${AG_USE_SLURM}" == 1 ]]; then
     # shellcheck disable=SC2207  # cluster_*_args return space-separated flags without spaces inside
     if [[ "${CPU_ONLY}" == 1 ]]; then
@@ -123,12 +142,39 @@ if [[ "${AG_USE_SLURM}" == 1 ]]; then
     echo "[${AG_CLUSTER}] submitting ${NAME}"
     run "${CMD[@]}"
 else
-    LOG="${LOG_DIR}/${NAME}_$(date +%Y%m%d_%H%M%S).log"
-    echo "[${AG_CLUSTER}] running ${NAME} locally (no Slurm); log: ${LOG}"
-    if [[ "${DRY_RUN}" == 1 ]]; then
-        run nohup bash "${JOB_SCRIPT}" "$@"
+    ARRAY_SPEC=""
+    for e in ${EXTRA[@]+"${EXTRA[@]}"}; do
+        [[ "${e}" == --array=* ]] && ARRAY_SPEC=${e#--array=}
+    done
+
+    if [[ -n "${ARRAY_SPEC}" ]]; then
+        TASKS=$(expand_array_spec "${ARRAY_SPEC}" | tr '\n' ' ')
+        if [[ "${DRY_RUN}" == 1 ]]; then
+            echo "[${AG_CLUSTER}] would run array tasks locally, one after another: ${TASKS}"
+        else
+            run_array_tasks() {
+                local idx tlog
+                for idx in $(expand_array_spec "${ARRAY_SPEC}"); do
+                    tlog="${LOG_DIR}/${NAME}_task${idx}_$(date +%Y%m%d_%H%M%S).log"
+                    echo "[${AG_CLUSTER}] array task ${idx}: log ${tlog}"
+                    SLURM_ARRAY_TASK_ID="${idx}" bash "${JOB_SCRIPT}" "$@" > "${tlog}" 2>&1
+                done
+            }
+            export -f run_array_tasks expand_array_spec
+            export ARRAY_SPEC LOG_DIR NAME AG_CLUSTER JOB_SCRIPT
+            nohup bash -c 'run_array_tasks "$@"' _ "$@" \
+                > "${LOG_DIR}/${NAME}_array.log" 2>&1 &
+            echo "PID $!  (sequential array tasks: ${TASKS})"
+            echo "Index log: ${LOG_DIR}/${NAME}_array.log  (per-task logs listed inside)"
+        fi
     else
-        nohup bash "${JOB_SCRIPT}" "$@" > "${LOG}" 2>&1 &
-        echo "PID $!"
+        LOG="${LOG_DIR}/${NAME}_$(date +%Y%m%d_%H%M%S).log"
+        echo "[${AG_CLUSTER}] running ${NAME} locally (no Slurm); log: ${LOG}"
+        if [[ "${DRY_RUN}" == 1 ]]; then
+            run nohup bash "${JOB_SCRIPT}" "$@"
+        else
+            nohup bash "${JOB_SCRIPT}" "$@" > "${LOG}" 2>&1 &
+            echo "PID $!"
+        fi
     fi
 fi
