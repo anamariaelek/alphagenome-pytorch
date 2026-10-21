@@ -24,19 +24,14 @@ cluster_cpu_args() {
     echo "--partition=${partition}"
 }
 
+# sds is only reachable over SFTP; see clusters/sds_rclone.sh for how jobs reach it
+# (workspace copy for training, per-job rclone mount otherwise). The code checkout
+# (AG_ROOT) must be a separate clone on UC3's own home/workspace storage, not under sds.
+source "${AG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/slurm/clusters/sds_rclone.sh"
+
 # Runs inside the job, before conda is activated.
-#
-# Unlike Helix, UC3 compute nodes have no native mount of the sds share -- it's
-# only reachable via SFTP, so AG_DATA (models/data/evals under sd17d003/) is
-# fetched through an rclone mount into $TMPDIR for the lifetime of the job.
-# The code checkout itself (AG_ROOT) is expected to be a separate clone on UC3's
-# own home/workspace storage, not under sds, so it's reachable before this mount
-# exists (slurm/submit.sh already derives AG_ROOT from its own location and
-# exports it to the job, so no path change is needed for it here).
+# TODO(first use): confirm the CUDA module name with `module avail cuda`.
 cluster_env() {
-    module load devel/cuda
-    mkdir -p "${TMPDIR}/sds"
-    rclone mount --vfs-cache-mode full sds-sftp: "${TMPDIR}/sds/" --daemon
-    sleep 5
-    export AG_DATA="${TMPDIR}/sds/sd17d003/Anamaria/alphagenome_genomicsxai"
+    module load devel/cuda 2>/dev/null || true
+    ag_setup_sds
 }

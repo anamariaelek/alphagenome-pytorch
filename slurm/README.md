@@ -11,7 +11,9 @@ slurm/
     detect.sh          # sets AG_CLUSTER from $AG_CLUSTER or the hostname
     helix.sh           # partition/gres syntax + modules for Helix
     uc3.sh             # ... for bwUniCluster 3.0
-    horeka.sh          # ... for HoreKa (KIT), incl. per-job rclone mount of ~/sds
+    horeka.sh          # ... for HoreKa (KIT)
+    sds_rclone.sh      # sds via rclone (HoreKa, UC3): workspace copy or per-job mount
+  stage_inputs.sh      # copy a config's inputs to the workspace (HoreKa, UC3 login node)
     sasselab3.sh       # no Slurm: runs the job directly with nohup
   jobs/                # cluster-agnostic job bodies, parameterised by arguments/env
     finetune_splice.sh  evaluate_splice.sh  evaluate_splice_brawand.sh  predict_region.sh
@@ -33,39 +35,58 @@ export AG_CLUSTER=helix        # or uc3, horeka, sasselab3
 The conda env must exist on each machine at `~/miniforge3`. To use a different location or
 env name, set `AG_CONDA_SH` / `AG_CONDA_ENV`.
 
+**HoreKa and bwUniCluster3: sds over rclone**
+
+On these clusters sds is only reachable over SFTP with rclone (on the login node it is
+mounted at `~/sds`). `clusters/sds_rclone.sh` sets it up inside each job, in one of two
+modes (`AG_SDS_MODE`):
+
+- **`workspace`** (default for `finetune_splice`): `~/sds` in the job is a copy of the
+  inputs in a workspace, so training reads local files. Reading over rclone made training
+  very slow. Outputs (run dir: checkpoints, logs, `epoch_log.csv`) are written to the
+  workspace and copied back to the same place on sds every 10 minutes and at job end.
+  Only new or changed files are transferred.
+- **`mount`** (default for the other jobs): sds is rclone-mounted in the job's own
+  `$TMPDIR`. Fine for small jobs; set `AG_SDS_MODE=mount` to use it for training anyway.
+
+In both modes the job's `HOME` is a per-job directory linking everything in your real home
+except `sds`, so the `$HOME/sds/...` paths in configs work unchanged, and a dead or shared
+`~/sds` mount on the node doesn't matter.
+
+One-time setup on the login node:
+- **Clone the code outside `~/sds`**, into `$HOME` or a workspace, and submit from that
+  clone (the job reads `slurm/env.sh` before sds is set up).
+- **Create the conda env** on the cluster's own `$HOME`:
+  `conda env create -f env_alphagenome_pytorch_genomicsxai.yml`.
+- **rclone remote.** Jobs use the `sds-sftp:` remote; check with `rclone listremotes` and
+  export `AG_SDS_REMOTE=<name>:` if yours differs (`submit.sh` forwards it). `rclone` is
+  looked up on `PATH`, then `~/bin` and `~/.local/bin`; otherwise set `AG_RCLONE`.
+- **Workspace.** `ws_allocate alphagenome 60` (extend with `ws_extend alphagenome 60` before
+  it expires). Jobs find it with `ws_find alphagenome`; set `AG_WS_NAME` or `AG_WORKSPACE`
+  to use another.
+
+Before training with a config (again whenever its inputs change on sds):
+```bash
+conda activate alphagenome_pytorch_genomicsxai     # stage_inputs.sh needs PyYAML
+slurm/stage_inputs.sh configs/hmrboc_132kb_junctions.yaml
+```
+This copies every `$HOME/sds/...` path in the config (genomes with `.fai`, parquets with
+their `.json`, BEDs, pretrained weights, metadata CSVs) to `<workspace>/sds/<same path>`,
+plus the run dir if it already exists on sds, so a run started elsewhere resumes from its
+checkpoints. Already-copied, unchanged files are skipped.
+
 **bwUniCluster3, first use:**
 - Run `sinfo -s` to check that the partitions in `clusters/uc3.sh` exist. The default is
   `gpu_h100`; `gpu_mi300` is AMD and will not work with our CUDA build.
 - Run `module avail cuda` and fix `cluster_env` in `clusters/uc3.sh` if the module isn't
   `devel/cuda`.
-- Check that `$HOME/sds/...` is mounted on the compute nodes (e.g. `srun ... ls ~/sds`).
-- UC3 has its own `$HOME`, so create the conda env there with
-  `conda env create -f env_alphagenome_pytorch_genomicsxai.yml`.
 - Do a short smoke test first:
   `slurm/submit.sh --partition dev_gpu_h100 --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`
   (check the dev partition name in `sinfo -s`).
 
 **HoreKa, first use:**
-- **Keep the code checkout outside `~/sds`.** sds is rclone-mounted at `~/sds` on the login
-  node only. Each job mounts it again in its own `$TMPDIR` and sets `HOME` to a per-job
-  directory that links everything in your real home except `sds`, which is the job's mount.
-  The `$HOME/sds/...` paths in configs keep working, a dead `~/sds` mount left on a node by
-  an earlier job doesn't matter, and jobs sharing a node don't interfere. The job reads
-  `slurm/env.sh` before mounting, so clone the repo into `$HOME` or a workspace and submit
-  from that clone.
-- **rclone remote.** The job uses the `sds-sftp:` remote. Check the name with
-  `rclone listremotes`; if yours differs, export `AG_SDS_REMOTE=<name>:` before submitting
-  (`submit.sh` forwards it). The job looks for `rclone` on `PATH`, then in `~/bin` and
-  `~/.local/bin`; set `AG_RCLONE=/path/to/rclone` otherwise.
-- **Mounting from a compute node.** Check that `rclone` and `fusermount` work there before a
-  long run, e.g. `slurm/submit.sh --partition dev_accelerated --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`.
-  The dev queues allow one job at a time and at most 1 hour (4 hours for `dev_cpuonly`).
-- **Writes to `~/sds`.** Checkpoints written there go through rclone's cache in `$TMPDIR` and
-  are uploaded in the background. At job end the mount is released and the job waits up
-  to 10 minutes for rclone to finish uploading. For long runs, an `output_dir` on a
-  HoreKa workspace avoids this.
-- **Conda env.** Create the env on HoreKa's own `$HOME`:
-  `conda env create -f env_alphagenome_pytorch_genomicsxai.yml`.
+- Short test (dev queues: 1 hour, one job at a time):
+  `slurm/submit.sh --partition dev_accelerated --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`.
 - **Account.** If your user belongs to more than one project, set `AG_SLURM_ACCOUNT`.
 - **Limits.** GPU partitions allow at most 2 days per job, and `cpuonly` 3 days.
 

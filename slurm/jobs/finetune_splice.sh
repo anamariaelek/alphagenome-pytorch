@@ -19,6 +19,9 @@
 # full 7-species run). Set COMPILE=0 until that's root-caused (e.g. via
 # TORCH_LOGS=recompiles) and fixed, e.g. with torch.compile(model, dynamic=True).
 
+# On HoreKa/UC3, read inputs from a workspace copy (slurm/stage_inputs.sh) instead of
+# over an rclone mount, which is too slow for training; see slurm/clusters/sds_rclone.sh.
+export AG_SDS_MODE=${AG_SDS_MODE:-workspace}
 source "${AG_ROOT:-${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code}/slurm/env.sh"
 
 CONFIG=${1:?usage: finetune_splice.sh CONFIG [extra args...]}
@@ -46,18 +49,37 @@ mkdir -p "${LOG_DIR}"
 LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/train_${LOG_TIMESTAMP}.log"
 
-# On clusters where the run dir is on an rclone mount (HoreKa), a file only reaches
-# sds once it is closed, and the training log stays open for the whole job. There the
-# cluster profile sets AG_LOCAL_LOG_DIR: write the log locally and copy it into the
-# run dir every 10 minutes and at exit (the profile's exit trap calls _ag_sync_log
-# before unmounting, so this also happens at walltime/scancel).
+# On HoreKa/UC3 (slurm/clusters/sds_rclone.sh) the run dir is not on sds itself:
+#   - workspace mode: it is in the workspace copy; copy it back to sds (only new or
+#     changed files) every 10 minutes and at exit.
+#   - mount mode: it is on an rclone mount, where a file only reaches sds once closed,
+#     and the training log stays open for the whole job. AG_LOCAL_LOG_DIR is set: write
+#     the log locally and copy it into the run dir every 10 minutes and at exit.
+# The profile's exit trap calls _ag_job_exit_hook, so the final copy also happens at
+# walltime/scancel.
 RUN_LOG_FILE=${LOG_FILE}
 if [[ -n "${AG_LOCAL_LOG_DIR:-}" ]]; then
     mkdir -p "${AG_LOCAL_LOG_DIR}"
     LOG_FILE="${AG_LOCAL_LOG_DIR}/$(basename "${RUN_LOG_FILE}")"
-    _ag_sync_log() { [[ -f "${LOG_FILE}" ]] && cp -f "${LOG_FILE}" "${RUN_LOG_FILE}" 2>/dev/null || true; }
-    ( while sleep 600; do _ag_sync_log; done ) &
-    LOG_SYNC_PID=$!
+fi
+_ag_periodic_sync() {
+    if [[ "${LOG_FILE}" != "${RUN_LOG_FILE}" && -f "${LOG_FILE}" ]]; then
+        cp -f "${LOG_FILE}" "${RUN_LOG_FILE}" 2>/dev/null || true
+    fi
+    declare -F ag_sync_back >/dev/null && ag_sync_back "${LOG_DIR}"
+    return 0
+}
+if [[ "${LOG_FILE}" != "${RUN_LOG_FILE}" || -n "${AG_SYNC_REMOTE:-}" ]]; then
+    ( while sleep 600; do _ag_periodic_sync; done ) &
+    SYNC_PID=$!
+    _ag_job_exit_hook() {
+        if [[ -n "${SYNC_PID:-}" ]]; then
+            pkill -P "${SYNC_PID}" 2>/dev/null   # its pending `sleep`
+            kill "${SYNC_PID}" 2>/dev/null
+        fi
+        SYNC_PID=
+        _ag_periodic_sync
+    }
 fi
 
 RESUME=${RESUME-auto}
@@ -91,10 +113,7 @@ python -u "${AG_ROOT}/scripts/finetune_splice.py" \
     --log-file "${LOG_FILE}" \
     "$@" || STATUS=$?
 
-if [[ -n "${LOG_SYNC_PID:-}" ]]; then
-    kill "${LOG_SYNC_PID}" 2>/dev/null || true
-    _ag_sync_log
-fi
+declare -F _ag_job_exit_hook >/dev/null && _ag_job_exit_hook
 echo "---"
 echo "Finetuning finished at $(date) (exit ${STATUS:-0}). Logs saved to ${RUN_LOG_FILE}"
 exit "${STATUS:-0}"
