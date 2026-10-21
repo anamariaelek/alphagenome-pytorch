@@ -17,12 +17,12 @@ REGION=${2:?usage: predict_region.sh RUN REGION}
 DATA_TAG=${DATA_TAG:-intersect_usage}
 ORGANISMS=${ORGANISMS:-human mouse rat rabbit opossum chicken}
 
-CHECKPOINT_PATH=${CHECKPOINT_PATH:-${AG_DATA}/${RUN}}
+CHECKPOINT_PATH=${CHECKPOINT_PATH:-${AG_DATA}/models/${RUN}}
 PRED_DIR=region_preds_$(date +%Y%m%d_%H%M%S)
 DATA_CONFIG="${AG_DATA}/data/data_config_${DATA_TAG}.json"
 
 for ORGANISM in ${ORGANISMS}; do
-    OUT_DIR=${AG_DATA}/${RUN}/${PRED_DIR}/${ORGANISM}/
+    OUT_DIR=${AG_DATA}/models/${RUN}/${PRED_DIR}/${ORGANISM}/
     mkdir -p "${OUT_DIR}"
     python "${AG_ROOT}/scripts/predict_region.py" \
         --checkpoint "${CHECKPOINT_PATH}" \
