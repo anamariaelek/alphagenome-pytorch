@@ -64,7 +64,7 @@ python -u scripts/convert_splice_usage_to_parquet.py \
     --strip-chr-names > logs/usage_to_parquet_${species}.log
 ```
 
-Usage files written before the `Sample` column was added can be regenerated in place with `slurm/jobs/update_usage_parquet.sh`. For each dataset it re-runs the converter to `usage.new.parquet` and checks the result against the old file with `scripts/compare_usage_parquets.py` (no lost sites, identical values per site and condition, and any new sites explained by the coverage filter). Only if that passes does it back up the old files to `usage.collapsed_bak.{parquet,json}` and move the new ones into place. The report is written to `usage.compare.json`. If it lists new sites, regenerate the `splice_sites_*usage*.parquet` files below.
+**Update Oct 2026:** Usage files written before the `Sample` column was added can be regenerated in place with `slurm/jobs/update_usage_parquet.sh`. For each dataset it re-runs the converter to `usage.new.parquet` and checks the result against the old file with `scripts/compare_usage_parquets.py` (no lost sites, identical values per site and condition, and any new sites explained by the coverage filter). Only if that passes does it back up the old files to `usage.collapsed_bak.{parquet,json}` and move the new ones into place. The report is written to `usage.compare.json`. If it lists new sites, regenerate the `splice_sites_*usage*.parquet` files below.
 
 ```bash
 # Homo_sapiens first, then the remaining Cardoso-Moreira and Brawand datasets

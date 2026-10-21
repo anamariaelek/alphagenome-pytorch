@@ -530,10 +530,24 @@ def _tissue_vs_rest_contrast(pred, tgt, mask, groups, coverage=None,
     marker_floor) so the vast non-marker majority doesn't dominate the gradient --
     same rationale as _trajectory_excursion's gate on delta_mse.
 
-    One-directional by design (gated on ``diff_true > marker_floor``, not
+    One-directional gate by design (``diff_true > marker_floor``, not
     ``|diff_true| > marker_floor``), matching "highly used in T compared to
-    rest" -- this only ever pulls a tissue's own predicted usage up toward its
-    true enrichment, never separately penalises an under-enriched "rest".
+    rest" -- never fires on an under-enriched "rest" alone.
+
+    Two-sided penalty: an earlier version only scored ``(diff_pred -
+    diff_true)**2``, the gap between the two sides. That nominally depends on
+    both own_pred and rest_pred, but rest_pred's gradient is diluted by
+    rest_n (often 80+ conditions pooled, vs. own_n's usually <15) and, across
+    every tissue's own marker gate, every tissue is part of up to N-1 other
+    tissues' "rest" simultaneously -- in practice this let predicted usage
+    bleed into non-marker tissues almost for free, confirmed by a real
+    evaluation (tissue_contrast:5.0, lora_64_emb_traj_tiss_hqmrboc_132kb):
+    own-tissue gains were real but rest-tissue usage rose right alongside it
+    (Figure 8-style marker heatmap bleeding into other tissues), with no net
+    gain on marker-site accuracy despite the gap term improving. Add an
+    explicit, undiluted penalty on rest_pred specifically overshooting
+    rest_true at the same marker sites -- not the reverse direction, since
+    under-predicting rest was never the failure mode here.
     """
     all_idx = [i for g in groups for i in g]
     num = (pred * 0.0).sum()
@@ -560,7 +574,9 @@ def _tissue_vs_rest_contrast(pred, tgt, mask, groups, coverage=None,
         if coverage is not None:
             cov = coverage[..., own_idx].to(pred.dtype)
             w = w * (cov * own_m).sum(-1) / own_n.clamp(min=1)
-        se = (diff_pred - diff_true) ** 2
+        gap_se = (diff_pred - diff_true) ** 2
+        rest_excess_se = (rest_pred - rest_true).clamp(min=0) ** 2
+        se = gap_se + rest_excess_se
         num = num + (se * w).sum()
         wsum = wsum + w.sum()
         n_markers += int(ok.sum().item())

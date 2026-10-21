@@ -381,6 +381,40 @@ class TestSpliceUsageLoss:
         assert match_loss.item() < compressed_loss.item()
         assert match_metrics["n_marker_sites"] >= 1
 
+    def test_tissue_contrast_penalizes_rest_bleed_even_with_matching_gap(self):
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, max_sites, n_cond = 1, 64, 1, 4
+        usage_positions = torch.tensor([[12]])
+        # Tissue 0 (own, conds 0,1) true mean 0.6; tissue 1 (rest, conds 2,3) true
+        # mean 0.05 -- true contrast 0.55, clears marker_floor.
+        usage_values = torch.tensor([[[[0.6], [0.6], [0.05], [0.05]]]])
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
+        groups = [[0, 1], [2, 3]]
+
+        def logits_for(own: float, rest: float) -> torch.Tensor:
+            logits = torch.zeros(B, S, n_cond)
+            logits[0, 12, :] = torch.logit(
+                torch.tensor([own, own, rest, rest]).clamp(1e-4, 1 - 1e-4))
+            return logits
+
+        # Both predictions reproduce the true gap (own - rest = 0.55) exactly, so
+        # a diff-only (one-sided) term would score them identically at zero loss.
+        # "bleeding" additionally overshoots the rest side (0.25 vs true 0.05),
+        # which the two-sided penalty should catch even though the gap is perfect.
+        clean_loss, _ = splice_usage_loss(
+            logits_for(0.6, 0.05), usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"tissue_contrast": 1.0}, tissue_cond_groups=groups,
+        )
+        bleed_loss, bleed_metrics = splice_usage_loss(
+            logits_for(0.8, 0.25), usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"tissue_contrast": 1.0}, tissue_cond_groups=groups,
+        )
+
+        assert clean_loss.item() == pytest.approx(0.0, abs=1e-6)
+        assert bleed_loss.item() == pytest.approx(0.2 ** 2, rel=1e-4)
+        assert bleed_metrics["n_marker_sites"] >= 1
+
     def test_tissue_contrast_ignores_non_marker_sites(self):
         from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
 
