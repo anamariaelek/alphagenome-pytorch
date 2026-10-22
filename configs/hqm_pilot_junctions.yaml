@@ -1,0 +1,203 @@
+# =============================================================================
+# Small pilot config for comparing the Phase 1 retraining-objective changes
+# (coverage-weighted per-replicate BCE + differential tissue-usage
+# "tissue_contrast" loss, per splicing_specificity_eval/report.md's
+# recommendations) against the existing best config (hqmrboc.yaml).
+#
+# This is a deliberately minimal diff off hqmrboc.yaml: same architecture,
+# same optimiser settings, same pretrained weights — only species scope,
+# epoch count, and the new tissue_contrast loss weight differ. Everything
+# else is unchanged so a side-by-side comparison isolates the effect of the
+# Phase 1 objective changes rather than any incidental hyperparameter drift.
+#
+# How to use this for the comparison:
+#   - "New" run: this file, on the branch/commit with the Phase 1 code
+#     changes (replicate-level BCE in splice_losses.py/splice_datasets.py,
+#     plus tissue_contrast).
+#   - "Baseline" run: this SAME file (or hqmrboc.yaml with the same
+#     species/epochs/warmup_steps overrides below) on the pre-Phase-1
+#     commit. The replicate-level BCE fix is a code change, not a config
+#     toggle, so the fair baseline is the old code with tissue_contrast
+#     simply absent (as it is in hqmrboc.yaml today) rather than this file
+#     with tissue_contrast: 0 on the new code.
+#   - Compare bce_loss, tissue_contrast_loss/n_marker_sites, trajectory_rmse,
+#     and trajectory_corr between the two run directories' logs.
+#
+# Usage:
+#   python scripts/finetune_splice.py --config configs/hqmrboc_phase1_pilot.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Data — CHANGED: reduced from 7 species to 3 (human, mouse, macaque) for a
+# faster pilot while still exercising multi-species batching/sampling —
+# a primate outgroup (macaque) plus a rodent (mouse) alongside human.
+# Restore the remaining species blocks from hqmrboc.yaml (rat/rabbit/
+# opossum/chicken) for the full 7-species comparison.
+#
+# train_bed/val_bed also point at data/pilot_beds/<species>/ instead of the
+# full fold0 splits (~18-19k/~3k windows each) -- a fixed-seed random
+# subsample (2000 train / 500 val windows per species, see
+# data/pilot_beds/), since there's no --max-examples-style flag to do this
+# at the CLI level. Balanced to the largest (now all equal at 2000) x 3
+# species / batch_size(3) / grad_accum(32) -> ~62 optimizer steps/epoch, so
+# epochs=3 below lands in the few-hundred-step range without the ~2h+/epoch
+# the full fold0 splits would take. Point back at the fold0 paths (see
+# hqmrboc.yaml) for the full-scale run.
+#
+# test_bed (500-window subset, same pattern) is also set below for parity
+# with the fold0 layout, but finetune_splice.py never reads it -- it's only
+# consumed by evaluate_splice.py's --data-config JSON (which expects this
+# same species-spec shape: genome/annotation_parquet/usage_parquet/
+# train_bed/val_bed/test_bed/organism_index), for a held-out eval pass
+# against these pilot species after training.
+# ---------------------------------------------------------------------------
+species:
+  - name: human
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/human/test.bed
+    organism_index: 0
+
+  - name: mouse
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/mouse/test.bed
+    organism_index: 1
+
+  - name: macaque
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/data/pilot_beds/macaque/test.bed
+    organism_index: 5
+
+organism_embedding_init:
+  0: 0   # new organism 0 from pretrained organism 0
+  1: 1   # new organism 1 from pretrained organism 1
+  5: 0   # new organism 5 from pretrained organism 0
+
+# ---------------------------------------------------------------------------
+# Pretrained weights 
+# ---------------------------------------------------------------------------
+pretrained_weights: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/checkpoints/model_fold_0.safetensors
+
+# ---------------------------------------------------------------------------
+# Training mode: linear-probe | lora | full 
+# ---------------------------------------------------------------------------
+mode: lora
+
+# ---------------------------------------------------------------------------
+# Data 
+# ---------------------------------------------------------------------------
+sequence_length: 131072    # used lengths: 131072 196608 524288
+max_sites: 1024
+cache_genome: false
+usage_coord_base: 0
+observed_conditions_only: true
+
+oversample_species: true
+
+# ---------------------------------------------------------------------------
+# Model / LoRA 
+# ---------------------------------------------------------------------------
+dtype: bfloat16
+gradient_checkpointing: true
+
+train_species_embeddings: true
+
+lora_rank: 64
+lora_alpha: 128
+lora_targets: q_proj,v_proj,k_proj,linear_embedding
+
+train_components: embedder_1bp
+
+# ---------------------------------------------------------------------------
+# Optimiser — CHANGED: epochs and warmup_steps scaled down for a fast pilot.
+# batch_size / gradient_accumulation_steps left unchanged so the effective
+# batch size (and per-step gradient-noise characteristics) match hqmrboc.yaml,
+# keeping the pilot's training dynamics representative of the full run.
+# ---------------------------------------------------------------------------
+epochs: 20
+batch_size: 2
+gradient_accumulation_steps: 64
+lr: 1.0e-4
+weight_decay: 0.1
+warmup_steps: 100                # was 1000 — scaled down for the much shorter run
+lr_schedule: cosine
+max_grad_norm: 1.0
+
+# Loss weights
+cls_weight: 1.0
+usage_weight: 1.0
+
+# CHANGED: added tissue_contrast (Phase 1's differential/one-vs-rest tissue
+# usage term). bce/delta_mse/trajectory_pearson weights unchanged from
+# hqmrboc.yaml — the replicate-level coverage weighting for bce is a code
+# change, not a config knob, and applies automatically once implemented.
+usage_loss_weights:
+  bce: 1.0
+  delta_mse: 5.0
+  trajectory_pearson: 5.0
+  tissue_contrast: 0.0
+
+usage_traj_warmup_epochs: 1
+
+# ---------------------------------------------------------------------------
+# Splice junctions (see "Junction loss" in WORKFLOW_FINETUNING_SPLICING.md)
+# ---------------------------------------------------------------------------
+junction_weight: 1.0
+max_junction_sites: 256        # sites per list (donor+, acceptor+, donor-, acceptor-) per window
+junction_count_norm: cpm       # per-sample CPM, clip at 99.99th pct, typical non-zero ~1
+junction_replicate_agg: mean   # mean | sum over a condition's samples
+junction_init_metadata:        # pretrained organism -> track metadata, for tissue-matched init
+  0: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_homo_sapiens.csv
+  1: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_mus_musculus.csv
+
+# ---------------------------------------------------------------------------
+# Performance — compile enabled: even at the ~186 total optimizer steps this
+# pilot now runs (data/pilot_beds subsets x 3 epochs), compile's few-minute
+# warmup is still worth it against per-step cost at this sequence_length/
+# lora_rank (production reference: ~26s/step compiled at batch_size=6 on
+# lora_64_emb_traj_hqmrboc, see submit script -- this pilot's batch_size=3
+# should be somewhat cheaper per step). Also passed explicitly via --compile
+# on the CLI in the submit script, which is the pattern the other submit
+# scripts in this repo use regardless of this config value.
+# ---------------------------------------------------------------------------
+num_workers: 2
+use_amp: true
+compile: true
+cuda_memory_fraction: 1.0
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+wandb: false
+wandb_project: alphagenome-splice
+log_every: 10
+
+# ---------------------------------------------------------------------------
+# Output / checkpointing — CHANGED: distinct run_name so this pilot never
+# collides with hqmrboc.yaml's checkpoints/logs.
+# ---------------------------------------------------------------------------
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
+run_name: lora_64_emb_traj_tiss_jx_hqm_pilot
+save_every: 1
+
+resume: auto
+
+# ---------------------------------------------------------------------------
+# Reproducibility  (keep identical across the
+# baseline/new-code comparison runs)
+# ---------------------------------------------------------------------------
+seed: 1950
