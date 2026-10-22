@@ -57,6 +57,11 @@ class LoRA(nn.Module):
         self.rank = rank
         self.alpha = alpha
         self.scale = alpha / rank
+        # Same value as a tensor for forward(): multiplying by a Python float makes
+        # torch.compile's int8 weight-only-quant pattern (F.linear(x, w.to(dtype)) * scales)
+        # match and, in some PyTorch versions, crash on the float ('float' object has
+        # no attribute 'meta'), so the model silently falls back to eager.
+        self.register_buffer("_scale_t", torch.tensor(self.scale), persistent=False)
         
         # Freeze original layer
         for param in self.original_layer.parameters():
@@ -77,7 +82,7 @@ class LoRA(nn.Module):
         original_output = self.original_layer(x)
         
         # LoRA output: scale * B(A(x))
-        lora_output = self.lora_B(self.lora_A(x)) * self.scale
+        lora_output = self.lora_B(self.lora_A(x)) * self._scale_t
         
         return original_output + lora_output
     
@@ -142,6 +147,11 @@ class Locon(nn.Module):
         self.rank = rank
         self.alpha = alpha
         self.scale = alpha / rank
+        # Same value as a tensor for forward(): multiplying by a Python float makes
+        # torch.compile's int8 weight-only-quant pattern (F.linear(x, w.to(dtype)) * scales)
+        # match and, in some PyTorch versions, crash on the float ('float' object has
+        # no attribute 'meta'), so the model silently falls back to eager.
+        self.register_buffer("_scale_t", torch.tensor(self.scale), persistent=False)
         
         # Freeze original layer
         for param in self.original_layer.parameters():
@@ -176,7 +186,7 @@ class Locon(nn.Module):
         original_output = self.original_layer(x)
         
         # Locon output
-        lora_output = self.locon_up(self.locon_down(x)) * self.scale
+        lora_output = self.locon_up(self.locon_down(x)) * self._scale_t
         
         return original_output + lora_output
     

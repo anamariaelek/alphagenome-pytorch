@@ -63,4 +63,7 @@ if [[ "${AG_REQUIRE_CUDA:-1}" == "1" ]]; then
         echo "ERROR: CUDA is not available in PyTorch!"
         exit 1
     }
+    # GPU model and memory, plus torch version, to compare runs across clusters.
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1 | sed 's/^/GPU: /'
+    python -c "import torch; print('torch', torch.__version__, 'CUDA', torch.version.cuda)"
 fi
