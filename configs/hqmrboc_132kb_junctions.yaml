@@ -70,7 +70,7 @@ species:
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
     annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
     usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
-    # junction_parquet: not yet -- macaque Spliser outputs are being regenerated
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/junctions.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/valid.bed
     organism_index: 5
@@ -196,8 +196,9 @@ usage_traj_warmup_epochs: 1
 # ---------------------------------------------------------------------------
 # Splice junctions (see "Junction loss" in WORKFLOW_FINETUNING_SPLICING.md)
 # ---------------------------------------------------------------------------
-# Species without junction_parquet (macaque, for now) get no junction head; their
-# batches train classification + usage only.
+# Species without junction_parquet get no junction head; their batches train
+# classification + usage only. Macaque's usage/junctions keep the 28 conditions of the
+# August usage file (Liver_15 has no data yet).
 junction_weight: 1.0
 max_junction_sites: 256        # sites per list (donor+, acceptor+, donor-, acceptor-) per window
 junction_count_norm: cpm       # per-sample CPM, clip at 99.99th pct, typical non-zero ~1
