@@ -817,18 +817,21 @@ def collect_predictions(
     usage_heads: dict[int, nn.Module],
     loader,
     device: torch.device,
-    organism_index: int,
-    seq_len: int = 131_072,
-    skip_usage: bool = False,
-    condition_mapping: dict[int, int] | None = None,
+    usage_head_configs: dict[int, dict[int, int] | None] | None = None,
     collect_positions: bool = False,
-) -> tuple[np.ndarray, np.ndarray, dict, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
-    """Run inference for one organism.
+) -> tuple[np.ndarray, np.ndarray, dict[int, dict], np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Run classification and usage inference for one organism in a single pass.
+
+    Each batch goes through the trunk exactly once: the classification head output and
+    the 1bp embeddings come from the same ``model.predict`` call, and every requested
+    usage head is then applied to those embeddings. The trunk only depends on the
+    batch's (data) organism index, so this is equivalent to separate passes per head.
 
     Args:
-        condition_mapping: Optional dict mapping data condition index -> model condition index
-                          for cross-species evaluation. When provided, only matched conditions
-                          are accumulated.
+        usage_head_configs: Dict mapping usage-head organism index -> condition mapping
+                          (data condition index -> model condition index, or None for a
+                          1:1 correspondence). Usage predictions are accumulated separately
+                          for each listed head. None/empty skips usage entirely.
         collect_positions: When True, also return the genomic (chrom_idx, position) coordinate
                           of every returned classification row, computed from each window's
                           ``window_start``/``chrom_idx`` (so callers can build a tidy per-position
@@ -838,7 +841,9 @@ def collect_predictions(
     -------
     cls_probs               : (N_masked_positions, 5)  float32 - only positions where loss_mask=True
     cls_labels              : (N_masked_positions,)    int64 - only positions where loss_mask=True
-    usage_per_cond          : dict  condition_idx -> {'pred': list[float], 'true': list[float]}
+    usage_by_head           : dict  usage_head_org_idx -> usage_per_cond, where usage_per_cond is
+                               condition_idx -> {'pred', 'true', 'chrom_idx', 'genomic_pos'} lists.
+                               Has an (possibly empty) entry for every key of usage_head_configs.
     loss_mask_full          : (N_all_positions,) bool - full loss_mask before filtering, or None
     genomic_pos_full        : (N_masked_positions,) int64 - absolute genomic position per row,
                                or None unless collect_positions=True
@@ -849,104 +854,121 @@ def collect_predictions(
         If loss_mask is present in batches, only predictions for masked positions
         (gene body regions) are returned. If loss_mask is absent, all positions are returned.
         The loss_mask_full return value is the concatenated mask before filtering is applied.
+        Masking (and the gather of usage predictions at site positions) happens per batch on
+        the GPU, so only the rows that are kept are copied to host memory.
     """
     all_cls_probs: list[np.ndarray] = []
     all_cls_labels: list[np.ndarray] = []
     all_loss_masks: list[np.ndarray] = []
     all_genomic_pos: list[np.ndarray] = []
     all_chrom_idx_pos: list[np.ndarray] = []
-    usage_per_cond: dict[int, dict[str, list[float]]] = {}
 
-    # Usage head for this organism (may be None if not available)
-    usage_head = usage_heads.get(organism_index)
-    
-    # For usage head inference, we need the organism index of the usage head, not the data
-    # Create a tensor with the usage head's organism index for all samples in batch
-    usage_org_idx_t = None
-    if usage_head is not None:
-        # Will be broadcast to batch size when needed
-        usage_org_idx_template = torch.tensor([organism_index], dtype=torch.long, device=device)
+    usage_head_configs = usage_head_configs or {}
+    usage_by_head: dict[int, dict] = {idx: {} for idx in usage_head_configs}
+    # Only heads that actually exist on the model produce predictions; a configured head
+    # without a module yields an empty usage_per_cond (as before).
+    active_heads = {
+        idx: (usage_heads[idx], cond_map)
+        for idx, cond_map in usage_head_configs.items()
+        if usage_heads.get(idx) is not None
+    }
+
+    # Mirror model.predict()'s mixed-precision handling for the classification head.
+    device_type = "cuda" if torch.device(device).type == "cuda" else "cpu"
+    compute_dtype = model.dtype_policy.compute_dtype
+    use_amp = compute_dtype != torch.float32
 
     for batch in tqdm(loader, desc="  Inference", unit="batch"):
         seq = batch["sequence"].to(device)
         org_idx_t = batch["organism_index"].to(device)
+        has_mask = "loss_mask" in batch
 
         with torch.no_grad():
-            # Always use model.predict() for classification (works correctly)
-            preds = model.predict(seq, org_idx_t, resolutions=(1,))
-            cls_probs = preds["splice_sites_classification"]["probs"]  # (B, S, 5)
-            
-            if usage_head is not None:
-                # For usage, get embeddings separately and call usage head
-                # channels_last=False -> embeddings are (B, C, S) NCL format
-                out = model.predict(
-                    seq, org_idx_t,
-                    resolutions=(1,),
-                    channels_last=False,
-                    embeddings_only=True,
+            # Trunk only, NCL embeddings (B, C, S): the layout every splice head consumes,
+            # so no transpose copies. Heads are applied below on these embeddings.
+            emb_1bp = model.predict(
+                seq, org_idx_t,
+                resolutions=(1,),
+                channels_last=False,
+                embeddings_only=True,
+            )["embeddings_1bp"]  # (B, C, S) float32
+
+            # Classification head with the same autocast/output casting model.predict()
+            # applies, and softmax over the last dim (channels_last=True), so the probs
+            # are bit-identical to model.predict(seq, org_idx_t, resolutions=(1,)).
+            with torch.autocast(device_type=device_type, dtype=compute_dtype, enabled=use_amp):
+                cls_out = model.splice_sites_classification_head(
+                    emb_1bp, org_idx_t, channels_last=True
                 )
-                emb_1bp = out["embeddings_1bp"]  # (B, C, S) NCL format
-
-                # Create organism index tensor for usage head (use usage head's organism index, not data's)
-                batch_size = emb_1bp.shape[0]
-                usage_org_idx_t = usage_org_idx_template.expand(batch_size)
-
-                # Usage head expects channels_last=True even with NCL input
-                # IMPORTANT: Pass the usage head's organism index, not the data's organism index
-                usage_preds = usage_head(
-                    emb_1bp, usage_org_idx_t, channels_last=True
-                )["predictions"].float()  # (B, S, n_cond)
+            cls_probs_t = model._upcast_outputs(model._cast_outputs(cls_out["probs"]))  # (B, S, 5)
+            if has_mask:
+                mask_t = batch["loss_mask"].to(device, non_blocking=True)
+                cls_kept = cls_probs_t[mask_t]  # (n_kept, 5), row-major (window, position) order
             else:
-                usage_preds = None
+                cls_kept = cls_probs_t.reshape(-1, 5)
+            all_cls_probs.append(cls_kept.cpu().numpy())
 
-        all_cls_probs.append(cls_probs.cpu().numpy().reshape(-1, 5))
-        all_cls_labels.append(batch["classification_labels"].numpy().reshape(-1))
+            if active_heads and "usage_positions" in batch:
+                # Usage heads run outside autocast on the float32 embeddings (as before).
+                B = emb_1bp.shape[0]
+                positions = batch["usage_positions"]  # (B, max_sites), -1 padded
+                gather_idx = positions.clamp(min=0).to(device)[:, None, :]  # (B, 1, max_sites)
 
-        # Collect loss_mask if present (for gene body filtering)
-        if "loss_mask" in batch:
-            all_loss_masks.append(batch["loss_mask"].numpy().reshape(-1))
+                for usage_org_idx, (usage_head, cond_map) in active_heads.items():
+                    # Pass the usage head's organism index, not the data's organism index
+                    head_org_t = torch.full((B,), usage_org_idx, dtype=torch.long, device=device)
+                    preds_ncl = usage_head(
+                        emb_1bp, head_org_t, channels_last=False
+                    )["predictions"].float()  # (B, T_model, S)
+                    preds_at_sites = torch.gather(
+                        preds_ncl, 2, gather_idx.expand(-1, preds_ncl.shape[1], -1)
+                    ).transpose(1, 2)  # (B, max_sites, T_model)
+
+                    _accumulate_usage(
+                        preds_at_sites.cpu().numpy(),
+                        positions.numpy(),
+                        batch["usage_values"].numpy(),
+                        batch["usage_mask"].numpy(),
+                        usage_by_head[usage_org_idx],
+                        condition_mapping=cond_map,
+                        window_starts=batch["window_start"].numpy() if "window_start" in batch else None,
+                        chrom_idxs=batch["chrom_idx"].numpy() if "chrom_idx" in batch else None,
+                        coverage=batch["usage_coverage"].numpy() if "usage_coverage" in batch else None,
+                    )
+
+        labels_b = batch["classification_labels"].numpy()  # (B, S)
+        if has_mask:
+            mask_b = batch["loss_mask"].numpy()
+            all_loss_masks.append(mask_b.reshape(-1))
+            all_cls_labels.append(labels_b[mask_b])
+        else:
+            mask_b = None
+            all_cls_labels.append(labels_b.reshape(-1))
 
         if collect_positions:
             win_starts_b = batch["window_start"].numpy().astype(np.int64)  # (B,)
             chrom_idx_b = batch["chrom_idx"].numpy().astype(np.int32)      # (B,)
-            pos_offsets = np.arange(cls_probs.shape[1], dtype=np.int64)    # (S,)
-            genomic = win_starts_b[:, None] + pos_offsets[None, :]         # (B, S)
-            chrom_b = np.repeat(chrom_idx_b[:, None], pos_offsets.size, axis=1)  # (B, S)
-            all_genomic_pos.append(genomic.reshape(-1))
-            all_chrom_idx_pos.append(chrom_b.reshape(-1))
-
-        if usage_preds is not None and "usage_positions" in batch and not skip_usage:
-            _accumulate_usage(
-                usage_preds.cpu().numpy(),
-                batch["usage_positions"].numpy(),
-                batch["usage_values"].numpy(),
-                batch["usage_mask"].numpy(),
-                usage_per_cond,
-                condition_mapping=condition_mapping,
-                window_starts=batch["window_start"].numpy() if "window_start" in batch else None,
-                chrom_idxs=batch["chrom_idx"].numpy() if "chrom_idx" in batch else None,
-                coverage=batch["usage_coverage"].numpy() if "usage_coverage" in batch else None,
-            )
+            if mask_b is not None:
+                b_idx, s_idx = np.nonzero(mask_b)  # row-major, same order as boolean indexing
+            else:
+                b_idx, s_idx = np.divmod(np.arange(labels_b.size, dtype=np.int64), labels_b.shape[1])
+            all_genomic_pos.append(win_starts_b[b_idx] + s_idx.astype(np.int64))
+            all_chrom_idx_pos.append(chrom_idx_b[b_idx])
 
     cls_probs = np.concatenate(all_cls_probs, axis=0)
     cls_labels = np.concatenate(all_cls_labels, axis=0)
 
-    # Concatenate loss_mask before filtering
-    loss_mask_full = None
+    loss_mask_full = np.concatenate(all_loss_masks, axis=0) if all_loss_masks else None
     genomic_pos_full = None
     chrom_idx_full = None
-    if all_loss_masks:
-        loss_mask_full = np.concatenate(all_loss_masks, axis=0)
-        cls_probs = cls_probs[loss_mask_full]
-        cls_labels = cls_labels[loss_mask_full]
-        if collect_positions and all_genomic_pos:
-            genomic_pos_full = np.concatenate(all_genomic_pos, axis=0)[loss_mask_full]
-            chrom_idx_full = np.concatenate(all_chrom_idx_pos, axis=0)[loss_mask_full]
+    if collect_positions and all_genomic_pos and loss_mask_full is not None:
+        genomic_pos_full = np.concatenate(all_genomic_pos, axis=0)
+        chrom_idx_full = np.concatenate(all_chrom_idx_pos, axis=0)
 
     return (
         cls_probs,
         cls_labels,
-        usage_per_cond,
+        usage_by_head,
         loss_mask_full,
         genomic_pos_full,
         chrom_idx_full,
@@ -954,7 +976,7 @@ def collect_predictions(
 
 
 def _accumulate_usage(
-    usage_preds: np.ndarray,    # (B, S, T_model) where T_model = model n_conditions
+    site_preds: np.ndarray,     # (B, max_sites, T_model) predictions gathered at each site slot
     positions: np.ndarray,      # (B, max_sites)  -1 padded
     values: np.ndarray,         # (B, max_sites, n_data_cond, max_replicates)
     mask: np.ndarray,           # (B, max_sites, n_data_cond, max_replicates) bool
@@ -972,15 +994,20 @@ def _accumulate_usage(
     condition) before comparison against the model's single per-condition
     prediction.
 
+    Vectorised over the batch. Entries are appended in window-major, then site order
+    for each condition, and new conditions are added to ``acc`` in the order they are
+    first observed (window, then condition index) -- the same layout a per-window loop
+    produces.
+
     Args:
-        usage_preds: Model predictions (B, S, T_model)
+        site_preds: Model predictions at each site slot (B, max_sites, T_model); entries for
+                    padded slots (positions == -1) are ignored.
         condition_mapping: Optional mapping from data condition index -> model condition index
                           for cross-species evaluation. Only accumulates mapped conditions.
         window_starts: Optional genomic start coordinate for each window in the batch.
         chrom_idxs: Optional chromosome integer index for each window in the batch.
     """
-    B = positions.shape[0]
-    n_data_cond = values.shape[2]
+    B, max_sites = positions.shape
 
     # Pool the replicate axis into one coverage-weighted value per (B, max_sites,
     # n_data_cond), and a "any real replicate observed" mask of the same shape.
@@ -988,44 +1015,44 @@ def _accumulate_usage(
     denom = rep_w.sum(-1)
     with np.errstate(invalid="ignore", divide="ignore"):
         values_pooled = np.where(denom > 0, (values * rep_w).sum(-1) / np.where(denom > 0, denom, 1), 0.0)
-    mask_pooled = mask.any(-1)
 
-    for i in range(B):
-        valid = positions[i] != -1
-        if not valid.any():
-            continue
-        valid_pos = positions[i][valid]
-        valid_vals = values_pooled[i][valid]  # (k, n_data_cond)
-        valid_mask = mask_pooled[i][valid]    # (k, n_data_cond) bool
-        valid_preds = usage_preds[i, valid_pos, :]  # (k, T_model)
+    valid = positions != -1                                    # (B, max_sites)
+    obs_all = mask.any(-1) & valid[:, :, None]                 # (B, max_sites, n_data_cond)
+    win_has_cond = obs_all.any(1)                              # (B, n_data_cond)
+    present = np.flatnonzero(win_has_cond.any(0))
+    if present.size == 0:
+        return
+    # Order conditions by the first window that observes them (ties by index), so that
+    # dict insertion order of new keys matches a window-by-window accumulation.
+    first_win = win_has_cond[:, present].argmax(0)
+    present = present[np.lexsort((present, first_win))]
 
-        # Genomic coordinates for this window
-        win_start = int(window_starts[i]) if window_starts is not None else 0
-        chrom_idx = int(chrom_idxs[i]) if chrom_idxs is not None else -1
-        # 0-based absolute genomic positions for the valid sites
-        genomic_positions = valid_pos + win_start  # (k,) int
+    win_start = (np.asarray(window_starts, dtype=np.int64) if window_starts is not None
+                 else np.zeros(B, dtype=np.int64))
+    chrom = (np.asarray(chrom_idxs, dtype=np.int64) if chrom_idxs is not None
+             else np.full(B, -1, dtype=np.int64))
+    genomic_positions = positions.astype(np.int64) + win_start[:, None]  # (B, max_sites)
+    chrom_per_site = np.broadcast_to(chrom[:, None], (B, max_sites))
 
-        for data_c in range(n_data_cond):
-            obs = valid_mask[:, data_c]
-            if not obs.any():
+    for data_c in present:
+        data_c = int(data_c)
+        # Map data condition index to model condition index if needed
+        if condition_mapping is not None:
+            if data_c not in condition_mapping:
+                # This data condition wasn't in model training, skip
                 continue
-            
-            # Map data condition index to model condition index if needed
-            if condition_mapping is not None:
-                if data_c not in condition_mapping:
-                    # This data condition wasn't in model training, skip
-                    continue
-                model_c = condition_mapping[data_c]
-            else:
-                # No mapping, assume 1:1 correspondence
-                model_c = data_c
-            
-            # Extract predictions from model output index, store under data index
-            entry = acc.setdefault(data_c, {"pred": [], "true": [], "chrom_idx": [], "genomic_pos": []})
-            entry["pred"].extend(valid_preds[obs, model_c].tolist())
-            entry["true"].extend(valid_vals[obs, data_c].tolist())
-            entry["chrom_idx"].extend([chrom_idx] * int(obs.sum()))
-            entry["genomic_pos"].extend(genomic_positions[obs].tolist())
+            model_c = condition_mapping[data_c]
+        else:
+            # No mapping, assume 1:1 correspondence
+            model_c = data_c
+
+        obs = obs_all[:, :, data_c]  # (B, max_sites)
+        # Extract predictions from model output index, store under data index
+        entry = acc.setdefault(data_c, {"pred": [], "true": [], "chrom_idx": [], "genomic_pos": []})
+        entry["pred"].extend(site_preds[:, :, model_c][obs].tolist())
+        entry["true"].extend(values_pooled[:, :, data_c][obs].tolist())
+        entry["chrom_idx"].extend(chrom_per_site[obs].tolist())
+        entry["genomic_pos"].extend(genomic_positions[obs].tolist())
 
 
 # ---------------------------------------------------------------------------
@@ -2272,6 +2299,18 @@ def save_predictions(
 
     # Save usage predictions
     usage_path = out_dir / f"usage_{org_name}.npz"
+    save_usage_npz(usage_path, usage_per_cond, chrom_names=chrom_names)
+
+    logging.getLogger("evaluate_splice").info(f"  Saved: {npz_path}  {usage_path}")
+
+
+def save_usage_npz(
+    usage_path: Path,
+    usage_per_cond: dict,
+    chrom_names: list[str] | None = None,
+) -> None:
+    """Write one ``usage_*.npz``: flat per-observation arrays plus per-condition
+    sufficient statistics (and ``chr_pos`` strings when coordinates are available)."""
     cond_ids_chunks: list[np.ndarray] = []
     pred_chunks: list[np.ndarray] = []
     true_chunks: list[np.ndarray] = []
@@ -2346,8 +2385,6 @@ def save_predictions(
         npz_kwargs["chr_pos"] = chr_pos
 
     np.savez_compressed(usage_path, **npz_kwargs)
-
-    logging.getLogger("evaluate_splice").info(f"  Saved: {npz_path}  {usage_path}")
 
 
 def load_usage_npz(usage_file: Path) -> dict:
@@ -2931,40 +2968,39 @@ def main() -> None:
             _chrom_names = getattr(_ds, "chrom_names", None)
 
             # -- Inference ---------------------------------------------------
-            # Classification predictions (same for all usage heads)
-            logger.info(f"[{org_name}] Running classification inference …")
-            cls_probs, cls_labels, _, loss_mask_full, genomic_pos_full, chrom_idx_full = collect_predictions(
+            # One pass over the windows: classification predictions plus every
+            # usage head configuration, all from the same trunk forward pass.
+            run_usage = bool(usage_head_configs) and not args.skip_usage
+            head_desc = (
+                ", ".join(
+                    f"{source_name} (organism_index {usage_org_idx})"
+                    for usage_org_idx, (_, source_name) in usage_head_configs.items()
+                )
+                if run_usage else "none"
+            )
+            logger.info(
+                f"[{org_name}] Running inference (classification + usage heads: {head_desc}) "
+                f"in a single pass …"
+            )
+            cls_probs, cls_labels, usage_by_head, loss_mask_full, genomic_pos_full, chrom_idx_full = collect_predictions(
                 model=model,
                 usage_heads=usage_heads,
                 loader=loader,
                 device=device,
-                organism_index=org_idx,
-                seq_len=seq_len,
-                skip_usage=True,  # Skip usage for now, compute separately per head
-                condition_mapping=None,
+                usage_head_configs=(
+                    {idx: cond_map for idx, (cond_map, _) in usage_head_configs.items()}
+                    if run_usage else None
+                ),
                 collect_positions=_chrom_names is not None,
             )
 
             # Usage predictions (one per usage head configuration)
             usage_results: dict[str, tuple[dict, str]] = {}  # suffix -> (usage_per_cond, source_name)
-            
-            if usage_head_configs and not args.skip_usage:
+
+            if run_usage:
                 for usage_org_idx, (condition_mapping, source_name) in usage_head_configs.items():
-                    logger.info(
-                        f"[{org_name}] Running usage inference with {source_name} head "
-                        f"(organism_index {usage_org_idx}) …"
-                    )
-                    _, _, usage_per_cond, _, _, _ = collect_predictions(
-                        model=model,
-                        usage_heads=usage_heads,
-                        loader=loader,
-                        device=device,
-                        organism_index=usage_org_idx,
-                        seq_len=seq_len,
-                        skip_usage=False,
-                        condition_mapping=condition_mapping,
-                    )
-                    
+                    usage_per_cond = usage_by_head[usage_org_idx]
+
                     # Create suffix for filenames:
                     # Use "from_{source_name}" whenever the head's organism_index differs
                     # from the eval species (including additional heads in same-species evals).
@@ -3003,25 +3039,14 @@ def main() -> None:
 
             # Usage predictions (one file per usage head)
             if usage_results:
-                import tempfile
-                import shutil
-
                 idx_to_label = load_condition_labels(spec.get("usage_parquet"))
 
                 for suffix, (usage_per_cond, source_name) in usage_results.items():
                     result_name = f"{org_name}_{suffix}" if suffix else org_name
                     usage_path = out_dir / f"usage_{result_name}.npz"
 
-                    # Use save_predictions to create usage file, extract just the usage part
-                    with tempfile.TemporaryDirectory(dir=out_dir) as tmpdir:
-                        tmpdir_path = Path(tmpdir)
-                        save_predictions(tmpdir_path, "temp", cls_probs, cls_labels, usage_per_cond,
-                                         chrom_names=_chrom_names)
-                        # Move only usage file
-                        temp_usage = tmpdir_path / "usage_temp.npz"
-                        if temp_usage.exists():
-                            shutil.move(str(temp_usage), str(usage_path))
-                            logger.info(f"  Saved: {usage_path}")
+                    save_usage_npz(usage_path, usage_per_cond, chrom_names=_chrom_names)
+                    logger.info(f"  Saved: {usage_path}")
 
                     # Tidy usage Parquet (Species/Chromosome/Position/SSE_true/SSE_pred/
                     # Condition_Name/Tissue/Timepoint), replacing the manual notebook step
