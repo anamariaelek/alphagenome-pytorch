@@ -1168,10 +1168,11 @@ def create_model(
         print(f"Mode: {mode_desc}")
 
     elif args.mode == "full":
-        # All model parameters
+        # All model parameters. The splice heads (classification, usage, junction)
+        # are already submodules of `model`, so model.parameters() covers them;
+        # adding usage_heads' parameters again would put them in AdamW twice and
+        # step them twice per optimizer step.
         trainable_params = list(model.parameters())
-        for h in usage_heads.values():
-            trainable_params.extend(list(h.parameters()))
         print("Mode: full (all parameters trainable)")
 
     else:

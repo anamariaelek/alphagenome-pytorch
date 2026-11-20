@@ -243,8 +243,13 @@ def splice_usage_loss(
         rep_w = usage_coverage * usage_mask_clean.to(predictions.dtype)
     else:
         rep_w = usage_mask_clean.to(predictions.dtype)
+    # torch.where, not a plain multiply: a non-finite target excluded by
+    # usage_mask_clean still has weight 0, and NaN * 0 = NaN would turn the pooled
+    # target -- and with it delta_mse/trajectory_pearson/tissue_contrast -- into NaN.
+    rep_w = torch.where(usage_mask_clean, rep_w, torch.zeros_like(rep_w))
     denom = rep_w.sum(-1).clamp(min=1e-6)
-    usage_values_pooled = (usage_values * rep_w).sum(-1) / denom          # (B, max_sites, n_cond)
+    usage_values_safe = torch.where(usage_mask_clean, usage_values, torch.zeros_like(usage_values))
+    usage_values_pooled = (usage_values_safe * rep_w).sum(-1) / denom     # (B, max_sites, n_cond)
     usage_mask_pooled = usage_mask_clean.any(-1)                          # (B, max_sites, n_cond)
     usage_coverage_pooled = (
         usage_coverage.sum(-1) if usage_coverage is not None

@@ -1,0 +1,34 @@
+name: alphagenome_pytorch_genomicsxai
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib-base
+  - seaborn
+  - statsmodels
+  - ipykernel
+  - pip
+  - pip:
+      # CUDA 12.8 PyTorch for aarch64 (Grace Hopper); same version as the x86 env.
+      # Afterwards, from the repo clone: pip install -e .
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.10.0
+      - huggingface-hub
+      - safetensors
+      - pyfaidx
+      - pybigwig
+      - pyranges==0.1.4
+      - intervaltree
+      - natsort
+      - scikit-learn
+      - umap-learn
+      - numba
+      - pyarrow
+      - tqdm
+      - rich
+      - typer
+      - pyyaml
+      - pytest

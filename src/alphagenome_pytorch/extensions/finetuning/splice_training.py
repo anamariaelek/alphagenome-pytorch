@@ -95,6 +95,20 @@ class SpliceTrainMetrics:
     latency_ms: float = 0.0  # average batch latency in milliseconds
 
 
+def _amp_dtype(amp_device: str) -> torch.dtype:
+    """Autocast dtype: bfloat16 wherever the GPU supports it.
+
+    ``autocast("cuda")`` without a dtype means float16, whose max is 65504. With no
+    GradScaler, that both overflows trunk activations once fine-tuning lets weights
+    drift (inf logits -> NaN loss, typically only after an epoch or two) and
+    underflows small gradients to zero. bfloat16 has float32's range and is what the
+    JAX reference (and DtypePolicy.mixed_precision) computes in.
+    """
+    if amp_device == "cuda" and not torch.cuda.is_bf16_supported():
+        return torch.float16
+    return torch.bfloat16
+
+
 def _junction_loss(
     junction_head: "nn.Module | dict[int, nn.Module] | None",
     emb_1bp: Tensor,
@@ -108,8 +122,9 @@ def _junction_loss(
     if junction_head is None or "junction_index" not in batch:
         return torch.tensor(0.0, device=device)
     positions = batch["splice_site_positions"].to(device)
-    # Under CUDA autocast (float16 by default) the donor x acceptor products and the
-    # per-site sums can overflow; the pretrained JAX head accumulates in float32 too.
+    # Under half-precision autocast the donor x acceptor products and the per-site
+    # sums can overflow (float16) or lose precision (bfloat16); the pretrained JAX
+    # head accumulates in float32 too.
     with autocast(device.type if hasattr(device, "type") else str(device).split(":")[0],
                   enabled=False):
         out = junction_head(emb_1bp, org_idx, splice_site_positions=positions)
@@ -172,8 +187,13 @@ def train_epoch_splice(
     usage_traj_warmup_epochs: int = 0,
     junction_head: "nn.Module | dict[int, nn.Module] | None" = None,
     junction_weight: float = 0.0,
+    max_consecutive_nonfinite: int = 200,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
+
+    Batches with a non-finite loss are dropped (counted in the log line as
+    ``nonfinite_dropped``); ``max_consecutive_nonfinite`` of them in a row (0 to
+    disable) raises, since that means the model itself is producing inf/NaN.
 
     ``tissue_cond_groups`` groups condition indices by tissue (each ordered by
     timepoint) so the trajectory/delta usage-loss terms measure *within-tissue*
@@ -252,6 +272,9 @@ def train_epoch_splice(
     step = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
+    amp_dtype = _amp_dtype(amp_device)
+    n_nonfinite = 0            # batches dropped this epoch for a non-finite loss
+    consecutive_nonfinite = 0  # abort once this reaches max_consecutive_nonfinite
 
     optimizer.zero_grad()
 
@@ -295,7 +318,7 @@ def train_epoch_splice(
 
         # Single-GPU mode
         with nullcontext():
-            with autocast(amp_device, enabled=amp_enabled):
+            with autocast(amp_device, dtype=amp_dtype, enabled=amp_enabled):
                 # Run trunk (encoder + transformer + decoder) to get 1 bp embeddings
                 outputs = model.forward(
                     seq, org_idx,
@@ -349,14 +372,38 @@ def train_epoch_splice(
                 if junction_weight > 0:
                     junction_loss_val = _junction_loss(junction_head, emb_1bp, org_idx, batch, device)
                     total_loss = total_loss + junction_weight * junction_loss_val
-            if not torch.isfinite(total_loss):
-                continue
+            # A non-finite batch is dropped (no backward), but the loop still falls
+            # through to the accumulation-boundary check below: a bare `continue`
+            # here used to skip the optimizer step whenever the dropped batch was
+            # the last of its accumulation window, silently merging two windows.
+            batch_ok = bool(torch.isfinite(total_loss))
+            if not batch_ok:
+                n_nonfinite += 1
+                consecutive_nonfinite += 1
+                if n_nonfinite <= 5:
+                    print(
+                        f"  WARNING: non-finite loss at epoch {epoch} batch {batch_idx+1} "
+                        f"(organism {int(org_idx[0].item())}): cls={cls_loss_val.item():.4g} "
+                        f"usage={float(usage_loss_val):.4g} junction={float(junction_loss_val):.4g} "
+                        f"— batch dropped ({n_nonfinite} this epoch; further ones are only counted)"
+                    )
+                if max_consecutive_nonfinite > 0 and consecutive_nonfinite >= max_consecutive_nonfinite:
+                    raise RuntimeError(
+                        f"{consecutive_nonfinite} consecutive non-finite training losses at epoch "
+                        f"{epoch} batch {batch_idx+1}: the model is producing inf/NaN, not just "
+                        f"hitting an odd batch. Aborting instead of burning walltime; resume from "
+                        f"the last epoch checkpoint with a lower lr."
+                    )
+            else:
+                consecutive_nonfinite = 0
 
             # Only accumulate breakdown stats for batches that actually
             # contributed to the update — otherwise a single skipped batch
             # with a non-finite component (e.g. bce_loss) would poison the
             # running sum with NaN for the rest of the epoch, even though
             # the optimizer correctly skipped it above.
+            if not batch_ok:
+                usage_corr = {}
             if "bce_loss" in usage_corr and math.isfinite(usage_corr["bce_loss"]):
                 usage_bce_sum += usage_corr["bce_loss"]
                 n_usage_bce_batches += 1
@@ -379,7 +426,8 @@ def train_epoch_splice(
                 n_usage_tcontrast_batches += 1
 
             # Scale for accumulation
-            (total_loss / accumulation_steps).backward()
+            if batch_ok:
+                (total_loss / accumulation_steps).backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
             # Gradient clipping to prevent exploding gradients
@@ -408,21 +456,23 @@ def train_epoch_splice(
             # This helps release memory from gradient accumulation
             gc.collect()
 
-            # Accumulate metrics
-            metrics.loss += total_loss.item()
-            metrics.cls_loss += cls_loss_val.item()
-            metrics.usage_loss += usage_loss_val.item()
-            metrics.junction_loss += junction_loss_val.item()
-            # No correlation tracking
-            metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
-            metrics.n_usage_marker_sites += usage_corr.get("n_marker_sites", 0)
-            metrics.n_batches += 1
+            # Accumulate metrics (from the window's last batch, if it was finite)
+            if batch_ok:
+                metrics.loss += total_loss.item()
+                metrics.cls_loss += cls_loss_val.item()
+                metrics.usage_loss += usage_loss_val.item()
+                metrics.junction_loss += junction_loss_val.item()
+                # No correlation tracking
+                metrics.n_usage_valid_pairs += usage_corr.get("n_valid", 0)
+                metrics.n_usage_marker_sites += usage_corr.get("n_marker_sites", 0)
+                metrics.n_batches += 1
 
             if log_every > 0 and step % log_every == 0:
-                avg = metrics.loss / metrics.n_batches
-                avg_cls = metrics.cls_loss / metrics.n_batches
-                avg_usg = metrics.usage_loss / metrics.n_batches
-                avg_jx = metrics.junction_loss / metrics.n_batches
+                _nb = max(metrics.n_batches, 1)
+                avg = metrics.loss / _nb
+                avg_cls = metrics.cls_loss / _nb
+                avg_usg = metrics.usage_loss / _nb
+                avg_jx = metrics.junction_loss / _nb
                 junction_str = f"  junction={avg_jx:.4f}" if junction_weight > 0 else ""
                 # Compute rolling average of recent batch times (in seconds)
                 avg_batch_time = sum(recent_batch_times) / len(recent_batch_times) if recent_batch_times else 0.0
@@ -454,6 +504,7 @@ def train_epoch_splice(
                     usage_bce_str + usage_delta_str + usage_traj_str + usage_tcorr_str + usage_trmse_str +
                     usage_tcontrast_str +
                     f"  {sps:.2f} steps/s  batch_time={avg_batch_time:.2f}s  rss_peak={rss_gb:.2f}GB"
+                    + (f"  nonfinite_dropped={n_nonfinite}" if n_nonfinite else "")
                 )
                 # Add to logger
                 log_metrics = {
@@ -609,6 +660,7 @@ def validate_splice(
     n_usage_tcontrast_batches = 0
     amp_device = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = use_amp and amp_device == "cuda"
+    amp_dtype = _amp_dtype(amp_device)
 
     val_start = time.perf_counter()
 
@@ -625,7 +677,7 @@ def validate_splice(
         else:
             active_usage_head = usage_head
 
-        with autocast(amp_device, enabled=amp_enabled):
+        with autocast(amp_device, dtype=amp_dtype, enabled=amp_enabled):
             outputs = model.forward(
                 seq, org_idx,
                 resolutions=(1,),

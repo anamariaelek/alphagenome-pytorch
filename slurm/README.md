@@ -128,6 +128,7 @@ slurm/submit.sh --dry-run ...    # print the command without running it
 | `configs/hqmrboc_132kb.yaml` | 80 | 24G | 2 | 36:00:00 |
 | `configs/hqm_pilot.yaml` | 40 | 32G | 2 | 06:00:00 |
 | `configs/finetune_full_hmrbo_132kb.yaml` (no longer exists; full finetune) | 80 | 320G | 16 | 48:00:00 |
+| `configs/hqmrboc_132kb_junctions_full.yaml` (HoreKa, estimated: ~15-18 h/epoch, chain 48 h jobs) | H200 (`--partition accelerated-h200`) | 64G | 8 | 48:00:00 |
 | `evaluate_splice` / `evaluate_splice_brawand` | 40 | 40G | 1 | 12:00:00 |
 | `predict_region` | 20 | 60G | 1 | 8:00:00 |
 

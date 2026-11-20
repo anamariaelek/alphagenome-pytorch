@@ -348,6 +348,30 @@ class TestSpliceUsageLoss:
         expected = F.binary_cross_entropy_with_logits(torch.tensor(1.5), torch.tensor(0.7))
         assert loss.item() == pytest.approx(expected.item(), rel=1e-5)
 
+    def test_nan_target_replicate_does_not_poison_pooled_terms(self):
+        """A non-finite replicate value is excluded from the mask; it must not turn
+        the coverage-pooled target (and so the trajectory/contrast terms) into NaN."""
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, max_sites, n_cond = 1, 64, 1, 6
+        usage_positions = torch.tensor([[12]])
+        # Two replicates; replicate 1 of condition 2 is NaN (e.g. a degenerate SSE).
+        usage_values = torch.tensor([0.1, 0.4, 0.8, 0.2, 0.3, 0.25]).view(1, 1, n_cond, 1).repeat(1, 1, 1, 2)
+        usage_values[0, 0, 2, 1] = float("nan")
+        usage_mask = torch.ones(B, max_sites, n_cond, 2, dtype=torch.bool)
+        logits = torch.randn(B, S, n_cond, requires_grad=True)
+
+        loss, _ = splice_usage_loss(
+            logits, usage_positions, usage_values, usage_mask,
+            usage_loss_weights={"bce": 1.0, "delta_mse": 5.0, "trajectory_pearson": 5.0,
+                                "tissue_contrast": 5.0},
+            tissue_cond_groups=[[0, 1, 2], [3, 4, 5]],
+            usage_coverage=torch.full((B, max_sites, n_cond, 2), 20.0),
+        )
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert torch.isfinite(logits.grad).all()
+
     # ─── tissue_contrast ────────────────────────────────────────────────────
 
     def test_tissue_contrast_rewards_matching_marker_enrichment(self):
