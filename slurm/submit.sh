@@ -19,7 +19,7 @@
 #   --sbatch-arg X  extra raw sbatch argument, repeatable (e.g. --sbatch-arg --dependency=afterok:123)
 #   --dry-run    print the command instead of running it
 #
-# The cluster comes from $AG_CLUSTER (helix|uc3|horeka|sasselab3), or else from the hostname;
+# The cluster comes from $AG_CLUSTER (helix|uc3|horeka|horeka2|sasselab3), or else from the hostname;
 # see slurm/clusters/. On sasselab3 there is no Slurm: the job runs in the background
 # with nohup, and the resource options are ignored. A --sbatch-arg --array=SPEC is still
 # honored there: tasks run one after another (not concurrently, to avoid overcommitting a

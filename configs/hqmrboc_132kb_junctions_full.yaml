@@ -15,9 +15,9 @@
 #   ~1.6-1.8x the LoRA time per batch -> ~15-18 h per epoch on one H100/H200.
 #   Checkpoints ~6 GB each (weights + AdamW state).
 #
-# HoreKa:
+# HoreKa 2 (AG_CLUSTER=horeka2):
 #   slurm/stage_inputs.sh configs/hqmrboc_132kb_junctions_full.yaml
-#   slurm/submit.sh --partition accelerated-h200 --mem 64G --cpus 8 --time 48:00:00 \
+#   slurm/submit.sh --partition gpu-h200 --mem 64G --cpus 8 --time 48:00:00 \
 #       finetune_splice configs/hqmrboc_132kb_junctions_full.yaml
 #   (resume: auto, so resubmitting the same command continues from the last epoch)
 #

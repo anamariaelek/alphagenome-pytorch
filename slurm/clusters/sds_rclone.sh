@@ -1,5 +1,5 @@
 # sds access for clusters where it is only reachable over SFTP with rclone (HoreKa, UC3).
-# Sourced by clusters/horeka.sh and clusters/uc3.sh; ag_setup_sds runs from their
+# Sourced by clusters/horeka.sh, clusters/horeka2.sh and clusters/uc3.sh; ag_setup_sds runs from their
 # cluster_env, inside the job.
 #
 # The job's HOME becomes a per-job directory that links every entry of your real home

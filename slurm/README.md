@@ -1,4 +1,4 @@
-# Job submission (Helix, bwUniCluster3, HoreKa, sasselab3)
+# Job submission (Helix, bwUniCluster3, HoreKa, HoreKa 2, sasselab3)
 
 Python entry points live in `scripts/`. This directory holds the batch-job layer around them.
 It is split by layer, not by cluster:
@@ -11,7 +11,8 @@ slurm/
     detect.sh          # sets AG_CLUSTER from $AG_CLUSTER or the hostname
     helix.sh           # partition/gres syntax + modules for Helix
     uc3.sh             # ... for bwUniCluster 3.0
-    horeka.sh          # ... for HoreKa (KIT)
+    horeka.sh          # ... for HoreKa (KIT, legacy)
+    horeka2.sh         # ... for HoreKa 2 (KIT)
     sds_rclone.sh      # sds via rclone (HoreKa, UC3): workspace copy or per-job mount
   stage_inputs.sh      # copy a config's inputs to the workspace (HoreKa, UC3 login node)
     sasselab3.sh       # no Slurm: runs the job directly with nohup
@@ -28,14 +29,14 @@ them as flags.
 Add this to `~/.bashrc` (if it's missing, `submit.sh` falls back to hostname matching):
 
 ```bash
-export AG_CLUSTER=helix        # or uc3, horeka, sasselab3
+export AG_CLUSTER=helix        # or uc3, horeka, horeka2, sasselab3
 # export AG_SLURM_ACCOUNT=...  # only if the cluster needs --account
 ```
 
 The conda env must exist on each machine at `~/miniforge3`. To use a different location or
 env name, set `AG_CONDA_SH` / `AG_CONDA_ENV`.
 
-**HoreKa and bwUniCluster3: sds over rclone**
+**HoreKa, HoreKa 2 and bwUniCluster3: sds over rclone**
 
 On these clusters sds is only reachable over SFTP with rclone (on the login node it is
 mounted at `~/sds`). `clusters/sds_rclone.sh` sets it up inside each job, in one of two
@@ -84,7 +85,15 @@ checkpoints. Already-copied, unchanged files are skipped.
   `slurm/submit.sh --partition dev_gpu_h100 --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`
   (check the dev partition name in `sinfo -s`).
 
-**HoreKa, first use:**
+**HoreKa 2, first use** (see `clusters/horeka2.sh` for the partition list):
+- Log in to `hk2-x86.scc.kit.edu` and put `export AG_CLUSTER=horeka2` in `~/.bashrc`.
+- The H100/H200 partitions are x86: build the env from `env_alphagenome_pytorch_genomicsxai.yml`.
+  Only `gpu-b200` is ARM and needs a separate env from the `_aarch64.yml` file (see horeka2.sh).
+- Short test (1 hour, one job at a time; there is no H200 dev queue):
+  `slurm/submit.sh --partition dev-gpu-h100 --time 00:59:00 finetune_splice configs/hqm_pilot.yaml`.
+- Modules use EasyBuild names (`module spider CUDA`), not HoreKa 1's `devel/cuda`.
+
+**HoreKa (legacy), first use:**
 - Short test (dev queues: 1 hour, one job at a time):
   `slurm/submit.sh --partition dev_accelerated --time 00:20:00 finetune_splice configs/hqm_pilot.yaml`.
 - **Account.** If your user belongs to more than one project, set `AG_SLURM_ACCOUNT`.
@@ -128,7 +137,7 @@ slurm/submit.sh --dry-run ...    # print the command without running it
 | `configs/hqmrboc_132kb.yaml` | 80 | 24G | 2 | 36:00:00 |
 | `configs/hqm_pilot.yaml` | 40 | 32G | 2 | 06:00:00 |
 | `configs/finetune_full_hmrbo_132kb.yaml` (no longer exists; full finetune) | 80 | 320G | 16 | 48:00:00 |
-| `configs/hqmrboc_132kb_junctions_full.yaml` (HoreKa, estimated: ~15-18 h/epoch, chain 48 h jobs) | H200 (`--partition accelerated-h200`) | 64G | 8 | 48:00:00 |
+| `configs/hqmrboc_132kb_junctions_full.yaml` (HoreKa 2, estimated: ~15-18 h/epoch, chain 48 h jobs) | H200 (`--partition gpu-h200`) | 64G | 8 | 48:00:00 |
 | `evaluate_splice` / `evaluate_splice_brawand` | 40 | 40G | 1 | 12:00:00 |
 | `predict_region` | 20 | 60G | 1 | 8:00:00 |
 
