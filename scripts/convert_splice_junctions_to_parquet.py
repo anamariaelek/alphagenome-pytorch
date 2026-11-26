@@ -99,6 +99,39 @@ def adjust_junction_positions(df: "pd.DataFrame") -> "pd.DataFrame":
     return df
 
 
+def assign_unstranded_strand(df: "pd.DataFrame", motif_strand) -> "pd.DataFrame":
+    """Give unstranded (``?``) junctions a strand from their intron motif.
+
+    Runs after :func:`adjust_junction_positions`. ``extract_junctions`` takes a
+    ``?`` junction from its right end (like ``−``), so its row holds
+    ``Donor`` = right end and ``Acceptor`` = left end − 1. Motif ``−``: keep the
+    row and set ``−``. Motif ``+``: swap to ``Donor`` = left end − 1,
+    ``Acceptor`` = right end and set ``+``. Non-canonical motifs are dropped.
+    """
+    unk = df["Strand"] == "?"
+    if not unk.any():
+        return df
+    df = df.copy()
+    df["Strand"] = df["Strand"].astype(str)
+    jx = df.loc[unk, ["Region", "Donor", "Acceptor"]].drop_duplicates()
+    # raw Spliser coordinates: left end = Acceptor + 1, right end = Donor
+    jx["_strand"] = [motif_strand(str(c), int(a) + 1, int(d))
+                     for c, d, a in zip(jx["Region"], jx["Donor"], jx["Acceptor"])]
+    strand = df[["Region", "Donor", "Acceptor"]].merge(
+        jx, how="left", on=["Region", "Donor", "Acceptor"])["_strand"].to_numpy()
+    plus = unk.to_numpy() & (strand == "+")
+    minus = unk.to_numpy() & (strand == "-")
+    left_m1 = df.loc[plus, "Acceptor"].to_numpy()
+    df.loc[plus, "Acceptor"] = df.loc[plus, "Donor"].to_numpy()
+    df.loc[plus, "Donor"] = left_m1
+    df.loc[plus, "Strand"] = "+"
+    df.loc[minus, "Strand"] = "-"
+    n_drop = int((unk.to_numpy() & ~plus & ~minus).sum())
+    print(f"  Unstranded junction rows: {int(plus.sum()):,} → +, {int(minus.sum()):,} → −, "
+          f"{n_drop:,} non-canonical dropped ({len(jx):,} unique junctions)")
+    return df[~(unk.to_numpy() & ~plus & ~minus)].reset_index(drop=True)
+
+
 def filter_reproducible(df: "pd.DataFrame", min_reproducibility: float | None) -> "pd.DataFrame":
     """Keep junctions observed in at least this fraction of the condition's samples."""
     if min_reproducibility is None or len(df) == 0:
@@ -122,6 +155,7 @@ def convert_spliser_to_junction_parquet(
     strip_chr: bool = False,
     min_count: int = 1,
     min_reproducibility: float | None = None,
+    genome: str | Path | None = None,
 ) -> "pd.DataFrame":
     """Full pipeline: load → extract junctions → filter → shift → export.
 
@@ -139,6 +173,9 @@ def convert_spliser_to_junction_parquet(
         min_count: Minimum split-read count per (junction, sample).
         min_reproducibility: Minimum fraction of a condition's samples in
             which a junction must be observed.
+        genome: Genome FASTA, required for unstranded (``?``) Spliser runs:
+            their strand is taken from the intron motif (see
+            :func:`assign_unstranded_strand`).
 
     Returns:
         The written DataFrame.
@@ -176,6 +213,12 @@ def convert_spliser_to_junction_parquet(
 
     df = pd.concat(chunks, ignore_index=True)
     df = adjust_junction_positions(df)
+    if (df["Strand"] == "?").any():
+        if genome is None:
+            raise ValueError("Unstranded Spliser input (Strand '?'): pass --genome to infer "
+                             "junction strands from intron motifs.")
+        from splice_motifs import MotifStrand
+        df = assign_unstranded_strand(df, MotifStrand(genome))
 
     if condition_labels is None:
         condition_labels = {c: i for i, c in enumerate(sorted(keys))}
@@ -249,6 +292,9 @@ def main() -> None:
                         help="Minimum split reads per (junction, sample) (default: 1).")
     parser.add_argument("--min-reproducibility", type=float, default=None,
                         help="Minimum fraction of a condition's samples with the junction.")
+    parser.add_argument("--genome", type=Path, default=None,
+                        help="Genome FASTA (with .fai). Required for unstranded Spliser runs "
+                             "(Strand '?'): junction strands are inferred from intron motifs.")
     args = parser.parse_args()
 
     if args.input_dir is not None:
@@ -269,7 +315,7 @@ def main() -> None:
         tissue_index=args.tissue_index, timepoint_index=args.timepoint_index,
         condition_labels=condition_labels, compression=args.compression,
         strip_chr=args.strip_chr_names, min_count=args.min_count,
-        min_reproducibility=args.min_reproducibility,
+        min_reproducibility=args.min_reproducibility, genome=args.genome,
     )
     if args.usage_json is not None:
         usage_parquet = args.usage_json.with_suffix(".parquet")

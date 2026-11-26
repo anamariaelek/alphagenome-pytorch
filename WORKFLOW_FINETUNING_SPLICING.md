@@ -30,7 +30,7 @@ else
 fi
 
 out_dir=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/
-data_dir=${out_dir}/data
+data_dir=${out_dir}/data/cardoso_moreira
 mkdir -p ${data_dir}/${species}
 ```
 
@@ -177,6 +177,35 @@ python scripts/check_splice_positions.py \
 For all species, download orthologs from Ensembl and run the code in `~/sds/sd17d003/Anamaria/folds_split/folds_from_orthologs.ipynb` to make orthogroup-aware splits for each species.  
 For a given target input sequence length `INPUT_SEQ_LEN`, results for each `SPECIES` are saved in: `/home/elek/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_{INPUT_SEQ_LEN}/{SPECIES}/fold{FOLD}/`.
 
+## Unstranded datasets (Khrameeva, Brawand)
+
+The Khrameeva primate brain data (human, chimpanzee, bonobo, macaque; 10 brain regions) and the Brawand organ data (human, chimpanzee, bonobo, gorilla, orangutan, macaque, mouse; brain, cerebellum, heart, kidney, liver, testis) have one adult timepoint and come from unstranded Spliser runs (`Strand` = `?`). The converters cannot label those sites, so without extra steps the `intersect` site annotations are empty and every junction is put on the − strand. `slurm/jobs/prepare_unstranded.sh` handles this for each species; submit it through `prepare_khrameeva` or `prepare_brawand`:
+
+1. `convert_splice_usage_to_parquet.py` as usual (underscores are dropped from tissue names, e.g. `CerebellarGreyMatter_14`).
+2. `shift_unstranded_usage.py --genome`: shifts left intron ends by −1 and sets `Label` from the strand of the junctions on that side. Strand comes from the intron dinucleotides (GT-AG/GC-AG/AT-AC → +, CT-AC/CT-GC/GT-AT → −; `scripts/splice_motifs.py`). Sites without a canonical junction get `None` and are ignored.
+3. `convert_splice_junctions_to_parquet.py --genome`: same motif rule for junctions. `--genome` is required for `?` input.
+4. Site annotations (`splice_sites_*`) plus `check_splice_positions.py`, and the dataset-level `data_config_*.json` (`--configs-only`).
+
+Outputs go to `data/{khrameeva,brawand}/<Species>/`. All genomes are Ensembl 115, including mouse (the Brawand mouse runs are GRCm39, not the GRCm38 "mazin" genome) and orangutan (`Pongo_abelii.fa` = Susie_PABv2, downloaded from Ensembl release 115). Every species passes the motif check (>97% per site type). Khrameeva: 80–90% of usage sites agree with the GTF on position and type, and ~90% of junction ends are usage sites. Brawand is noisier (82–89% and 65–77%; 8–15% of junction rows non-canonical in the non-human primates). The pre-label Brawand files are in `data/brawand/_pre_labels_backup_2026-11-25/`.
+
+**Folds for the extended species.** In `results_orthologs_132kb_protein_coding`, `extend_folds_to_new_species.py` put almost every chimpanzee/bonobo/gorilla/orangutan gene that has a human ortholog into `valid` (fold0: ~4k train vs ~22k valid windows, most of them orthologs of human training genes). `borzoi_folds/resplit_new_species_by_human.py` moves each window to its human ortholog's split (genes without one keep theirs). The result, `results_orthologs_132kb_protein_coding_primates_resplit/<species>/fold0`, has 75/12/12 train/valid/test windows, the same as human. Only fold0 was rebuilt. The mouse fold BEDs are GRCm38, so mouse is not trained on Brawand.
+
+```bash
+slurm/submit.sh --cpu --mem 96G --time 08:00:00 --sbatch-arg --array=0-3 prepare_khrameeva
+slurm/submit.sh --cpu --mem 96G --time 08:00:00 --sbatch-arg --array=0-6 prepare_brawand
+slurm/submit.sh --cpu --mem 8G --time 00:10:00 prepare_brawand --configs-only
+
+# optimiser/LoRA settings of the best evaluated run (lora_64_emb_traj_tiss_hqmrboc_132kb);
+# loss bce 1 + tissue_contrast 5, no trajectory terms, no junction loss
+slurm/submit.sh --gpu-mem 80 --mem 32G --cpus 2 --time 48:00:00 finetune_splice configs/khrameeva_132kb.yaml
+slurm/submit.sh --gpu-mem 80 --mem 32G --cpus 2 --time 48:00:00 finetune_splice configs/brawand_132kb.yaml
+# Khrameeva with junction loss
+slurm/submit.sh --gpu-mem 80 --mem 64G --cpus 4 --time 48:00:00 finetune_splice configs/khrameeva_hqpb_132kb_junctions.yaml
+```
+
+These datasets have no trajectories (one timepoint), so the configs drop `delta_mse`/`trajectory_pearson` and train on tissue specificity. `tissue_contrast` needs `tissue_contrast_min_conditions: 1` (default 2) to use one-vs-rest markers with one condition per tissue.
+
+`impute_unobserved_tissues: false` (with `observed_conditions_only: true`) trains only on observed (site, tissue) entries. By default, a tissue where a site has < 10 reads gets a synthetic usage-0 target. With one condition per tissue that is 55–64% of all usage targets here (about half the sites are observed in a single tissue). A genuinely skipped site in an expressed gene is still observed (Spliser Beta reads give usage ~0), so an unobserved tissue mostly means low expression. Imputing 0 there makes expression specificity look like splicing specificity to `tissue_contrast`: on the same smoke-test windows, the marker sites fell from 173 to 53 (Khrameeva) and from 438 to 57 (Brawand) without imputation. `evaluate_splice.py` still treats unobserved conditions as 0 in its metrics.
 
 ## Finetune
 
@@ -345,7 +374,7 @@ With `junction_weight > 0` and a `junction_parquet` per species, each species al
 species:
   - name: human
     ...
-    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/junctions.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Homo_sapiens/junctions.parquet
 
 junction_weight: 1.0
 max_junction_sites: 256        # P: sites per list (donor+, acceptor+, donor-, acceptor-) per window
@@ -376,7 +405,7 @@ python -u scripts/evaluate_splice.py \
     --output-dir "${out_dir}/predictions"
 ```
 
-Alternativelly, paths to data can be read from config: `--data-config /data/data_config.json`.
+Alternativelly, paths to data can be read from config: `--data-config /data/cardoso_moreira/data_config.json`.
 
 **Trajectory and tissue-specificity flags.** Beyond the base classification/usage
 Pearson r above, three opt-in flags compute additional eval-time metrics that mirror
@@ -471,11 +500,11 @@ same pipeline used by `splice_trajectory_clustering.ipynb`; building blocks live
 For example, to smoothen, cluster and annotate all sites in test set of all species/tissues:
 
 ```bash
-DATA_CONFIG=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/data_config.json
+DATA_CONFIG=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/data_config.json
 REF=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/devgp/
 SPLIT=test
 for SPECIES in human mouse rat rabbit opossum macaque; do
-    PARQUET=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/combined_usage_data_${SPECIES}.parquet
+    PARQUET=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/combined_usage_data_${SPECIES}.parquet
         for TISSUE in Brain Cerebellum Heart Kidney Liver Ovary Testis; do
             OUT=${REF}/${SPLIT}/${SPECIES}/${TISSUE}
             mkdir -p ${OUT}
@@ -650,7 +679,7 @@ REF=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/devgp/test
 MODEL=lora_64_emb_traj_hqmrboc__
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/${MODEL}
 PREDS_DIR=${MODEL_DIR}/preds_intersect_protein_coding
-USAGE_TEMPLATE=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/combined_usage_data_{species}.parquet
+USAGE_TEMPLATE=${HOME}/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/combined_usage_data_{species}.parquet
 for SPECIES in human mouse rat rabbit opossum chicken macaque; do
     for TISSUE in Brain Cerebellum Heart Kidney Liver Ovary Testis; do
         OUT=${PREDS_DIR}/${SPECIES}/pred_gp_splice_usage/${TISSUE}

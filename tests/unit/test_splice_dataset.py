@@ -160,6 +160,25 @@ class TestSpliceSiteUsageIndex:
         np.testing.assert_allclose(covs[0][0, 0], 10.0, rtol=1e-5)   # Alpha+Beta = 8+2
         np.testing.assert_allclose(covs[0][1, 0], 10.0, rtol=1e-5)   # Alpha+Beta = 5+5
 
+    def test_impute_unobserved_tissues_off(self, tmp_path: Path):
+        """One condition per tissue: unobserved tissues get a 0 target unless disabled."""
+        from alphagenome_pytorch.extensions.finetuning.splice_datasets import (
+            SpliceSiteUsageIndex,
+        )
+
+        rows = [
+            {"Chromosome": "1", "Position": 1000, "SSE": 0.8, "Alpha": 8, "Beta": 2,
+             "Label": 0, "Condition": 0},
+        ]
+        d = self._build_dir(tmp_path, rows)   # Cond0, Cond1, Cond2: one tissue each
+        for impute, expected in [(True, [True, True, True]), (False, [True, False, False])]:
+            idx = SpliceSiteUsageIndex(str(d / "_usage.parquet"), min_coverage=10,
+                                       observed_conditions_only=True,
+                                       impute_unobserved_tissues=impute)
+            _, vals, masks, _ = idx.query("1", np.array([1000]))
+            assert list(masks[0][:, 0]) == expected
+            np.testing.assert_allclose(vals[0][0, 0], 0.8, rtol=1e-5)
+
     def test_replicates_kept_independent_not_collapsed(self, tmp_path: Path):
         """Multiple biological replicates at the same (site,condition) must all
         survive in query()'s output -- not silently collapsed to one arbitrary

@@ -146,6 +146,13 @@ class SpliceSiteUsageIndex:
             post-processed the Spliser output to convert to 0-based).
         observed_conditions_only: If ``True``, usage targets will only be
             returned for conditions with observed coverage.
+        impute_unobserved_tissues: With *observed_conditions_only*, tissues
+            in which a site has no observation still get a synthetic usage-0
+            target (default ``True``). ``False`` keeps only observed entries:
+            for one condition per tissue (adult panels), an unobserved tissue
+            mostly means low coverage rather than zero usage, and imputing 0
+            there would make expression specificity look like splicing
+            specificity to ``tissue_contrast``.
         max_replicates: Maximum number of biological replicate observations
             kept per (site, condition) in :meth:`query`'s output. Real
             ``usage.parquet`` files carry several replicate rows per (site,
@@ -164,6 +171,7 @@ class SpliceSiteUsageIndex:
         usage_coord_base: int = 0,
         observed_conditions_only: bool = False,
         max_replicates: int = 10,
+        impute_unobserved_tissues: bool = True,
     ) -> None:
         import pandas as pd
 
@@ -181,6 +189,7 @@ class SpliceSiteUsageIndex:
         self._condition_labels: dict[str, int] = metadata["condition_labels"]
         self.n_conditions: int = len(self._condition_labels)
         self.observed_conditions_only = observed_conditions_only
+        self.impute_unobserved_tissues = impute_unobserved_tissues
         self.max_replicates = max_replicates
         none_class = self._class_labels.get("None", 4)
 
@@ -449,7 +458,7 @@ class SpliceSiteUsageIndex:
                 # via a synthetic biological-zero entry at slot 0.
                 unobserved = rep_counter == 0
                 mask[unobserved, 0] = True
-            else:
+            elif self.impute_unobserved_tissues:
                 # Tissues with at least one observed condition for this site
                 obs_tids = set(self._cond_tissue_id[valid_conds].tolist())
                 obs_tids.discard(-1)

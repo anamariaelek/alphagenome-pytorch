@@ -341,10 +341,19 @@ def _parse_tissue_timepoint(
     tissue_index: int,
     timepoint_index: int,
 ) -> tuple[str, int]:
-    """Extract tissue and timepoint from a dot-split filename."""
+    """Extract tissue and timepoint from a dot-split filename.
+
+    Underscores are removed from the tissue (``Cerebellar_Grey_Matter`` ->
+    ``CerebellarGreyMatter``). Condition names are built as
+    ``f"{tissue}_{timepoint}"`` and the training / evaluation code reads the
+    tissue back as ``cond_name.split("_")[0]``, so an underscore inside the
+    tissue would truncate it and merge distinct tissues (e.g. Cerebellar Grey
+    and White Matter would both become ``Cerebellar``). Tissues without
+    underscores are returned unchanged.
+    """
     parts = Path(filename).name.split(".")
     try:
-        tissue = parts[tissue_index]
+        tissue = parts[tissue_index].replace("_", "")
         timepoint = int(parts[timepoint_index])
     except (IndexError, ValueError) as exc:
         raise ValueError(
@@ -770,7 +779,10 @@ Examples:
     if args.input_dir is not None:
         if not args.input_dir.is_dir():
             parser.error(f"--input-dir is not a directory: {args.input_dir}")
-        tsv_files = sorted(args.input_dir.glob("*.combined.tsv"))
+        # Skip macOS AppleDouble files (._*), which match the glob but aren't TSVs
+        tsv_files = sorted(
+            p for p in args.input_dir.glob("*.combined.tsv") if not p.name.startswith("._")
+        )
         if not tsv_files:
             parser.error(f"No *.combined.tsv files found in {args.input_dir}")
         print(f"Found {len(tsv_files)} .combined.tsv file(s) in {args.input_dir}")

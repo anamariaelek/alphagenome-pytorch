@@ -321,3 +321,38 @@ def test_index_cpm_normalisation(junction_parquet):
     for k, v in cpm.items():
         assert got[k] == pytest.approx(v / mean, rel=1e-5)
     assert np.mean(count) == pytest.approx(1.0, rel=1e-5)
+
+
+def test_junction_tissue_init_khrameeva_regions(tmp_path):
+    """Every Khrameeva region (condition names without underscores in the region,
+    see convert_splice_usage_to_parquet._parse_tissue_timepoint) gets pretrained
+    junction tracks from the nearest human brain biosample."""
+    from finetune_splice import junction_tissue_init
+
+    names = ["cerebellum", "cerebellar hemisphere", "dorsolateral prefrontal cortex",
+             "caudate nucleus", "amygdala", "hypothalamus", "occipital lobe",
+             "temporal lobe", "brain", "liver"]
+    meta = pd.DataFrame({
+        "idx": list(range(len(names))),
+        "biosample_name": names,
+        "output_type": ["OutputType.SPLICE_JUNCTIONS"] * len(names),
+    })
+    csv = tmp_path / "meta.csv"
+    meta.to_csv(csv, index=False)
+    idx = {n: i for i, n in enumerate(names)}
+    expected = {
+        "CerebellarGreyMatter_14": ["cerebellum", "cerebellar hemisphere"],
+        "CerebellarWhiteMatter_14": ["cerebellum", "cerebellar hemisphere"],
+        "DorsolateralPrefrontalBA9_14": ["dorsolateral prefrontal cortex"],
+        "Caudate_14": ["caudate nucleus"],
+        "Amygdala_14": ["amygdala"],
+        "Hypothalamus_14": ["hypothalamus"],
+        "1aryVisualBA17_14": ["occipital lobe"],
+        "Hippocampus_14": ["temporal lobe"],
+        "Thalamus_14": ["brain"],
+        "CorpusCallosumAnterior_14": ["brain"],
+    }
+    labels = {c: i for i, c in enumerate(expected)}
+    got = junction_tissue_init(labels, {0: str(csv)})[0]
+    for cond, tissues in expected.items():
+        assert got[labels[cond]] == sorted(idx[t] for t in tissues), cond

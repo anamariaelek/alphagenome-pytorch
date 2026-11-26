@@ -18,56 +18,56 @@
 species:
   - name: human
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Homo_sapiens/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Homo_sapiens/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/human/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/human/fold0/valid.bed
     organism_index: 0
 
   - name: mouse
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Mus_musculus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Mus_musculus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/mouse/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/mouse/fold0/valid.bed
     organism_index: 1
 
   - name: rat
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Rattus_norvegicus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Rattus_norvegicus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/rat/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/rat/fold0/valid.bed
     organism_index: 2
   
   - name: rabbit
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Oryctolagus_cuniculus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Oryctolagus_cuniculus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Oryctolagus_cuniculus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/rabbit/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/rabbit/fold0/valid.bed
     organism_index: 3
   
   - name: opossum
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Monodelphis_domestica.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Monodelphis_domestica/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Monodelphis_domestica/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/opossum/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/opossum/fold0/valid.bed
     organism_index: 4
 
   - name: macaque
     genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Macaca_mulatta/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/macaque/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/macaque/fold0/valid.bed
     organism_index: 5
     
   - name: chicken
     genome: $HOME/sds/sd17d003/Anamaria/genomes/mazin/fasta/Gallus_gallus.fa
-    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/splice_sites_intersect_usage_protein_coding.parquet
-    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/usage.parquet
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Gallus_gallus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Gallus_gallus/usage.parquet
     train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/chicken/fold0/train.bed
     val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_524kb_protein_coding/chicken/fold0/valid.bed
     organism_index: 6

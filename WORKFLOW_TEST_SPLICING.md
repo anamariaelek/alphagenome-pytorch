@@ -6,7 +6,7 @@ This workflow describes how to prepare and evaluate fine-tuned splice-site class
 
 The Brawand dataset includes:
 - **Known species** (seen during finetuning): `Homo_sapiens`, `Mus_musculus`, `Macaca_mulatta`
-- **New species**: `Pan_troglodytes` (chimpanzee), `Pan_paniscus` (bonobo), `Gorilla_gorilla` (gorilla), `Pongo_abelii` (orangutan, *not yet processed*)
+- **New species**: `Pan_troglodytes` (chimpanzee), `Pan_paniscus` (bonobo), `Gorilla_gorilla` (gorilla), `Pongo_abelii` (orangutan)
 
 All genomes/annotations are from Ensembl 115.
 
@@ -40,7 +40,6 @@ mkdir -p logs/
 ## Species List
 
 ```bash
-# Note: Pongo abelii is excluded until processing is complete
 species_list=(
     "Homo_sapiens"
     "Mus_musculus"
@@ -48,6 +47,7 @@ species_list=(
     "Pan_troglodytes"
     "Pan_paniscus"
     "Gorilla_gorilla"
+    "Pongo_abelii"
 )
 ```
 
@@ -96,7 +96,40 @@ for species in "${species_list[@]}"; do
         > logs/usage_to_parquet_brawand_${species}.log 2>&1
     echo "Prepared splice usage: ${species}"
 done
+
+for species in "${species_list[@]}"; do
+    python -u scripts/convert_splice_usage_to_parquet.py \
+        --input-dir ${spliser_brawand_dir}/${species}_brawand \
+        --output ${test_out_dir}/${species}/usage.unfiltered.parquet \
+        --strip-chr-names \
+        > logs/usage_to_parquet_brawand_${species}_unfiltered.log 2>&1 &
+    echo "Prepared splice usage: ${species}"
+done
 ```
+
+The Brawand Spliser runs are unstranded (`Strand` = `?`), so `convert_splice_usage_to_parquet.py` cannot assign a `Label` and skips its Donor+/Acceptor− −1 position correction. Without it, every left intron end sits one base to the right of the reference coordinates (only ~33% of human Brawand sites match `data/Homo_sapiens/usage.parquet`; ~63% after the shift). `shift_unstranded_usage.py` recovers the intron end from the Spliser `Partners` column (partners at higher coordinates → left end → `Position − 1`) and rewrites `usage.parquet` in place, keeping the unshifted file as a backup. Run it exactly once per species: it exits without writing if any site is missing from the TSVs, which is also what happens when it is run on an already-shifted file.
+
+```bash
+for species in "${species_list[@]}"; do
+    python -u scripts/shift_unstranded_usage.py \
+        --input-dir ${spliser_brawand_dir}/${species}_brawand \
+        --usage ${test_out_dir}/${species}/usage.parquet \
+        --backup ${test_out_dir}/${species}/usage.unshifted.parquet \
+        > logs/shift_usage_brawand_${species}.log 2>&1
+    echo "Shifted splice usage: ${species}"
+done
+
+for species in "${species_list[@]}"; do
+    python -u scripts/shift_unstranded_usage.py \
+        --input-dir ${spliser_brawand_dir}/${species}_brawand \
+        --usage ${test_out_dir}/${species}/usage.unfiltered.parquet \
+        --backup ${test_out_dir}/${species}/usage.unfiltered.unshifted.parquet \
+        > logs/shift_usage_brawand_${species}.log 2>&1 &
+    echo "Shifted splice usage: ${species}"
+done
+```
+
+`Label` stays NaN (strand is unknown). About 1% of sites end up sharing a position with another site (a left end at `p + 1` moved onto a right end at `p`); both rows are kept.
 
 ### 3. Prepare Splice Site Annotations
 
@@ -335,15 +368,6 @@ for species, metrics in results.items():
 ### Protein-Coding Filter
 
 The finetuning was likely done on protein-coding genes only (see `WORKFLOW_FINETUNING_SPLICING.md`). For consistency, prepare test data the same way (`splice_sites_intersect_protein_coding.parquet` or similar).
-
-### Missing Data: Orangutan (Pongo abelii)
-
-Orangutan is excluded from this workflow until the genome/annotation processing is complete. Once available:
-
-1. Download Ensembl 115 GTF and FASTA for `Pongo_abelii`.
-2. Run GTF→parquet conversion.
-3. Prepare splice usage from Spliser Brawand data (if available).
-4. Generate predictions following the same steps as above.
 
 ## Troubleshooting
 

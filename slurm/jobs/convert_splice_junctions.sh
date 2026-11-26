@@ -10,7 +10,7 @@
 #   slurm/submit.sh --cpu --mem 64G --time 12:00:00 --sbatch-arg --array=0 convert_splice_junctions
 #   slurm/submit.sh --cpu --mem 64G --time 12:00:00 --sbatch-arg --array=1-12 convert_splice_junctions
 # Or name datasets explicitly (run one after another):
-#   slurm/submit.sh --cpu --mem 64G convert_splice_junctions Homo_sapiens brawand/Homo_sapiens
+#   slurm/submit.sh --cpu --mem 64G convert_splice_junctions cardoso_moreira/Homo_sapiens brawand/Homo_sapiens
 #
 # Positional: DATASET... (output dir under ${AG_DATA}/data/; default: all, or the
 #             SLURM_ARRAY_TASK_ID-th entry of DATASETS for array jobs)
@@ -26,8 +26,10 @@ MIN_COUNT=${MIN_COUNT:-1}
 
 # Same dataset list as update_usage_parquet.sh.
 DATASETS=(
-    Homo_sapiens Mus_musculus Rattus_norvegicus Oryctolagus_cuniculus
-    Monodelphis_domestica Macaca_mulatta Gallus_gallus
+    cardoso_moreira/Homo_sapiens cardoso_moreira/Mus_musculus
+    cardoso_moreira/Rattus_norvegicus cardoso_moreira/Oryctolagus_cuniculus
+    cardoso_moreira/Monodelphis_domestica cardoso_moreira/Macaca_mulatta
+    cardoso_moreira/Gallus_gallus
     brawand/Homo_sapiens brawand/Mus_musculus brawand/Macaca_mulatta
     brawand/Pan_troglodytes brawand/Pan_paniscus brawand/Gorilla_gorilla
 )
@@ -42,7 +44,7 @@ fi
 
 STATUS=0
 for dataset in "${SELECTED[@]}"; do
-    species=${dataset#brawand/}
+    species=${dataset##*/}
     in_dir=${SPLISER_DIR}/${species}
     [[ "${dataset}" == brawand/* ]] && in_dir=${SPLISER_DIR}/${species}_brawand
     out_dir=${AG_DATA}/data/${dataset}

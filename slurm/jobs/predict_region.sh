@@ -22,7 +22,7 @@ ORGANISMS=${ORGANISMS:-human mouse rat rabbit opossum chicken}
 
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-${AG_DATA}/models/${RUN}}
 PRED_DIR=region_preds_$(date +%Y%m%d_%H%M%S)
-DATA_CONFIG="${AG_DATA}/data/data_config_${DATA_TAG}.json"
+DATA_CONFIG="${AG_DATA}/data/cardoso_moreira/data_config_${DATA_TAG}.json"
 
 for ORGANISM in ${ORGANISMS}; do
     OUT_DIR=${AG_DATA}/predictions/${RUN}/${PRED_DIR}/${ORGANISM}/

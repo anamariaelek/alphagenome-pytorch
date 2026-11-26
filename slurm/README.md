@@ -138,6 +138,9 @@ slurm/submit.sh --dry-run ...    # print the command without running it
 | `configs/hqm_pilot.yaml` | 40 | 32G | 2 | 06:00:00 |
 | `configs/finetune_full_hmrbo_132kb.yaml` (no longer exists; full finetune) | 80 | 320G | 16 | 48:00:00 |
 | `configs/hqmrboc_132kb_junctions_full.yaml` (HoreKa 2, estimated: ~15-18 h/epoch, chain 48 h jobs) | H200 (`--partition gpu-h200`) | 64G | 8 | 48:00:00 |
+| `configs/khrameeva_hqpb_132kb_junctions.yaml` (untested at full scale) | 80 | 64G | 4 | 48:00:00 |
+| `configs/khrameeva_132kb.yaml`, `configs/brawand_132kb.yaml` (untested at full scale; settings of `hqmrboc_132kb.yaml`) | 80 | 32G | 2 | 48:00:00 |
+| `prepare_khrameeva` / `prepare_brawand` (CPU, per species; ~15-30 min on a workstation) | – | 96G | 2 | 08:00:00 |
 | `evaluate_splice` / `evaluate_splice_brawand` | 40 | 40G | 1 | 12:00:00 |
 | `predict_region` | 20 | 60G | 1 | 8:00:00 |
 

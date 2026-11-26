@@ -12,13 +12,13 @@ REF_SPECIES = "Human"
 # Paths to your pre-computed splice site Parquet files per species
 # Target species keys must match the exact species names inside the .hal file
 PARQUET_PATHS = {
-    "Human": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Homo_sapiens/splice_sites_intersect_usage.parquet",
-    "Mouse": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Mus_musculus/splice_sites_intersect_usage.parquet",
-    "Rat": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Rattus_norvegicus/splice_sites_intersect_usage.parquet",
-    "Rabbit": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Oryctolagus_cuniculus/splice_sites_intersect_usage.parquet",
-    "Opossum": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Monodelphis_domestica/splice_sites_intersect_usage.parquet",
-    "Macaque": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Macaca_mulatta/splice_sites_intersect_usage.parquet",
-    "Chicken": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/Gallus_gallus/splice_sites_intersect_usage.parquet"
+    "Human": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Homo_sapiens/splice_sites_intersect_usage.parquet",
+    "Mouse": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Mus_musculus/splice_sites_intersect_usage.parquet",
+    "Rat": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Rattus_norvegicus/splice_sites_intersect_usage.parquet",
+    "Rabbit": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Oryctolagus_cuniculus/splice_sites_intersect_usage.parquet",
+    "Opossum": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Monodelphis_domestica/splice_sites_intersect_usage.parquet",
+    "Macaque": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Macaca_mulatta/splice_sites_intersect_usage.parquet",
+    "Chicken": "/home/elek/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/cardoso_moreira/Gallus_gallus/splice_sites_intersect_usage.parquet"
 }
 
 # Max allowed distance (in bp) between lifted coordinate and target annotated site.

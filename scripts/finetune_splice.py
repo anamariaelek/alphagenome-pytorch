@@ -172,6 +172,7 @@ DEFAULTS = {
     "junction_count_scale": 1.0,
     "usage_coord_base": 0,
     "observed_conditions_only": False,
+    "impute_unobserved_tissues": True,
     "usage_delta_from_mean": False,
     # Model
     "lora_rank": 8,
@@ -334,6 +335,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only compute usage loss for observed (position, condition) pairs. "
              "When False (default), unobserved conditions are treated as 0 and included in loss.",
+    )
+    data.add_argument(
+        "--no-impute-unobserved-tissues",
+        dest="impute_unobserved_tissues",
+        action="store_false",
+        help="With --observed-conditions-only: do not add a usage-0 target for tissues in "
+             "which a site was not observed (config: impute_unobserved_tissues: false). "
+             "Use for single-condition-per-tissue data, where an unobserved tissue mostly "
+             "means low coverage, not zero usage.",
     )
     data.add_argument(
         "--usage-delta-from-mean",
@@ -542,6 +552,7 @@ def parse_args() -> argparse.Namespace:
         "cache_genome",
         "usage_coord_base",
         "observed_conditions_only",
+        "impute_unobserved_tissues",
         "usage_delta_from_mean",
         "oversample_species",
         "pretrained_weights",
@@ -660,6 +671,19 @@ def parse_args() -> argparse.Namespace:
         usage_loss_weights = config_data["usage_loss_weights"]
     args.usage_loss_weights = usage_loss_weights
 
+    # Minimum observed conditions on each side (own tissue / rest) for a site to
+    # count as a tissue_contrast marker. 2 (default) suits developmental timecourses;
+    # use 1 when every tissue has a single condition (e.g. adult-only Khrameeva).
+    args.tissue_contrast_min_conditions = int(config_data.get("tissue_contrast_min_conditions", 2))
+
+    # The CLI spelling is --no-impute-unobserved-tissues, which _apply_config_scalar
+    # does not recognise as overriding the config key; CLI wins.
+    if "--no-impute-unobserved-tissues" in cli_flags:
+        args.impute_unobserved_tissues = False
+    args.impute_unobserved_tissues = bool(args.impute_unobserved_tissues)
+    if not args.impute_unobserved_tissues and not args.observed_conditions_only:
+        parser.error("impute_unobserved_tissues: false requires observed_conditions_only: true")
+
     # Epochs over which to linearly ramp the trajectory/shape/smoothness loss weights
     # (0 = apply at full strength from epoch 0).
     args.usage_traj_warmup_epochs = int(config_data.get("usage_traj_warmup_epochs", 0) or 0)
@@ -733,6 +757,7 @@ def create_datasets(args: argparse.Namespace, rank: int):
                 spec["usage_parquet"],
                 usage_coord_base=args.usage_coord_base,
                 observed_conditions_only=args.observed_conditions_only,
+                impute_unobserved_tissues=args.impute_unobserved_tissues,
             )
             print_rank0(f"  [{name}] Using usage_coord_base={args.usage_coord_base} (1=Spliser/1-based, 0=already 0-based)", rank)
             print_rank0(f"  [{name}] observed_conditions_only={args.observed_conditions_only} (True=only observed, False=unobserved as 0)", rank)
@@ -866,6 +891,18 @@ def create_dataloaders(
 JUNCTION_TISSUE_ALIASES: dict[str, set[str]] = {
     "brain": {"brain", "frontal cortex", "cerebral cortex", "left cerebral cortex", "forebrain"},
     "cerebellum": {"cerebellum", "cerebellar hemisphere"},
+    # Khrameeva brain regions (condition names come from the Spliser file names)
+    # keys are the region names with underscores removed, lower-cased
+    "cerebellargreymatter": {"cerebellum", "cerebellar hemisphere"},
+    "cerebellarwhitematter": {"cerebellum", "cerebellar hemisphere"},
+    "dorsolateralprefrontalba9": {"dorsolateral prefrontal cortex"},
+    "caudate": {"caudate nucleus"},
+    "amygdala": {"amygdala"},
+    "hypothalamus": {"hypothalamus"},
+    "1aryvisualba17": {"occipital lobe"},  # primary visual cortex is in the occipital lobe
+    "hippocampus": {"temporal lobe"},  # no hippocampus junction track exists
+    "thalamus": {"brain"},  # no closer junction track exists
+    "corpuscallosumanterior": {"brain"},  # no closer junction track exists
     "midbrain": {"midbrain", "brain"},  # human has no midbrain junction tracks
     "heart": {"heart", "heart left ventricle", "heart right ventricle"},
     "liver": {"liver", "right lobe of liver", "left lobe of liver"},
@@ -1392,10 +1429,12 @@ def main() -> None:
         "max_sites": args.max_sites,
         "usage_coord_base": args.usage_coord_base,
         "observed_conditions_only": args.observed_conditions_only,
+        "impute_unobserved_tissues": args.impute_unobserved_tissues,
         "usage_delta_from_mean": args.usage_delta_from_mean,
         "oversample_species": args.oversample_species,
         "usage_loss_weights": getattr(args, "usage_loss_weights", None),
         "usage_traj_warmup_epochs": getattr(args, "usage_traj_warmup_epochs", 0),
+        "tissue_contrast_min_conditions": getattr(args, "tissue_contrast_min_conditions", 2),
         "organism_embedding_init": args.organism_embedding_init,
         "species_n_conditions": species_n_conditions,
         "species_n_junction_conditions": species_n_junction_conditions,
@@ -1555,6 +1594,7 @@ def main() -> None:
                 usage_traj_warmup_epochs=getattr(args, "usage_traj_warmup_epochs", 0),
                 junction_head=junction_heads or None,
                 junction_weight=args.junction_weight,
+                tissue_contrast_min_conditions=args.tissue_contrast_min_conditions,
             )
 
             if handler.preempted:
@@ -1577,6 +1617,7 @@ def main() -> None:
                 tissue_cond_groups=tissue_cond_groups_by_org,
                 junction_head=junction_heads or None,
                 junction_weight=args.junction_weight,
+                tissue_contrast_min_conditions=args.tissue_contrast_min_conditions,
             )
 
             if torch.cuda.is_available():

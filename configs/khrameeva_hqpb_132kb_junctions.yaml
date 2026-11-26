@@ -1,0 +1,184 @@
+# =============================================================================
+# LoRA fine-tuning on the Khrameeva primate brain dataset with junction loss.
+#
+# Species: human (h), macaque (q), chimpanzee (p = Pan troglodytes), bonobo (b).
+# Conditions: 10 brain regions x 1 adult timepoint per species (from usage.json)
+#   1aryVisualBA17_14, Amygdala_14, Caudate_14, CerebellarGreyMatter_14,
+#   CerebellarWhiteMatter_14, CorpusCallosumAnterior_14, DorsolateralPrefrontalBA9_14,
+#   Hippocampus_14, Hypothalamus_14, Thalamus_14
+# (region underscores are dropped, so tissue = text before the first "_" gives one
+#  tissue per region).
+#
+# Data: unstranded Spliser runs, prepared by slurm/jobs/prepare_khrameeva.sh into
+#   data/khrameeva/<Species>/: left intron ends shifted by -1 and strands taken
+#   from intron motifs (scripts/splice_motifs.py) for both usage Labels and junctions.
+# Folds: ortholog-aware results_orthologs_132kb_protein_coding/<species>/fold0.
+#   chimp/bonobo from results_orthologs_132kb_protein_coding_primates_resplit (split by
+#   the human ortholog's split; see borzoi_folds/resplit_new_species_by_human.py).
+#
+# Usage loss weights are the latest set (bce 1 / delta_mse 5 / trajectory_pearson 5 /
+# tissue_contrast 5), but with one timepoint per tissue:
+#   - delta_mse and trajectory_pearson need >= 3 timepoints per tissue -> always 0 here
+#     (kept so the config matches the other runs; they cost nothing).
+#   - tissue_contrast needs tissue_contrast_min_conditions observed conditions on
+#     each side; set to 1 so region-marker sites are used.
+#
+# Helix:
+#   slurm/submit.sh --gpu-mem 80 --mem 64G --cpus 4 --time 48:00:00 \
+#       finetune_splice configs/khrameeva_hqpb_132kb_junctions.yaml
+#   (resume: auto, so resubmitting the same command continues from the last epoch)
+#
+# CLI flags always override values set here.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Multi-species data
+# ---------------------------------------------------------------------------
+species:
+  - name: human
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Homo_sapiens.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Homo_sapiens/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Homo_sapiens/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Homo_sapiens/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/human/fold0/test.bed
+    organism_index: 0
+
+  - name: chimpanzee
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Pan_troglodytes.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Pan_troglodytes/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Pan_troglodytes/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Pan_troglodytes/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding_primates_resplit/chimpanzee/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding_primates_resplit/chimpanzee/fold0/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding_primates_resplit/chimpanzee/fold0/test.bed
+    organism_index: 1
+
+  - name: bonobo
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Pan_paniscus.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Pan_paniscus/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Pan_paniscus/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Pan_paniscus/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding_primates_resplit/bonobo/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding_primates_resplit/bonobo/fold0/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding_primates_resplit/bonobo/fold0/test.bed
+    organism_index: 2
+
+  - name: macaque
+    genome: $HOME/sds/sd17d003/Anamaria/genomes/ensembl115/fasta/Macaca_mulatta.fa
+    annotation_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Macaca_mulatta/splice_sites_intersect_usage_protein_coding.parquet
+    usage_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Macaca_mulatta/usage.parquet
+    junction_parquet: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/khrameeva/Macaca_mulatta/junctions.parquet
+    train_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/train.bed
+    val_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/valid.bed
+    test_bed: $HOME/sds/sd17d003/Anamaria/borzoi_folds/results_orthologs_132kb_protein_coding/macaque/fold0/test.bed
+    organism_index: 3
+
+# All primates start from the pretrained human organism embedding.
+organism_embedding_init:
+  0: 0
+  1: 0
+  2: 0
+  3: 0
+
+# ---------------------------------------------------------------------------
+# Pretrained weights
+# ---------------------------------------------------------------------------
+pretrained_weights: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai_code/checkpoints/model_fold_0.safetensors
+
+# ---------------------------------------------------------------------------
+# Training mode: linear-probe | lora | full
+# ---------------------------------------------------------------------------
+mode: lora
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+sequence_length: 131072
+max_sites: 1024
+cache_genome: false
+usage_coord_base: 0
+observed_conditions_only: true
+oversample_species: true
+
+# ---------------------------------------------------------------------------
+# Model / LoRA
+# ---------------------------------------------------------------------------
+dtype: bfloat16
+gradient_checkpointing: true
+
+train_species_embeddings: true
+
+lora_rank: 64
+lora_alpha: 128
+lora_targets: q_proj,v_proj,k_proj,linear_embedding
+
+train_components: embedder_1bp
+
+# ---------------------------------------------------------------------------
+# Optimiser
+# ---------------------------------------------------------------------------
+epochs: 20
+batch_size: 6
+gradient_accumulation_steps: 32   # effective batch = 192; ~380 optimizer steps/epoch
+lr: 1.0e-4
+weight_decay: 0.1
+warmup_steps: 1000
+lr_schedule: cosine
+max_grad_norm: 1.0
+
+# Loss weights
+cls_weight: 1.0
+usage_weight: 1.0
+
+usage_loss_weights:
+  bce: 1.0
+  delta_mse: 5.0             # inert: 1 timepoint per tissue
+  trajectory_pearson: 5.0    # inert: 1 timepoint per tissue
+  tissue_contrast: 5.0
+
+# One condition per tissue: count a site as a tissue_contrast marker with a single
+# observed condition on each side (default 2 would disable the term here).
+tissue_contrast_min_conditions: 1
+
+# Ramps only delta_mse/trajectory_pearson, which are inert here.
+usage_traj_warmup_epochs: 0
+
+# ---------------------------------------------------------------------------
+# Splice junctions
+# ---------------------------------------------------------------------------
+junction_weight: 1.0
+max_junction_sites: 256
+junction_count_norm: cpm
+junction_replicate_agg: mean
+junction_init_metadata:        # DLPFC <- GTEx Frontal Cortex BA9; cerebellum <- cerebellum/cerebellar hemisphere
+  0: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/data/alphagenome_metadata_homo_sapiens.csv
+
+# ---------------------------------------------------------------------------
+# Performance
+# ---------------------------------------------------------------------------
+num_workers: 2
+use_amp: true
+compile: true
+cuda_memory_fraction: 1.0
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+wandb: false
+wandb_project: alphagenome-splice
+log_every: 10
+
+# ---------------------------------------------------------------------------
+# Output / checkpointing
+# ---------------------------------------------------------------------------
+output_dir: $HOME/sds/sd17d003/Anamaria/alphagenome_genomicsxai/models/
+run_name: lora_64_emb_tiss_jx_khrameeva_hqpb_132kb
+save_every: 1
+resume: auto
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+seed: 1950

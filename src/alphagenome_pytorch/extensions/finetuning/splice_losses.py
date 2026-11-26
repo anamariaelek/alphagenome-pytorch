@@ -102,6 +102,7 @@ def splice_usage_loss(
     traj_var_floor: float = 1e-3,
     traj_exc_floor: float = 0.08,
     min_coverage: float = 10.0,
+    tissue_contrast_min_conditions: int = 2,
 ) -> tuple:
     """Masked loss for per-condition splice-site usage.
 
@@ -172,6 +173,10 @@ def splice_usage_loss(
         usage_loss_weights: Optional dict of component weights. When provided,
             the function combines the enabled usage loss terms instead of
             returning a single loss component.
+        tissue_contrast_min_conditions: Minimum observed conditions on each
+            side (own tissue and rest) for a site to count as a
+            ``tissue_contrast`` marker. Default 2; use 1 for datasets with a
+            single condition per tissue (e.g. adult-only tissue panels).
 
     Returns:
         Tuple of:
@@ -308,7 +313,7 @@ def splice_usage_loss(
     if tissue_w != 0.0:
         contrast_loss, contrast_metrics = _tissue_vs_rest_contrast(
             gathered_sigmoid, usage_values_pooled, final_mask, groups,
-            coverage=usage_coverage_pooled)
+            coverage=usage_coverage_pooled, min_conditions=tissue_contrast_min_conditions)
         total_loss = total_loss + tissue_w * contrast_loss
         metrics_dict["tissue_contrast_loss"] = contrast_loss.item()
         metrics_dict.update(contrast_metrics)

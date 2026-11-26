@@ -188,6 +188,7 @@ def train_epoch_splice(
     junction_head: "nn.Module | dict[int, nn.Module] | None" = None,
     junction_weight: float = 0.0,
     max_consecutive_nonfinite: int = 200,
+    tissue_contrast_min_conditions: int = 2,
 ) -> SpliceTrainMetrics:
     """Train the splice classification and usage heads for one epoch.
 
@@ -363,6 +364,7 @@ def train_epoch_splice(
                         usage_loss_weights=epoch_usage_weights,
                         tissue_cond_groups=_groups_for(int(org_idx[0].item())),
                         usage_coverage=usage_cov,
+                        tissue_contrast_min_conditions=tissue_contrast_min_conditions,
                     )
 
                 total_loss = total_loss + usage_weight * usage_loss_val
@@ -613,6 +615,7 @@ def validate_splice(
     tissue_cond_groups: "list | dict | None" = None,
     junction_head: "nn.Module | dict[int, nn.Module] | None" = None,
     junction_weight: float = 0.0,
+    tissue_contrast_min_conditions: int = 2,
 ) -> SpliceTrainMetrics:
     """Evaluate the splice heads on the validation set.
 
@@ -721,6 +724,7 @@ def validate_splice(
                     usage_loss_weights=usage_loss_weights,
                     tissue_cond_groups=_groups,
                     usage_coverage=usage_cov,
+                    tissue_contrast_min_conditions=tissue_contrast_min_conditions,
                 )
 
                 if "bce_loss" in usage_corr:

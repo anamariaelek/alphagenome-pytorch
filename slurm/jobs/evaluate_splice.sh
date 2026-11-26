@@ -34,7 +34,7 @@ MAX_WINDOWS_ARGS=()
 
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-${AG_DATA}/models/${RUN}}
 PRED_DIR=${PRED_DIR:-preds_${DATA_TAG}}
-DATA_CONFIG="${AG_DATA}/data/data_config_${DATA_TAG}.json"
+DATA_CONFIG="${AG_DATA}/data/cardoso_moreira/data_config_${DATA_TAG}.json"
 
 echo "Run: ${RUN}"
 echo "Checkpoint: ${CHECKPOINT_PATH}"

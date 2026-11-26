@@ -456,3 +456,23 @@ class TestSpliceUsageLoss:
         )
         assert loss.item() == 0.0
         assert metrics["n_marker_sites"] == 0
+
+    def test_tissue_contrast_min_conditions_one_condition_per_tissue(self):
+        """Adult-only panels (one condition per tissue) need min_conditions=1."""
+        from alphagenome_pytorch.extensions.finetuning.splice_losses import splice_usage_loss
+
+        B, S, max_sites, n_cond = 1, 64, 1, 2
+        usage_positions = torch.tensor([[12]])
+        usage_values = torch.tensor([[[[0.9], [0.1]]]])  # marker of tissue 0
+        usage_mask = torch.ones(B, max_sites, n_cond, 1, dtype=torch.bool)
+        groups = [[0], [1]]
+        predictions = torch.zeros(B, S, n_cond)  # predicts 0.5 everywhere
+
+        kw = dict(usage_loss_weights={"tissue_contrast": 1.0}, tissue_cond_groups=groups)
+        loss2, m2 = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask, **kw)
+        loss1, m1 = splice_usage_loss(predictions, usage_positions, usage_values, usage_mask,
+                                      tissue_contrast_min_conditions=1, **kw)
+        assert loss2.item() == 0.0 and m2["n_marker_sites"] == 0
+        assert m1["n_marker_sites"] == 1
+        # gap (0 - 0.8)^2 + rest overshoot (0.5 - 0.1)^2
+        assert loss1.item() == pytest.approx(0.8 ** 2 + 0.4 ** 2, rel=1e-4)
